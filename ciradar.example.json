@@ -23,5 +23,83 @@
   "github_api_url": "https://api.github.com",
   "public_base_url": "",
   "fingerprint_hmac_key": "",
-  "admin_token": ""
+  "admin_token": "",
+  "notifications": {
+    "enabled": false,
+    "channels": [
+      {
+        "name": "slack-ops",
+        "type": "slack",
+        "enabled": false,
+        "events": [
+          "analysis",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5,
+        "url": "https://hooks.slack.com/services/REPLACE/ME",
+        "mention": "<!channel>"
+      },
+      {
+        "name": "discord-ops",
+        "type": "discord",
+        "enabled": false,
+        "events": [
+          "analysis",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5,
+        "url": "https://discord.com/api/webhooks/REPLACE/ME",
+        "username": "CI Radar",
+        "mention": "@here"
+      },
+      {
+        "name": "telegram-ops",
+        "type": "telegram",
+        "enabled": false,
+        "events": [
+          "analysis",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5,
+        "bot_token": "REPLACE_WITH_BOT_TOKEN",
+        "chat_id": "REPLACE_WITH_CHAT_ID",
+        "message_thread_id": 0
+      },
+      {
+        "name": "custom-webhook",
+        "type": "webhook",
+        "enabled": false,
+        "events": [
+          "analysis",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5,
+        "url": "https://alerts.example.com/ciradar",
+        "hmac_secret": "REPLACE_WITH_LONG_RANDOM_SECRET",
+        "headers": {
+          "X-Environment": "production"
+        }
+      }
+    ]
+  }
 }
