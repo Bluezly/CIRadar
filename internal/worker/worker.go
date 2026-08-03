@@ -15,6 +15,7 @@ import (
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
 	"ciradar/internal/model"
+	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
 )
 
@@ -23,11 +24,12 @@ type Worker struct {
 	store    *db.Store
 	analyzer *analyzer.Analyzer
 	github   *gh.Client
+	notifier *notifications.Dispatcher
 	log      *slog.Logger
 }
 
-func New(cfg config.Config, store *db.Store, a *analyzer.Analyzer, github *gh.Client, log *slog.Logger) *Worker {
-	return &Worker{cfg: cfg, store: store, analyzer: a, github: github, log: log}
+func New(cfg config.Config, store *db.Store, a *analyzer.Analyzer, github *gh.Client, notifier *notifications.Dispatcher, log *slog.Logger) *Worker {
+	return &Worker{cfg: cfg, store: store, analyzer: a, github: github, notifier: notifier, log: log}
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -68,6 +70,15 @@ func (w *Worker) loop(ctx context.Context, id string) {
 
 func (w *Worker) process(ctx context.Context, job db.Job) error {
 	switch job.Type {
+	case "notify.event":
+		var ev model.NotificationEvent
+		if err := json.Unmarshal(job.Payload, &ev); err != nil {
+			return err
+		}
+		if w.notifier == nil {
+			return nil
+		}
+		return w.notifier.Dispatch(ctx, ev)
 	case "github.workflow_run":
 		var ev model.GitHubWorkflowRunEvent
 		if err := json.Unmarshal(job.Payload, &ev); err != nil {
@@ -137,8 +148,18 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		if err := w.store.RecordAnalysis(ctx, input, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 			return err
 		}
-		if err := w.maybeCreateIncident(ctx, result, corr); err != nil {
+		if w.notifier != nil && w.notifier.Enabled() {
+			_ = w.store.Enqueue(ctx, "notify.event", notifications.AnalysisEvent(input, result, w.cfg.PublicBaseURL), time.Now().UTC())
+		}
+		incident, created, err := w.maybeCreateIncident(ctx, result, corr)
+		if err != nil {
 			w.log.Warn("incident update failed", "error", err)
+		} else if incident != nil && w.notifier != nil && w.notifier.Enabled() {
+			kind := "incident_updated"
+			if created {
+				kind = "incident_opened"
+			}
+			_ = w.store.Enqueue(ctx, "notify.event", notifications.IncidentEvent(kind, *incident, w.cfg.PublicBaseURL), time.Now().UTC())
 		}
 		if err := w.publishCheck(ctx, ev, job, result, owner, repo); err != nil {
 			w.log.Warn("publish GitHub check failed", "error", err)
@@ -198,12 +219,12 @@ func (w *Worker) providerIncident(ctx context.Context, provider string) bool {
 	return false
 }
 
-func (w *Worker) maybeCreateIncident(ctx context.Context, r model.AnalysisResult, c db.CorrelationStats) error {
+func (w *Worker) maybeCreateIncident(ctx context.Context, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
 	repos := c.Repositories + 1
 	orgs := c.Organizations + 1
 	occ := c.Occurrences + 1
 	if !r.ProviderIncident && repos < w.cfg.IncidentRepoThreshold && orgs < w.cfg.IncidentOrgThreshold {
-		return nil
+		return nil, false, nil
 	}
 	severity := "minor"
 	if repos >= 10 || r.ProviderIncident {
@@ -214,7 +235,15 @@ func (w *Worker) maybeCreateIncident(ctx context.Context, r model.AnalysisResult
 	}
 	now := time.Now().UTC()
 	i := model.Incident{ID: "inc_" + r.Fingerprint, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: severity, RepositoryCount: repos, OrganizationCount: orgs, OccurrenceCount: occ, FirstSeenAt: now, LastSeenAt: now, Title: fmt.Sprintf("%s: %s", r.Provider, r.Summary)}
-	return w.store.UpsertIncident(ctx, i)
+	old, err := w.store.GetIncident(ctx, r.Fingerprint)
+	if err != nil {
+		return nil, false, err
+	}
+	created := old == nil || old.State != "open"
+	if err := w.store.UpsertIncident(ctx, i); err != nil {
+		return nil, false, err
+	}
+	return &i, created, nil
 }
 
 func (w *Worker) publishCheck(ctx context.Context, ev model.GitHubWorkflowRunEvent, job gh.Job, r model.AnalysisResult, owner, repo string) error {
