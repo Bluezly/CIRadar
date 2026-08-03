@@ -1,0 +1,12 @@
+{
+  "id": "internal-registry-timeout",
+  "category": "DEPENDENCY_REGISTRY",
+  "provider": "company-registry",
+  "operation": "package-download",
+  "error_family": "internal-registry-timeout",
+  "summary": "The internal package registry timed out",
+  "recommendation": "Check the internal registry incident channel before changing dependency versions.",
+  "weight": 55,
+  "patterns": ["packages\\.example\\.com.*(?:timeout|502|503|504)"],
+  "excludes": ["authentication failed"]
+}
