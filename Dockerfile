@@ -1,7 +1,7 @@
 FROM golang:1.26.5-alpine AS build
 WORKDIR /src
 COPY . .
-ARG VERSION=0.1.0-beta.1
+ARG VERSION=0.1.0-beta.3
 ARG COMMIT=container
 ARG BUILD_DATE=unknown
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
