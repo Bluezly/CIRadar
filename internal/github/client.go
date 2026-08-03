@@ -1,0 +1,320 @@
+package github
+
+import (
+	"bytes"
+	"context"
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Client struct {
+	appID      int64
+	privateKey *rsa.PrivateKey
+	baseURL    string
+	http       *http.Client
+	mu         sync.Mutex
+	tokens     map[int64]cachedToken
+}
+
+type cachedToken struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
+type Job struct {
+	ID              int64     `json:"id"`
+	Name            string    `json:"name"`
+	Status          string    `json:"status"`
+	Conclusion      string    `json:"conclusion"`
+	RunnerName      string    `json:"runner_name"`
+	RunnerGroupName string    `json:"runner_group_name"`
+	Labels          []string  `json:"labels"`
+	StartedAt       time.Time `json:"started_at"`
+	CompletedAt     time.Time `json:"completed_at"`
+	Steps           []struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		Number     int    `json:"number"`
+	} `json:"steps"`
+}
+
+type jobsResponse struct {
+	TotalCount int   `json:"total_count"`
+	Jobs       []Job `json:"jobs"`
+}
+
+type installationTokenResponse struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type CheckOutput struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+	Text    string `json:"text,omitempty"`
+}
+
+type CheckRunRequest struct {
+	Name       string      `json:"name"`
+	HeadSHA    string      `json:"head_sha"`
+	Status     string      `json:"status"`
+	Conclusion string      `json:"conclusion"`
+	DetailsURL string      `json:"details_url,omitempty"`
+	Output     CheckOutput `json:"output"`
+}
+
+func New(appID int64, privateKeyPath, baseURL string) (*Client, error) {
+	if appID <= 0 {
+		return nil, errors.New("GitHub App ID is required")
+	}
+	b, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read GitHub private key: %w", err)
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, errors.New("invalid PEM private key")
+	}
+	var key *rsa.PrivateKey
+	if k, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		key = k
+	} else {
+		parsed, err2 := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err2 != nil {
+			return nil, fmt.Errorf("parse private key: %v / %v", err, err2)
+		}
+		var ok bool
+		key, ok = parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, errors.New("private key is not RSA")
+		}
+	}
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	return &Client{appID: appID, privateKey: key, baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 60 * time.Second}, tokens: map[int64]cachedToken{}}, nil
+}
+
+func (c *Client) AppJWT() (string, error) {
+	now := time.Now().UTC()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	claims := fmt.Sprintf(`{"iat":%d,"exp":%d,"iss":"%d"}`, now.Add(-30*time.Second).Unix(), now.Add(9*time.Minute).Unix(), c.appID)
+	payload := base64.RawURLEncoding.EncodeToString([]byte(claims))
+	unsigned := header + "." + payload
+	h := sha256.Sum256([]byte(unsigned))
+	sig, err := rsa.SignPKCS1v15(nil, c.privateKey, crypto.SHA256, h[:])
+	if err != nil {
+		return "", err
+	}
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+func (c *Client) InstallationToken(ctx context.Context, installationID int64) (string, error) {
+	c.mu.Lock()
+	cached, ok := c.tokens[installationID]
+	if ok && time.Until(cached.ExpiresAt) > 5*time.Minute {
+		c.mu.Unlock()
+		return cached.Token, nil
+	}
+	c.mu.Unlock()
+	jwt, err := c.AppJWT()
+	if err != nil {
+		return "", err
+	}
+	var out installationTokenResponse
+	if err := c.doJSON(ctx, "POST", fmt.Sprintf("/app/installations/%d/access_tokens", installationID), jwt, nil, &out); err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", errors.New("GitHub returned empty installation token")
+	}
+	c.mu.Lock()
+	c.tokens[installationID] = cachedToken{Token: out.Token, ExpiresAt: out.ExpiresAt}
+	c.mu.Unlock()
+	return out.Token, nil
+}
+
+func (c *Client) ListJobs(ctx context.Context, installationID int64, owner, repo string, runID int64) ([]Job, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+	var all []Job
+	for page := 1; page <= 20; page++ {
+		var out jobsResponse
+		path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), runID, page)
+		if err := c.doJSON(ctx, "GET", path, token, nil, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.Jobs...)
+		if len(out.Jobs) < 100 {
+			break
+		}
+	}
+	return all, nil
+}
+
+func (c *Client) DownloadJobLog(ctx context.Context, installationID int64, owner, repo string, jobID int64, maxBytes int64) (string, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return "", err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/actions/jobs/%d/logs", url.PathEscape(owner), url.PathEscape(repo), jobID)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+path, nil)
+	if err != nil {
+		return "", err
+	}
+	setHeaders(req, token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return "", fmt.Errorf("GitHub logs API %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	if maxBytes <= 0 {
+		maxBytes = 32 << 20
+	}
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(b)) > maxBytes {
+		return "", fmt.Errorf("job log exceeds %d bytes", maxBytes)
+	}
+	return string(b), nil
+}
+
+func (c *Client) CreateCheckRun(ctx context.Context, installationID int64, owner, repo string, check CheckRunRequest) error {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/check-runs", url.PathEscape(owner), url.PathEscape(repo))
+	return c.doJSON(ctx, "POST", path, token, check, nil)
+}
+
+func (c *Client) RerunFailedJobs(ctx context.Context, installationID int64, owner, repo string, runID int64) error {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/rerun-failed-jobs", url.PathEscape(owner), url.PathEscape(repo), runID)
+	return c.doJSON(ctx, "POST", path, token, map[string]any{}, nil)
+}
+
+func (c *Client) ListPullRequestFiles(ctx context.Context, installationID int64, owner, repo string, number int) ([]string, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for page := 1; page <= 20; page++ {
+		var out []struct {
+			Filename string `json:"filename"`
+		}
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)
+		if err := c.doJSON(ctx, "GET", path, token, nil, &out); err != nil {
+			return nil, err
+		}
+		for _, x := range out {
+			names = append(names, x.Filename)
+		}
+		if len(out) < 100 {
+			break
+		}
+	}
+	return names, nil
+}
+
+func (c *Client) doJSON(ctx context.Context, method, path, token string, body any, out any) error {
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	if err != nil {
+		return err
+	}
+	setHeaders(req, token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		return fmt.Errorf("GitHub API %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(b)))
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil && err != io.EOF {
+		return err
+	}
+	return nil
+}
+
+func setHeaders(req *http.Request, token string) {
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2026-03-10")
+	req.Header.Set("User-Agent", "CI-Radar/0.1")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+type workflowRunsResponse struct {
+	TotalCount   int `json:"total_count"`
+	WorkflowRuns []struct {
+		ID         int64  `json:"id"`
+		HeadSHA    string `json:"head_sha"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	} `json:"workflow_runs"`
+}
+
+func (c *Client) HasPreviousSuccessfulRun(ctx context.Context, installationID int64, owner, repo, headSHA string, excludeRunID int64) (bool, error) {
+	if strings.TrimSpace(headSHA) == "" {
+		return false, nil
+	}
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return false, err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/actions/runs?head_sha=%s&status=success&per_page=20", url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(headSHA))
+	var out workflowRunsResponse
+	if err := c.doJSON(ctx, "GET", path, token, nil, &out); err != nil {
+		return false, err
+	}
+	for _, run := range out.WorkflowRuns {
+		if run.ID != excludeRunID && run.HeadSHA == headSHA && run.Conclusion == "success" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
