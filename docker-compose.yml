@@ -1,0 +1,11 @@
+services:
+  ciradar:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ./ciradar.json:/app/ciradar.json:ro
+      - ./rules:/app/rules:ro
+      - ./data:/app/.ciradar
+      - ./github-app.pem:/run/secrets/github-app.pem:ro

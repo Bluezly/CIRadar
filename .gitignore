@@ -1,0 +1,9 @@
+.ciradar/
+ciradar.json
+ciradar-report.json
+*.pem
+*.key
+*.log
+/dist/
+*.exe
+ciradar-linux-*
