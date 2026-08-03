@@ -1,0 +1,34 @@
+name: CI Radar CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.5'
+          cache: false
+      - name: Format check
+        run: test -z "$(gofmt -l .)"
+      - name: Test
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build Windows
+        env:
+          CGO_ENABLED: '0'
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -buildvcs=false -trimpath -o CIRadar-Windows-x64.exe ./cmd/ciradar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciradar-windows-x64
+          path: CIRadar-Windows-x64.exe
