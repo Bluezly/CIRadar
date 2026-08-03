@@ -21,6 +21,7 @@ type RuleDefinition struct {
 	Summary        string   `json:"summary"`
 	Recommendation string   `json:"recommendation"`
 	Weight         int      `json:"weight"`
+	SignalGroup    string   `json:"signal_group,omitempty"`
 	Patterns       []string `json:"patterns"`
 	Excludes       []string `json:"excludes,omitempty"`
 }
@@ -110,6 +111,7 @@ func compileRuleDefinition(def RuleDefinition) (Rule, error) {
 		Summary:        defaultString(def.Summary, "A custom CI Radar rule matched"),
 		Recommendation: defaultString(def.Recommendation, "Review the custom rule guidance and the redacted failure excerpt."),
 		Weight:         def.Weight,
+		SignalGroup:    strings.TrimSpace(def.SignalGroup),
 		Patterns:       patterns,
 		Excludes:       excludes,
 	}, nil
@@ -120,7 +122,7 @@ func validCategory(c model.Category) bool {
 	case model.CategoryCodeFailure, model.CategoryTestFlake, model.CategoryDependencyRegistry,
 		model.CategoryNetworkFailure, model.CategoryRunnerFailure, model.CategoryRunnerImageDrift,
 		model.CategoryCacheFailure, model.CategoryResourceExhaustion, model.CategoryProviderIncident,
-		model.CategoryUnknown:
+		model.CategoryConcurrencyConflict, model.CategoryToolchainFailure, model.CategoryUnknown:
 		return true
 	default:
 		return false

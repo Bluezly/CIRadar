@@ -65,9 +65,19 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	_, _ = mac.Write([]byte(in.Repository + "\x00" + norm))
 	privateFP := hex.EncodeToString(mac.Sum(nil)[:16])
 
-	score := 5
+	score := 0
 	var evidence []model.Evidence
+	seenGroups := make(map[string]struct{})
 	for _, rule := range matched {
+		group := strings.TrimSpace(rule.SignalGroup)
+		if group == "" {
+			group = rule.ID
+		}
+		if _, duplicate := seenGroups[group]; duplicate {
+			evidence = append(evidence, model.Evidence{Kind: "corroboration", Description: "Corroborating rule " + rule.ID + ": " + rule.Summary, Weight: 0})
+			continue
+		}
+		seenGroups[group] = struct{}{}
 		score += rule.Weight
 		evidence = append(evidence, model.Evidence{Kind: "rule", Description: "Matched rule " + rule.ID + ": " + rule.Summary, Weight: rule.Weight})
 	}
