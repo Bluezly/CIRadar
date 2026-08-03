@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$Version = "0.1.0-beta.3"
+$Version = "0.2.0-beta.4"
 $BuildDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 $env:CGO_ENABLED = "0"

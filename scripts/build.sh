@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-VERSION="0.1.0-beta.3"
+VERSION="0.2.0-beta.4"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p dist
 CGO_ENABLED=0 go test ./...
