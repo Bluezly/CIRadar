@@ -18,6 +18,7 @@ import (
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
 	"ciradar/internal/model"
+	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
 	"ciradar/internal/version"
 )
@@ -42,6 +43,7 @@ func New(cfg config.Config, store *db.Store, a *analyzer.Analyzer, log *slog.Log
 	mux.HandleFunc("GET /api/v1/analyses/{id}", s.auth(s.analysis))
 	mux.HandleFunc("POST /api/v1/analyze", s.auth(s.analyze))
 	mux.HandleFunc("POST /api/v1/baselines", s.auth(s.baseline))
+	mux.HandleFunc("GET /api/v1/notifications/deliveries", s.auth(s.notificationDeliveries))
 	mux.HandleFunc("POST /webhooks/github", s.githubWebhook)
 	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: logging(log, securityHeaders(mux)), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 	return s
@@ -84,7 +86,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providersList, _ := s.store.ListProviderStatuses(r.Context())
-	writeJSON(w, 200, map[string]any{"version": version.Version, "commit": version.Commit, "github_configured": s.cfg.GitHubConfigured(), "automatic_retry_enabled": s.cfg.AutomaticRetryEnabled, "cross_repository_sharing": s.cfg.CrossRepositorySharing, "store_raw_logs": s.cfg.StoreRawLogs, "stats": st, "providers": providersList})
+	writeJSON(w, 200, map[string]any{"version": version.Version, "commit": version.Commit, "github_configured": s.cfg.GitHubConfigured(), "automatic_retry_enabled": s.cfg.AutomaticRetryEnabled, "cross_repository_sharing": s.cfg.CrossRepositorySharing, "store_raw_logs": s.cfg.StoreRawLogs, "notifications_enabled": s.cfg.Notifications.Enabled, "notification_channels": len(s.cfg.Notifications.Channels), "stats": st, "providers": providersList})
 }
 func (s *Server) incidents(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -125,6 +127,16 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, item)
 }
 
+func (s *Server) notificationDeliveries(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.store.ListNotificationDeliveries(r.Context(), limit)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"deliveries": items})
+}
+
 func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	body := http.MaxBytesReader(w, r.Body, s.cfg.MaxLogBytes+1<<20)
 	defer body.Close()
@@ -153,7 +165,17 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	_ = s.maybeIncident(r.Context(), result, corr)
+	if s.cfg.Notifications.Enabled {
+		_ = s.store.Enqueue(r.Context(), "notify.event", notifications.AnalysisEvent(in, result, s.cfg.PublicBaseURL), time.Now().UTC())
+	}
+	incident, created, _ := s.maybeIncident(r.Context(), result, corr)
+	if incident != nil && s.cfg.Notifications.Enabled {
+		kind := "incident_updated"
+		if created {
+			kind = "incident_opened"
+		}
+		_ = s.store.Enqueue(r.Context(), "notify.event", notifications.IncidentEvent(kind, *incident, s.cfg.PublicBaseURL), time.Now().UTC())
+	}
 	writeJSON(w, 200, result)
 }
 
@@ -254,12 +276,12 @@ func (s *Server) providerIncident(ctx context.Context, provider string) bool {
 	}
 	return false
 }
-func (s *Server) maybeIncident(ctx context.Context, r model.AnalysisResult, c db.CorrelationStats) error {
+func (s *Server) maybeIncident(ctx context.Context, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
 	repos := c.Repositories + 1
 	orgs := c.Organizations + 1
 	occ := c.Occurrences + 1
 	if !r.ProviderIncident && repos < s.cfg.IncidentRepoThreshold && orgs < s.cfg.IncidentOrgThreshold {
-		return nil
+		return nil, false, nil
 	}
 	severity := "minor"
 	if repos >= 10 || r.ProviderIncident {
@@ -269,7 +291,16 @@ func (s *Server) maybeIncident(ctx context.Context, r model.AnalysisResult, c db
 		severity = "critical"
 	}
 	now := time.Now().UTC()
-	return s.store.UpsertIncident(ctx, model.Incident{ID: "inc_" + r.Fingerprint, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: severity, RepositoryCount: repos, OrganizationCount: orgs, OccurrenceCount: occ, FirstSeenAt: now, LastSeenAt: now, Title: fmt.Sprintf("%s: %s", r.Provider, r.Summary)})
+	i := model.Incident{ID: "inc_" + r.Fingerprint, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: severity, RepositoryCount: repos, OrganizationCount: orgs, OccurrenceCount: occ, FirstSeenAt: now, LastSeenAt: now, Title: fmt.Sprintf("%s: %s", r.Provider, r.Summary)}
+	old, err := s.store.GetIncident(ctx, r.Fingerprint)
+	if err != nil {
+		return nil, false, err
+	}
+	created := old == nil || old.State != "open"
+	if err := s.store.UpsertIncident(ctx, i); err != nil {
+		return nil, false, err
+	}
+	return &i, created, nil
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
