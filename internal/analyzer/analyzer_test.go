@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"strings"
 	"testing"
 
 	"ciradar/internal/model"
@@ -40,5 +41,13 @@ func TestEnvironmentExtractionWithGitHubTimestamps(t *testing.T) {
 	env := ExtractEnvironment(log)
 	if env.RunnerOS != "ubuntu-24.04" || env.RunnerImage != "20260727.1" || env.ToolVersions["node"] != "22.17.0" {
 		t.Fatalf("env=%+v", env)
+	}
+}
+
+func TestRedactionEnvironmentSecrets(t *testing.T) {
+	input := "AWS_SECRET_ACCESS_KEY=abcdefghijklmnopqrstuvwxyz1234567890ABCD\nMY_API_TOKEN=top-secret-value\n"
+	redacted := NewRedactor().Redact(input)
+	if strings.Contains(redacted, "abcdefghijklmnopqrstuvwxyz1234567890ABCD") || strings.Contains(redacted, "top-secret-value") {
+		t.Fatalf("environment secret was not redacted: %s", redacted)
 	}
 }
