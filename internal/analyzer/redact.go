@@ -18,6 +18,7 @@ func NewRedactor() *Redactor {
 	return &Redactor{patterns: []redactPattern{
 		{regexp.MustCompile(`(?i)(authorization:\s*(?:bearer|token)\s+)[^\s]+`), `${1}[REDACTED]`},
 		{regexp.MustCompile(`(?i)((?:password|passwd|pwd|secret|token|api[_-]?key|client[_-]?secret)\s*[=:]\s*)[^\s,;]+`), `${1}[REDACTED]`},
+		{regexp.MustCompile(`(?i)(\b[A-Z][A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*[=:]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)`), `${1}[REDACTED]`},
 		{regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9_]{20,}\b`), `[REDACTED_GITHUB_TOKEN]`},
 		{regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{20,}\b`), `[REDACTED_GITHUB_TOKEN]`},
 		{regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`), `[REDACTED_AWS_KEY]`},
