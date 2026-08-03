@@ -5,16 +5,18 @@ import "time"
 type Category string
 
 const (
-	CategoryCodeFailure        Category = "CODE_FAILURE"
-	CategoryTestFlake          Category = "TEST_FLAKE"
-	CategoryDependencyRegistry Category = "DEPENDENCY_REGISTRY"
-	CategoryNetworkFailure     Category = "NETWORK_FAILURE"
-	CategoryRunnerFailure      Category = "RUNNER_FAILURE"
-	CategoryRunnerImageDrift   Category = "RUNNER_IMAGE_DRIFT"
-	CategoryCacheFailure       Category = "CACHE_FAILURE"
-	CategoryResourceExhaustion Category = "RESOURCE_EXHAUSTION"
-	CategoryProviderIncident   Category = "PROVIDER_INCIDENT"
-	CategoryUnknown            Category = "UNKNOWN"
+	CategoryCodeFailure         Category = "CODE_FAILURE"
+	CategoryTestFlake           Category = "TEST_FLAKE"
+	CategoryDependencyRegistry  Category = "DEPENDENCY_REGISTRY"
+	CategoryNetworkFailure      Category = "NETWORK_FAILURE"
+	CategoryRunnerFailure       Category = "RUNNER_FAILURE"
+	CategoryRunnerImageDrift    Category = "RUNNER_IMAGE_DRIFT"
+	CategoryCacheFailure        Category = "CACHE_FAILURE"
+	CategoryResourceExhaustion  Category = "RESOURCE_EXHAUSTION"
+	CategoryProviderIncident    Category = "PROVIDER_INCIDENT"
+	CategoryConcurrencyConflict Category = "CONCURRENCY_CONFLICT"
+	CategoryToolchainFailure    Category = "TOOLCHAIN_FAILURE"
+	CategoryUnknown             Category = "UNKNOWN"
 )
 
 type Confidence string
