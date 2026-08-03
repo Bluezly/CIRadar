@@ -135,3 +135,45 @@ type GitHubWorkflowRunEvent struct {
 		} `json:"pull_requests"`
 	} `json:"workflow_run"`
 }
+
+type NotificationEvent struct {
+	ID             string     `json:"id"`
+	Type           string     `json:"type"`
+	DedupeKey      string     `json:"dedupe_key"`
+	OccurredAt     time.Time  `json:"occurred_at"`
+	Severity       string     `json:"severity,omitempty"`
+	Title          string     `json:"title"`
+	Summary        string     `json:"summary"`
+	Repository     string     `json:"repository,omitempty"`
+	Organization   string     `json:"organization,omitempty"`
+	Workflow       string     `json:"workflow,omitempty"`
+	Job            string     `json:"job,omitempty"`
+	RunID          int64      `json:"run_id,omitempty"`
+	CommitSHA      string     `json:"commit_sha,omitempty"`
+	DetailsURL     string     `json:"details_url,omitempty"`
+	Category       Category   `json:"category,omitempty"`
+	Confidence     Confidence `json:"confidence,omitempty"`
+	Score          int        `json:"score,omitempty"`
+	Provider       string     `json:"provider,omitempty"`
+	Operation      string     `json:"operation,omitempty"`
+	Fingerprint    string     `json:"fingerprint,omitempty"`
+	Recommendation string     `json:"recommendation,omitempty"`
+	Evidence       []Evidence `json:"evidence,omitempty"`
+	Incident       *Incident  `json:"incident,omitempty"`
+}
+
+type NotificationDelivery struct {
+	ID               string    `json:"id"`
+	EventID          string    `json:"event_id"`
+	DedupeKey        string    `json:"dedupe_key"`
+	Channel          string    `json:"channel"`
+	ChannelType      string    `json:"channel_type"`
+	Status           string    `json:"status"`
+	Attempts         int       `json:"attempts"`
+	HTTPStatus       int       `json:"http_status,omitempty"`
+	LastError        string    `json:"last_error,omitempty"`
+	SuppressedReason string    `json:"suppressed_reason,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	SentAt           time.Time `json:"sent_at,omitempty"`
+}
