@@ -23,15 +23,17 @@ type Store struct {
 }
 
 type state struct {
-	Version          int                             `json:"version"`
-	NextJobID        int64                           `json:"next_job_id"`
-	Deliveries       map[string]deliveryRecord       `json:"deliveries"`
-	Jobs             []jobRecord                     `json:"jobs"`
-	Analyses         map[string]analysisRecord       `json:"analyses"`
-	AnalysisOrder    []string                        `json:"analysis_order"`
-	Environments     []environmentRecord             `json:"environments"`
-	Incidents        map[string]model.Incident       `json:"incidents"`
-	ProviderStatuses map[string]model.ProviderStatus `json:"provider_statuses"`
+	Version                int                                   `json:"version"`
+	NextJobID              int64                                 `json:"next_job_id"`
+	Deliveries             map[string]deliveryRecord             `json:"deliveries"`
+	Jobs                   []jobRecord                           `json:"jobs"`
+	Analyses               map[string]analysisRecord             `json:"analyses"`
+	AnalysisOrder          []string                              `json:"analysis_order"`
+	Environments           []environmentRecord                   `json:"environments"`
+	Incidents              map[string]model.Incident             `json:"incidents"`
+	ProviderStatuses       map[string]model.ProviderStatus       `json:"provider_statuses"`
+	NotificationDeliveries map[string]model.NotificationDelivery `json:"notification_deliveries"`
+	NotificationOrder      []string                              `json:"notification_order"`
 }
 
 type deliveryRecord struct {
@@ -79,11 +81,13 @@ type CorrelationStats struct {
 	Occurrences   int
 }
 type Stats struct {
-	Analyses      int `json:"analyses"`
-	Incidents     int `json:"incidents"`
-	OpenIncidents int `json:"open_incidents"`
-	QueuedJobs    int `json:"queued_jobs"`
-	Repositories  int `json:"repositories"`
+	Analyses               int `json:"analyses"`
+	Incidents              int `json:"incidents"`
+	OpenIncidents          int `json:"open_incidents"`
+	QueuedJobs             int `json:"queued_jobs"`
+	Repositories           int `json:"repositories"`
+	NotificationDeliveries int `json:"notification_deliveries"`
+	NotificationFailures   int `json:"notification_failures"`
 }
 
 func Open(path string) (*Store, error) {
@@ -113,11 +117,11 @@ func Open(path string) (*Store, error) {
 }
 
 func newState() state {
-	return state{Version: 1, NextJobID: 1, Deliveries: map[string]deliveryRecord{}, Analyses: map[string]analysisRecord{}, Incidents: map[string]model.Incident{}, ProviderStatuses: map[string]model.ProviderStatus{}}
+	return state{Version: 2, NextJobID: 1, Deliveries: map[string]deliveryRecord{}, Analyses: map[string]analysisRecord{}, Incidents: map[string]model.Incident{}, ProviderStatuses: map[string]model.ProviderStatus{}, NotificationDeliveries: map[string]model.NotificationDelivery{}}
 }
 func (s *Store) normalize() {
-	if s.state.Version == 0 {
-		s.state.Version = 1
+	if s.state.Version < 2 {
+		s.state.Version = 2
 	}
 	if s.state.NextJobID < 1 {
 		s.state.NextJobID = 1
@@ -133,6 +137,9 @@ func (s *Store) normalize() {
 	}
 	if s.state.ProviderStatuses == nil {
 		s.state.ProviderStatuses = map[string]model.ProviderStatus{}
+	}
+	if s.state.NotificationDeliveries == nil {
+		s.state.NotificationDeliveries = map[string]model.NotificationDelivery{}
 	}
 }
 func (s *Store) Close() error {
@@ -268,7 +275,7 @@ func (s *Store) FailJob(ctx context.Context, id int64, attempts int, errText str
 		j := &s.state.Jobs[i]
 		if j.ID == id {
 			j.Status = "queued"
-			if attempts >= 5 {
+			if attempts >= 8 {
 				j.Status = "failed"
 			}
 			j.LastError = trim(errText, 4000)
@@ -427,7 +434,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := Stats{Analyses: len(s.state.Analyses), Incidents: len(s.state.Incidents)}
+	st := Stats{Analyses: len(s.state.Analyses), Incidents: len(s.state.Incidents), NotificationDeliveries: len(s.state.NotificationDeliveries)}
 	repos := map[string]struct{}{}
 	for _, a := range s.state.Analyses {
 		if a.Input.Repository != "" {
@@ -438,6 +445,11 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	for _, i := range s.state.Incidents {
 		if i.State == "open" {
 			st.OpenIncidents++
+		}
+	}
+	for _, d := range s.state.NotificationDeliveries {
+		if d.Status == "failed" {
+			st.NotificationFailures++
 		}
 	}
 	for _, j := range s.state.Jobs {
@@ -533,4 +545,141 @@ func (s *Store) ResolveStaleIncidents(ctx context.Context, cutoff time.Time) (in
 		return resolved, s.persistLocked()
 	}
 	return 0, nil
+}
+
+func (s *Store) GetIncident(ctx context.Context, fingerprint string) (*model.Incident, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i, ok := s.state.Incidents[fingerprint]
+	if !ok {
+		return nil, nil
+	}
+	out := i
+	return &out, nil
+}
+
+func (s *Store) RecordNotificationDelivery(ctx context.Context, d model.NotificationDelivery) error {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d.ID == "" {
+		d.ID = d.EventID + "|" + d.Channel
+	}
+	if old, ok := s.state.NotificationDeliveries[d.ID]; ok {
+		if d.CreatedAt.IsZero() {
+			d.CreatedAt = old.CreatedAt
+		}
+	} else {
+		s.state.NotificationOrder = append(s.state.NotificationOrder, d.ID)
+	}
+	s.state.NotificationDeliveries[d.ID] = d
+	return s.persistLocked()
+}
+
+func (s *Store) GetNotificationDelivery(ctx context.Context, eventID, channel string) (*model.NotificationDelivery, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.state.NotificationDeliveries[eventID+"|"+channel]
+	if !ok {
+		return nil, nil
+	}
+	out := d
+	return &out, nil
+}
+
+func (s *Store) RecentlySentNotification(ctx context.Context, channel, dedupeKey string, since time.Time) (bool, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range s.state.NotificationDeliveries {
+		if d.Channel == channel && d.DedupeKey == dedupeKey && d.Status == "sent" && !d.SentAt.Before(since) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) ListNotificationDeliveries(ctx context.Context, limit int) ([]model.NotificationDelivery, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	out := make([]model.NotificationDelivery, 0, limit)
+	for i := len(s.state.NotificationOrder) - 1; i >= 0 && len(out) < limit; i-- {
+		if d, ok := s.state.NotificationDeliveries[s.state.NotificationOrder[i]]; ok {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// BeginNotificationDelivery atomically reserves a channel delivery and enforces
+// event idempotency plus fingerprint cooldown across concurrent workers.
+func (s *Store) BeginNotificationDelivery(ctx context.Context, eventID, channel, channelType, dedupeKey string, cooldown time.Duration, maxAttempts int) (string, model.NotificationDelivery, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	id := eventID + "|" + channel
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	if old, ok := s.state.NotificationDeliveries[id]; ok {
+		switch old.Status {
+		case "sent", "suppressed", "failed":
+			return "skip", old, nil
+		case "sending":
+			if old.UpdatedAt.After(now.Add(-2 * time.Minute)) {
+				return "skip", old, nil
+			}
+		}
+		if old.Attempts >= maxAttempts {
+			old.Status = "failed"
+			old.UpdatedAt = now
+			s.state.NotificationDeliveries[id] = old
+			return "skip", old, s.persistLocked()
+		}
+	}
+	if cooldown > 0 && dedupeKey != "" {
+		cut := now.Add(-cooldown)
+		for _, existing := range s.state.NotificationDeliveries {
+			if existing.Channel != channel || existing.DedupeKey != dedupeKey {
+				continue
+			}
+			reason := ""
+			if existing.Status == "sent" && !existing.SentAt.Before(cut) {
+				reason = "cooldown"
+			}
+			if (existing.Status == "sending" || existing.Status == "retrying") && existing.UpdatedAt.After(now.Add(-2*time.Minute)) {
+				reason = "in_flight"
+			}
+			if reason != "" {
+				d := model.NotificationDelivery{ID: id, EventID: eventID, DedupeKey: dedupeKey, Channel: channel, ChannelType: channelType, Status: "suppressed", SuppressedReason: reason, CreatedAt: now, UpdatedAt: now}
+				if _, exists := s.state.NotificationDeliveries[id]; !exists {
+					s.state.NotificationOrder = append(s.state.NotificationOrder, id)
+				}
+				s.state.NotificationDeliveries[id] = d
+				return "suppressed", d, s.persistLocked()
+			}
+		}
+	}
+	d, exists := s.state.NotificationDeliveries[id]
+	if !exists {
+		d = model.NotificationDelivery{ID: id, EventID: eventID, DedupeKey: dedupeKey, Channel: channel, ChannelType: channelType, CreatedAt: now}
+		s.state.NotificationOrder = append(s.state.NotificationOrder, id)
+	}
+	d.Status = "sending"
+	d.Attempts++
+	d.UpdatedAt = now
+	d.LastError = ""
+	d.HTTPStatus = 0
+	s.state.NotificationDeliveries[id] = d
+	if err := s.persistLocked(); err != nil {
+		return "", model.NotificationDelivery{}, err
+	}
+	return "send", d, nil
 }
