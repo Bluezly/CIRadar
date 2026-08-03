@@ -21,6 +21,7 @@ import (
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
 	"ciradar/internal/model"
+	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
 	"ciradar/internal/server"
 	"ciradar/internal/version"
@@ -56,6 +57,8 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "rules":
 		err = cmdRules(os.Args[2:])
+	case "notify":
+		err = cmdNotify(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Printf("CI Radar %s (%s, %s) %s/%s\n", version.Version, version.Commit, version.BuildDate, runtime.GOOS, runtime.GOARCH)
 		return
@@ -87,6 +90,8 @@ Usage:
   ciradar serve [--config ciradar.json]
   ciradar doctor [--config ciradar.json]
   ciradar rules
+  ciradar notify test [--config ciradar.json] [--channel NAME]
+  ciradar notify list [--config ciradar.json]
   ciradar version
 
 Fast local test:
@@ -148,10 +153,9 @@ func cmdServe(args []string) error {
 		poller := providers.NewPoller(store, log)
 		go poller.Run(ctx, cfg.ProviderPollInterval)
 	}
-	if githubClient != nil {
-		w := worker.New(cfg, store, a, githubClient, log)
-		go w.Run(ctx)
-	}
+	notifier := notifications.New(cfg.Notifications, store, log)
+	w := worker.New(cfg, store, a, githubClient, notifier, log)
+	go w.Run(ctx)
 	go maintenanceLoop(ctx, store, cfg, log)
 	srv := server.New(cfg, store, a, log)
 	return srv.Run(ctx)
@@ -200,6 +204,12 @@ func cmdAnalyze(args []string) error {
 	result := a.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: providerIncident, PreviousEnvironment: prev})
 	if err := store.RecordAnalysis(context.Background(), in, result, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
 		return err
+	}
+	if cfg.Notifications.Enabled {
+		n := notifications.New(cfg.Notifications, store, newLogger(cfg.LogLevel))
+		if err := n.Dispatch(context.Background(), notifications.AnalysisEvent(in, result, cfg.PublicBaseURL)); err != nil {
+			fmt.Fprintln(os.Stderr, "Notification warning:", err)
+		}
 	}
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
@@ -468,6 +478,10 @@ func cmdDoctor(args []string) error {
 	fmt.Println("  Raw log storage:", cfg.StoreRawLogs, "(recommended: false)")
 	fmt.Println("  Cross-repository sharing:", cfg.CrossRepositorySharing)
 	fmt.Println("  Automatic retry:", cfg.AutomaticRetryEnabled)
+	fmt.Println("  Notifications enabled:", cfg.Notifications.Enabled)
+	for _, ch := range cfg.Notifications.Channels {
+		fmt.Printf("    - %s (%s): enabled=%v events=%d min_score=%d\n", ch.Name, ch.Type, ch.Enabled, len(ch.Events), ch.MinimumScore)
+	}
 	extra, err := analyzer.LoadCustomRules(cfg.RulesDirectory)
 	if err != nil {
 		fmt.Println("  Custom rules: FAILED -", err)
@@ -587,6 +601,91 @@ func providerIncident(ctx context.Context, store *db.Store, provider string) boo
 	}
 	return false
 }
+func cmdNotify(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar notify test|list")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("notify "+sub, flag.ContinueOnError)
+	configPath := fs.String("config", "ciradar.json", "configuration file path")
+	channel := fs.String("channel", "", "send only to this channel")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch sub {
+	case "test":
+		if *channel != "" {
+			found := false
+			for i := range cfg.Notifications.Channels {
+				cfg.Notifications.Channels[i].Enabled = cfg.Notifications.Channels[i].Name == *channel
+				if cfg.Notifications.Channels[i].Enabled {
+					found = true
+				}
+			}
+			if !found {
+				return fmt.Errorf("notification channel %q not found", *channel)
+			}
+		}
+		cfg.Notifications.Enabled = true
+		n := notifications.New(cfg.Notifications, store, newLogger(cfg.LogLevel))
+		ev := notifications.TestEvent()
+		if err := n.Dispatch(context.Background(), ev); err != nil {
+			return err
+		}
+		deliveries, err := store.ListNotificationDeliveries(context.Background(), 100)
+		if err != nil {
+			return err
+		}
+		sent := 0
+		var failures []string
+		for _, d := range deliveries {
+			if d.EventID != ev.ID {
+				continue
+			}
+			if d.Status == "sent" {
+				sent++
+			} else if d.Status == "failed" {
+				failures = append(failures, d.Channel+": "+d.LastError)
+			}
+		}
+		if sent == 0 {
+			if len(failures) > 0 {
+				return fmt.Errorf("notification test failed: %s", strings.Join(failures, "; "))
+			}
+			return errors.New("notification test did not match any enabled channel")
+		}
+		if len(failures) > 0 {
+			return fmt.Errorf("sent to %d channel(s), but some failed: %s", sent, strings.Join(failures, "; "))
+		}
+		fmt.Printf("Notification test sent successfully to %d channel(s).\n", sent)
+		return nil
+	case "list":
+		items, err := store.ListNotificationDeliveries(context.Background(), 100)
+		if err != nil {
+			return err
+		}
+		if len(items) == 0 {
+			fmt.Println("No notification deliveries found.")
+			return nil
+		}
+		for _, d := range items {
+			fmt.Printf("%-12s %-12s attempts=%d http=%d %s\n", d.Status, d.Channel, d.Attempts, d.HTTPStatus, d.LastError)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown notify command %q", sub)
+	}
+}
+
 func maintenanceLoop(ctx context.Context, store *db.Store, cfg config.Config, log *slog.Logger) {
 	incidentTicker := time.NewTicker(time.Minute)
 	cleanupTicker := time.NewTicker(12 * time.Hour)
@@ -597,11 +696,20 @@ func maintenanceLoop(ctx context.Context, store *db.Store, cfg config.Config, lo
 		case <-ctx.Done():
 			return
 		case <-incidentTicker.C:
+			before, _ := store.ListIncidents(ctx, 500, "open")
 			resolved, err := store.ResolveStaleIncidents(ctx, time.Now().UTC().Add(-2*cfg.IncidentWindow))
 			if err != nil {
 				log.Warn("incident maintenance failed", "error", err)
 			} else if resolved > 0 {
 				log.Info("stale incidents resolved", "count", resolved)
+				if cfg.Notifications.Enabled {
+					for _, i := range before {
+						if i.LastSeenAt.Before(time.Now().UTC().Add(-2 * cfg.IncidentWindow)) {
+							i.State = "resolved"
+							_ = store.Enqueue(ctx, "notify.event", notifications.IncidentEvent("incident_resolved", i, cfg.PublicBaseURL), time.Now().UTC())
+						}
+					}
+				}
 			}
 		case <-cleanupTicker.C:
 			if err := store.Cleanup(ctx, cfg.RetentionDays); err != nil {
