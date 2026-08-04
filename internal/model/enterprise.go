@@ -90,6 +90,7 @@ type SimilarAnalysis struct {
 	Category    Category    `json:"category"`
 	Attribution Attribution `json:"attribution"`
 	Score       float64     `json:"similarity_score"`
+	Engine      string      `json:"similarity_engine"`
 	CreatedAt   time.Time   `json:"created_at"`
 }
 
@@ -99,18 +100,41 @@ type TestSelectionRequest struct {
 	Framework    string   `json:"framework,omitempty"`
 	Limit        int      `json:"limit,omitempty"`
 	IncludeFlaky bool     `json:"include_flaky,omitempty"`
+	MinimumScore float64  `json:"minimum_score,omitempty"`
+}
+
+type ImpactGraph struct {
+	TenantID       string              `json:"tenant_id"`
+	Repository     string              `json:"repository"`
+	Root           string              `json:"root,omitempty"`
+	LanguageFiles  map[string]string   `json:"language_files,omitempty"`
+	Dependencies   map[string][]string `json:"dependencies"`
+	TestFiles      map[string]string   `json:"test_files,omitempty"`
+	TestCoverage   map[string][]string `json:"test_coverage,omitempty"`
+	GeneratedAt    time.Time           `json:"generated_at"`
+	Generator      string              `json:"generator,omitempty"`
+	GeneratorBuild string              `json:"generator_build,omitempty"`
+}
+
+type TestCoverageInput struct {
+	Repository  string              `json:"repository"`
+	Coverage    map[string][]string `json:"coverage"`
+	GeneratedAt time.Time           `json:"generated_at,omitempty"`
 }
 
 type SelectedTest struct {
-	TestKey       string  `json:"test_key"`
-	Name          string  `json:"name"`
-	Suite         string  `json:"suite,omitempty"`
-	ClassName     string  `json:"class_name,omitempty"`
-	File          string  `json:"file,omitempty"`
-	Framework     string  `json:"framework,omitempty"`
-	PriorityScore float64 `json:"priority_score"`
-	Reason        string  `json:"reason"`
-	Quarantined   bool    `json:"quarantined"`
+	TestKey       string   `json:"test_key"`
+	Name          string   `json:"name"`
+	Suite         string   `json:"suite,omitempty"`
+	ClassName     string   `json:"class_name,omitempty"`
+	File          string   `json:"file,omitempty"`
+	Framework     string   `json:"framework,omitempty"`
+	PriorityScore float64  `json:"priority_score"`
+	Confidence    float64  `json:"confidence"`
+	Strategy      string   `json:"strategy"`
+	Reason        string   `json:"reason"`
+	ImpactPath    []string `json:"impact_path,omitempty"`
+	Quarantined   bool     `json:"quarantined"`
 }
 
 type TestSelection struct {
@@ -129,4 +153,29 @@ type SSOIdentity struct {
 	Role     Role     `json:"role"`
 	Groups   []string `json:"groups,omitempty"`
 	Issuer   string   `json:"issuer,omitempty"`
+}
+
+type RepairSource struct {
+	TenantID          string `json:"tenant_id"`
+	Provider          string `json:"provider"`
+	Repository        string `json:"repository"`
+	InstallationID    int64  `json:"installation_id,omitempty"`
+	CommitSHA         string `json:"commit_sha,omitempty"`
+	BaseBranch        string `json:"base_branch,omitempty"`
+	RunURL            string `json:"run_url,omitempty"`
+	PullRequestNumber int    `json:"pull_request_number,omitempty"`
+}
+
+type RepairResult struct {
+	TenantID          string    `json:"tenant_id"`
+	AnalysisID        string    `json:"analysis_id"`
+	PlanID            string    `json:"plan_id"`
+	Provider          string    `json:"provider"`
+	Branch            string    `json:"branch,omitempty"`
+	PullRequestNumber int       `json:"pull_request_number,omitempty"`
+	PullRequestURL    string    `json:"pull_request_url,omitempty"`
+	Status            string    `json:"status"`
+	Error             string    `json:"error,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }

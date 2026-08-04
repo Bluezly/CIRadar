@@ -257,11 +257,12 @@ type APIKey struct {
 }
 
 type Principal struct {
-	TenantID string `json:"tenant_id"`
-	Name     string `json:"name"`
-	Role     Role   `json:"role"`
-	APIKeyID string `json:"api_key_id,omitempty"`
-	Root     bool   `json:"root,omitempty"`
+	TenantID string   `json:"tenant_id"`
+	Name     string   `json:"name"`
+	Role     Role     `json:"role"`
+	APIKeyID string   `json:"api_key_id,omitempty"`
+	Root     bool     `json:"root,omitempty"`
+	Scopes   []string `json:"scopes,omitempty"`
 }
 
 type AuditEvent struct {
