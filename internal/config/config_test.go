@@ -61,3 +61,35 @@ func TestSaveDefaultGeneratesRootTokenWithRestrictedPermissions(t *testing.T) {
 		t.Fatalf("permissions=%v err=%v", info.Mode().Perm(), err)
 	}
 }
+
+func TestHardeningConfigurationValidation(t *testing.T) {
+	cfg := Default()
+	cfg.TrustedProxyCIDRs = []string{"not-a-cidr"}
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "trusted_proxy_cidrs") {
+		t.Fatalf("invalid trusted proxy accepted: %v", err)
+	}
+	cfg = Default()
+	cfg.DashboardSessionSecret = "short"
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "dashboard_session_secret") {
+		t.Fatalf("short session secret accepted: %v", err)
+	}
+	cfg = Default()
+	cfg.RedactionPatterns = []string{"["}
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "redaction pattern") {
+		t.Fatalf("invalid redaction pattern accepted: %v", err)
+	}
+}
+
+func TestMarketplaceIsMetadataOnlyAndRequiresWebhookSecret(t *testing.T) {
+	cfg := Default()
+	cfg.GitHubMarketplace.Enabled = true
+	cfg.GitHubWebhookSecret = ""
+	cfg.GitHubMarketplace.WebhookSecret = ""
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "marketplace") {
+		t.Fatalf("marketplace without secret accepted: %v", err)
+	}
+	cfg.GitHubMarketplace.WebhookSecret = "secret"
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("valid marketplace config rejected: %v", err)
+	}
+}
