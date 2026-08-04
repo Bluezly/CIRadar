@@ -21,13 +21,16 @@ import (
 	"ciradar/internal/config"
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
+	"ciradar/internal/insights"
 	mcpserver "ciradar/internal/mcp"
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
 	"ciradar/internal/secrets"
 	"ciradar/internal/server"
+	"ciradar/internal/similarity"
 	"ciradar/internal/testintelligence"
+	"ciradar/internal/testselection"
 	"ciradar/internal/version"
 	"ciradar/internal/worker"
 )
@@ -81,6 +84,12 @@ func main() {
 		err = cmdMCP(os.Args[2:])
 	case "database":
 		err = cmdDatabase(os.Args[2:])
+	case "deployment":
+		err = cmdDeployment(os.Args[2:])
+	case "metrics":
+		err = cmdMetrics(os.Args[2:])
+	case "similar":
+		err = cmdSimilar(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Printf("CI Radar %s (%s, %s) %s/%s\n", version.Version, version.Commit, version.BuildDate, runtime.GOOS, runtime.GOARCH)
 		return
@@ -120,7 +129,10 @@ Usage:
   ciradar repository set|list [options]
   ciradar incident acknowledge|resolve|reopen [options]
   ciradar secret key|encrypt [value]
-  ciradar tests ingest|list|gate|quarantine|unquarantine [options]
+  ciradar tests ingest|list|gate|select|quarantine|unquarantine [options]
+  ciradar deployment record [options]
+  ciradar metrics dora|usage [options]
+  ciradar similar --analysis ID [options]
   ciradar mcp [--config ciradar.json] [--tenant default]
   ciradar database check|migrate [--config ciradar.json]
   ciradar version
@@ -131,6 +143,121 @@ Fast local test:
   ciradar serve
 `)
 }
+
+func cmdDeployment(args []string) error {
+	if len(args) < 1 || args[0] != "record" {
+		return errors.New("usage: ciradar deployment record --repo OWNER/REPO --environment production --sha COMMIT")
+	}
+	fs := flag.NewFlagSet("deployment record", flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration")
+	tenant := fs.String("tenant", "", "tenant")
+	repo := fs.String("repo", "", "repository")
+	env := fs.String("environment", "production", "environment")
+	sha := fs.String("sha", "", "commit")
+	status := fs.String("status", "success", "status")
+	firstCommit := fs.String("first-commit-at", "", "RFC3339 first commit time")
+	started := fs.String("started-at", "", "RFC3339 started time")
+	completed := fs.String("completed-at", "", "RFC3339 completed time")
+	if e := fs.Parse(args[1:]); e != nil {
+		return e
+	}
+	cfg, e := config.Load(*path)
+	if e != nil {
+		return e
+	}
+	store, e := openBackend(context.Background(), cfg)
+	if e != nil {
+		return e
+	}
+	defer store.Close()
+	if *repo == "" || *sha == "" {
+		return errors.New("--repo and --sha are required")
+	}
+	now := time.Now().UTC()
+	fc := parseRFC(*firstCommit)
+	st := parseRFC(*started)
+	co := parseRFC(*completed)
+	if co.IsZero() {
+		co = now
+	}
+	if st.IsZero() {
+		st = co
+	}
+	out, e := insights.RecordDeployment(context.Background(), store, model.DeploymentEvent{TenantID: chooseTenant(*tenant, cfg.DefaultTenantID), Repository: *repo, Environment: *env, CommitSHA: *sha, Status: *status, FirstCommitAt: fc, StartedAt: st, CompletedAt: co, CreatedAt: now, SourceProvider: "cli"})
+	if e != nil {
+		return e
+	}
+	return printJSON(out)
+}
+func cmdMetrics(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar metrics dora|usage")
+	}
+	fs := flag.NewFlagSet("metrics "+args[0], flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration")
+	tenant := fs.String("tenant", "", "tenant")
+	days := fs.Int("days", 30, "days")
+	environment := fs.String("environment", "", "environment")
+	if e := fs.Parse(args[1:]); e != nil {
+		return e
+	}
+	cfg, e := config.Load(*path)
+	if e != nil {
+		return e
+	}
+	store, e := openBackend(context.Background(), cfg)
+	if e != nil {
+		return e
+	}
+	defer store.Close()
+	until := time.Now().UTC()
+	since := until.Add(-time.Duration(*days) * 24 * time.Hour)
+	tid := chooseTenant(*tenant, cfg.DefaultTenantID)
+	switch args[0] {
+	case "dora":
+		v, e := insights.DORA(context.Background(), store, tid, *environment, since, until)
+		if e != nil {
+			return e
+		}
+		return printJSON(v)
+	case "usage":
+		v, e := insights.Usage(context.Background(), store, tid, since, until)
+		if e != nil {
+			return e
+		}
+		return printJSON(v)
+	default:
+		return fmt.Errorf("unknown metrics command %q", args[0])
+	}
+}
+func cmdSimilar(args []string) error {
+	fs := flag.NewFlagSet("similar", flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration")
+	tenant := fs.String("tenant", "", "tenant")
+	id := fs.String("analysis", "", "analysis id")
+	limit := fs.Int("limit", 10, "limit")
+	if e := fs.Parse(args); e != nil {
+		return e
+	}
+	if *id == "" {
+		return errors.New("--analysis is required")
+	}
+	cfg, e := config.Load(*path)
+	if e != nil {
+		return e
+	}
+	store, e := openBackend(context.Background(), cfg)
+	if e != nil {
+		return e
+	}
+	defer store.Close()
+	v, e := similarity.FindConfigured(context.Background(), store, chooseTenant(*tenant, cfg.DefaultTenantID), *id, *limit, cfg.Semantic, cfg.LLM)
+	if e != nil {
+		return e
+	}
+	return printJSON(v)
+}
+func parseRFC(v string) time.Time { t, _ := time.Parse(time.RFC3339, strings.TrimSpace(v)); return t }
 
 func cmdDatabase(args []string) error {
 	if len(args) < 1 {
@@ -883,7 +1010,7 @@ func evaluateTestGate(observations []model.TestObservation, quarantines []model.
 
 func cmdTests(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: ciradar tests ingest|list|gate|quarantine|unquarantine")
+		return errors.New("usage: ciradar tests ingest|list|gate|select|quarantine|unquarantine")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("tests "+sub, flag.ContinueOnError)
@@ -892,7 +1019,8 @@ func cmdTests(args []string) error {
 	repo := fs.String("repo", "", "repository")
 	workflow := fs.String("workflow", "", "workflow")
 	job := fs.String("job", "", "job")
-	framework := fs.String("framework", "junit", "test framework")
+	framework := fs.String("framework", "", "test framework label")
+	format := fs.String("format", "junit", "report format: junit, playwright, jest, pytest, cypress, mocha")
 	runID := fs.Int64("run-id", 0, "run id")
 	sha := fs.String("sha", "", "commit SHA")
 	branch := fs.String("branch", "", "branch")
@@ -902,6 +1030,7 @@ func cmdTests(args []string) error {
 	reason := fs.String("reason", "", "quarantine reason")
 	duration := fs.Duration("duration", 7*24*time.Hour, "quarantine duration")
 	limit := fs.Int("limit", 200, "result limit")
+	changed := fs.String("changed", "", "comma-separated changed files")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -924,7 +1053,7 @@ func cmdTests(args []string) error {
 		if err != nil {
 			return err
 		}
-		obs, err := testintelligence.ParseJUnit(strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: *framework, OccurredAt: time.Now().UTC()})
+		obs, err := testintelligence.ParseReport(*format, strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: firstNonEmptyCLI(*framework, *format), OccurredAt: time.Now().UTC()})
 		if err != nil {
 			return err
 		}
@@ -948,7 +1077,7 @@ func cmdTests(args []string) error {
 		if err != nil {
 			return err
 		}
-		obs, err := testintelligence.ParseJUnit(strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: *framework, OccurredAt: time.Now().UTC()})
+		obs, err := testintelligence.ParseReport(*format, strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: firstNonEmptyCLI(*framework, *format), OccurredAt: time.Now().UTC()})
 		if err != nil {
 			return err
 		}
@@ -965,6 +1094,21 @@ func cmdTests(args []string) error {
 		}
 		fmt.Printf("Test gate passed: %d quarantined failure(s), no blocking failures.\n", len(result.QuarantinedFailures))
 		return nil
+	case "select":
+		if strings.TrimSpace(*repo) == "" {
+			return errors.New("--repo is required")
+		}
+		files := []string{}
+		for _, x := range strings.Split(*changed, ",") {
+			if strings.TrimSpace(x) != "" {
+				files = append(files, strings.TrimSpace(x))
+			}
+		}
+		out, err := testselection.Select(context.Background(), store, tenantID, model.TestSelectionRequest{Repository: *repo, ChangedFiles: files, Framework: *framework, Limit: *limit, IncludeFlaky: cfg.PredictiveTests.AlwaysRunFlaky})
+		if err != nil {
+			return err
+		}
+		return printJSON(out)
 	case "quarantine":
 		if *key == "" || *owner == "" || *reason == "" {
 			return errors.New("--key, --owner, and --reason are required")
@@ -984,6 +1128,13 @@ func cmdTests(args []string) error {
 	}
 }
 
+func firstNonEmptyCLI(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
+}
+
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	path := fs.String("config", "ciradar.json", "configuration file path")
@@ -1000,7 +1151,7 @@ func cmdMCP(args []string) error {
 		return err
 	}
 	defer store.Close()
-	srv := &mcpserver.Server{Store: store}
+	srv := &mcpserver.Server{Store: store, Semantic: cfg.Semantic, LLM: cfg.LLM}
 	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64<<10), 4<<20)
