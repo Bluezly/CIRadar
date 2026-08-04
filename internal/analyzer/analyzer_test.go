@@ -380,27 +380,59 @@ func TestRedactorDoesNotEraseOrdinaryIdentifier(t *testing.T) {
 	}
 }
 
-func TestGoTestAssertionIsCodeFailure(t *testing.T) {
+func TestGoTestAssertionFailureIsCodeFailure(t *testing.T) {
 	log := "--- FAIL: TestCalculateDiscount (0.00s)\n    discount_test.go:42: expected: 90, actual: 100\nFAIL\nFAIL\texample.com/shop\t0.013s"
-	r := New("").Analyze(model.AnalysisInput{Repository: "acme/shop", Log: log}, Context{})
+	r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
 	if r.Category != model.CategoryCodeFailure || r.Attribution != model.AttributionCode {
-		t.Fatalf("category=%s attribution=%s score=%d rules=%v", r.Category, r.Attribution, r.Score, r.MatchedRules)
+		t.Fatalf("category=%s attribution=%s score=%d evidence=%+v", r.Category, r.Attribution, r.Score, r.Evidence)
 	}
 	if len(r.MatchedRules) == 0 || r.MatchedRules[0] != "go-test-assertion" {
 		t.Fatalf("rules=%v", r.MatchedRules)
 	}
 }
 
-func TestGoTestCommonAssertionFormats(t *testing.T) {
-	cases := []string{
-		"--- FAIL: TestPrice (0.00s)\n    price_test.go:19: got 100, want 90\nFAIL",
-		"--- FAIL: TestPrice/coupon (0.00s)\n    price_test.go:19: want=90 got=100\nFAIL",
-		"--- FAIL: TestPrice (0.00s)\n    price_test.go:19: expected 90 but got 100\nFAIL",
+func TestGoTestNetworkFailureKeepsCompetingEvidence(t *testing.T) {
+	log := "--- FAIL: TestDownload (0.10s)\n    download_test.go:19: Get https://registry.npmjs.org/pkg: read: connection reset by peer\nFAIL"
+	r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
+	if r.Category == model.CategoryUnknown {
+		t.Fatalf("unexpected unknown result: %+v", r)
 	}
-	for _, log := range cases {
-		r := New("").Analyze(model.AnalysisInput{Repository: "acme/shop", Log: log}, Context{})
+	if r.PositiveScore == 0 || r.NegativeScore == 0 {
+		t.Fatalf("expected external and deterministic evidence: %+v", r)
+	}
+}
+
+func TestGoTestAssertionFormats(t *testing.T) {
+	tests := []string{
+		"--- FAIL: TestPrice (0.00s)\n    price_test.go:18: got 100, want 90\nFAIL",
+		"--- FAIL: TestPrice (0.00s)\n    Error Trace: price_test.go:18\n    Error: Not equal: expected: 90 actual: 100\nFAIL",
+		"--- FAIL: TestPrice/coupon (0.00s)\n    price_test.go:18: expected 90 but got 100\nFAIL",
+	}
+	for _, log := range tests {
+		r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
 		if r.Category != model.CategoryCodeFailure || r.Attribution != model.AttributionCode {
-			t.Fatalf("log=%q category=%s attribution=%s rules=%v", log, r.Category, r.Attribution, r.MatchedRules)
+			t.Fatalf("category=%s attribution=%s rules=%v", r.Category, r.Attribution, r.MatchedRules)
 		}
+	}
+}
+
+func TestGoTestPanicIsCodeFailure(t *testing.T) {
+	log := "--- FAIL: TestParser (0.00s)\npanic: runtime error: index out of range [3] with length 2 [recovered]\nFAIL"
+	r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
+	if r.Category != model.CategoryCodeFailure || r.Attribution != model.AttributionCode {
+		t.Fatalf("category=%s attribution=%s rules=%v", r.Category, r.Attribution, r.MatchedRules)
+	}
+}
+
+func TestCodeFailureHasPositiveEvidenceStrength(t *testing.T) {
+	r := New("test").Analyze(model.AnalysisInput{Log: "--- FAIL: TestAddition\n    expected 4, got 5\nFAIL"}, Context{})
+	if r.Attribution != model.AttributionCode || r.Score >= 0 {
+		t.Fatalf("attribution=%s score=%d", r.Attribution, r.Score)
+	}
+	if r.EvidenceStrength < 60 || r.CodeEvidenceScore < 60 || r.ExternalEvidenceScore != 0 {
+		t.Fatalf("strength=%d code=%d external=%d", r.EvidenceStrength, r.CodeEvidenceScore, r.ExternalEvidenceScore)
+	}
+	if r.ExternalityScore != r.Score {
+		t.Fatalf("externality=%d score=%d", r.ExternalityScore, r.Score)
 	}
 }
