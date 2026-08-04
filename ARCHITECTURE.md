@@ -1,77 +1,75 @@
-# CI Radar architecture — 1.0.0 RC.1
+# CI Radar architecture — 1.1.0 OSS RC.2
 
-## Data flow
+CI Radar is a free self-hosted CI failure intelligence service. The deterministic analyzer remains the decision core. Optional systems such as LLM enhancement and remote embeddings operate above the stored deterministic result and never replace it.
+
+## Processing path
 
 ```text
-GitHub / GitLab / Buildkite / CircleCI / Jenkins / manual API
-                         ↓
-                  verified CIEvent
-                         ↓
-                tenant-scoped job queue
-                         ↓
-        log fetch → redaction → environment extraction
-                         ↓
- rules + evidence + history + correlation + provider status
-                         ↓
- AnalysisResult + SuggestedActions + fingerprint
-                         ↓
- Checks/comments · incidents · notifications · dashboard · MCP
+CI provider webhook or manual upload
+             |
+             v
+signature validation and tenant resolution
+             |
+             v
+normalized CIEvent and persistent queue
+             |
+             v
+bounded log retrieval and secret redaction
+             |
+             v
+rules, contradictory evidence, history, provider state and correlation
+             |
+             v
+AnalysisResult, suggested actions and protected fingerprint
+             |
+             +--> GitHub Check and sticky PR comment
+             +--> GitLab sticky MR note
+             +--> incident lifecycle and ChatOps
+             +--> notifications and on-call systems
+             +--> dashboard, DORA, cost and historical trends
+             +--> read-only MCP and optional BYOK LLM
 ```
 
 ## Packages
 
-- `internal/connectors`: webhook verification, payload normalization, provider log fetch, GitLab MR notes.
-- `internal/github`: GitHub App JWT/tokens, Actions API, job logs, Check Runs, sticky PR comments.
-- `internal/analyzer`: deterministic classification, evidence scoring, fingerprints, environment drift, actions.
-- `internal/testintelligence`: JUnit parsing and test identity.
-- `internal/db`: `Backend` contract, embedded atomic store, PostgreSQL compatibility backend.
-- `internal/pgwire`: pure-Go PostgreSQL protocol subset with TLS, MD5 and SCRAM-SHA-256.
-- `internal/notifications`: channel policy, dedup, quiet hours, retries and delivery tracking.
-- `internal/mcp`: read-only JSON-RPC tools/resources.
-- `internal/server`: REST, dashboard, webhooks, MCP HTTP, metrics, auth and RBAC.
-- `internal/worker`: background execution, correlation, comments, retry policy and environment baselines.
+- `internal/analyzer` contains deterministic rules, scoring, attribution, environment drift, fingerprints and suggested actions.
+- `internal/connectors` validates and normalizes GitLab, Buildkite, CircleCI, Jenkins, Azure DevOps, Bitrise, TeamCity, Travis CI and AWS CodeBuild events.
+- `internal/github` handles GitHub App authentication, Actions logs, Check Runs and sticky PR comments.
+- `internal/db` defines the storage contract and implements embedded and PostgreSQL backends.
+- `internal/pgwire` is the bundled PostgreSQL wire client with TLS and SCRAM-SHA-256.
+- `internal/testintelligence` parses JUnit, Playwright, Jest, pytest, Cypress and Mocha reports and infers probable flaky causes.
+- `internal/testselection` ranks tests against changed files and historical failures.
+- `internal/insights` calculates DORA metrics, CI usage, cost estimates and daily trends.
+- `internal/similarity` offers local vector similarity and optional remote embeddings.
+- `internal/llm` provides optional OpenAI-compatible explanation and patch generation.
+- `internal/sso` implements native OIDC and trusted authentication-proxy identity for SAML deployments.
+- `internal/notifications` provides policy routing, retries, deduplication and enterprise channels.
+- `internal/mcp` exposes tenant-scoped read-only tools and resources.
+- `internal/server` provides HTTP, dashboard, SSO, REST, webhooks, ChatOps, metrics and MCP.
+- `internal/worker` executes queued work, correlation, comments, drift events and safe retry decisions.
 
 ## Storage
 
-`db.Backend` isolates all callers from storage details.
+Every caller depends on `db.Backend`.
 
-### Embedded
+### Embedded backend
 
-- atomic temp-file replacement
-- fsync and backup recovery
-- single process only
-- portable local/private beta
+The embedded backend uses atomic replacement, fsync and backup recovery. It is suitable for evaluation and small single-process installations.
 
-### PostgreSQL RC backend
+### PostgreSQL backend
 
-- TLS and SCRAM-SHA-256 capable
-- automatic migration
-- `SELECT ... FOR UPDATE` transaction around state mutation
-- multiple API/worker processes cannot overwrite one another
-- compatible with every feature
+The PostgreSQL backend supports TLS, SCRAM-SHA-256, migrations, transactions and row locking. RC.2 stores canonical state in a transactionally locked JSONB row. This preserves correctness across multiple processes, but serializes writes. It is suitable for moderate self-hosted installations and is not presented as a hyperscale event store.
 
-Current tradeoff: one canonical JSONB state row serializes mutations. It provides durability and correctness, but not high-write horizontal scaling. A normalized backend can replace it behind the same interface without rewriting the analyzer or integrations.
+## Isolation and authorization
 
-## Tenant isolation
+All analyses, incidents, test history, quarantines, deployments, usage, notifications, API keys, installation bindings and audit records are tenant-scoped. Roles are Viewer, Operator, Admin and Root. SSO identities map to the same principal model as API keys.
 
-Every analysis, incident, queue job, baseline, notification, feedback entry, test, quarantine, API key, profile and audit event has a tenant boundary. GitHub installations and external connectors resolve a tenant before enqueueing work. Disabled tenants are not processed.
+## Security boundaries
 
-## Decision model
-
-The analyzer separates:
-
-- rule evidence
-- contextual evidence
-- contradictory evidence
-- external and code scores
-- final attribution and confidence
-
-Automatic retry is only eligible when attribution is external, score passes threshold, and no unsafe contradiction applies.
-
-## Test reliability
-
-JUnit observations normalize to a deterministic test key. State tracks total runs, failures, transitions, flake score, classification and quarantine. `tests gate` makes quarantine enforceable from any CI provider.
-
-## MCP
-
-Read-only by design. HTTP shares tenant-scoped Viewer authentication with REST. stdio reads credentials/config from the process environment. No model-controlled write actions are exposed.
+- Raw logs are disabled by default.
+- Redaction runs before persistence and fingerprinting.
+- Cross-tenant correlation is disabled by default and requires an HMAC key.
+- LLM and remote embeddings are disabled by default.
+- ChatOps write actions are disabled until explicitly enabled.
+- MCP is read-only.
+- Auto-retry and auto-quarantine are disabled by default.

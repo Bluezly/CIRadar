@@ -1,40 +1,43 @@
 # PostgreSQL deployment
 
-CI Radar includes a pure-Go PostgreSQL wire client, so the distributed binary needs no CGO and no external driver files.
+CI Radar includes a pure-Go PostgreSQL wire client and requires no CGO or external driver file.
 
-## Supported connection properties
+## Configuration
 
-- `postgres://` DSN
-- TLS modes including verify-full
-- password, MD5, and SCRAM-SHA-256 authentication
-- transactions and row locks
+```json
+{
+  "database_driver": "postgres",
+  "database_url": "env:CIRADAR_DATABASE_URL"
+}
+```
+
+```bash
+ciradar database check --config ciradar.json
+ciradar database migrate --config ciradar.json
+ciradar serve --config ciradar.json
+```
+
+Supported authentication includes password, MD5 and SCRAM-SHA-256. TLS modes include certificate and hostname verification.
 
 ## Docker Compose
 
-The bundled Compose file uses PostgreSQL 18.4 and mounts `/var/lib/postgresql`, matching the official PostgreSQL 18 image layout.
-
 ```bash
 cp .env.example .env
+cp ciradar.example.json ciradar.json
 docker compose up --build
 ```
 
-## Backup
+Replace every placeholder before exposing the service.
+
+## Backup and restore
 
 ```bash
 pg_dump --format=custom --file=ciradar.dump "$CIRADAR_DATABASE_URL"
 pg_restore --clean --if-exists --dbname="$CIRADAR_DATABASE_URL" ciradar.dump
 ```
 
-Keep backups of:
+Back up the database, configuration, GitHub App private key, master encryption key and fingerprint HMAC key. Losing the master key makes encrypted configuration values unrecoverable. Changing the fingerprint key creates a new correlation namespace.
 
-- PostgreSQL database
-- `ciradar.json`
-- GitHub App private key
-- `CIRADAR_MASTER_KEY`
-- fingerprint HMAC key
+## RC.2 write model
 
-Losing the master key makes encrypted config values unrecoverable. Changing the fingerprint key starts a new fingerprint namespace.
-
-## Current RC limitation
-
-The compatibility backend stores the canonical application state in one transactionally locked JSONB row. This is correct under multiple processes and supports standard PostgreSQL durability/backup, but write throughput is serialized. It is appropriate for a private beta and moderate installations, not a claim of high-write hyperscale.
+RC.2 stores canonical state in one JSONB row protected by a transaction and row lock. Multiple processes cannot overwrite one another, but write throughput is serialized. This is an explicit compatibility design, not a claim of horizontally scalable analytics storage.

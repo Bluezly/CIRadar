@@ -1,48 +1,49 @@
 # CI connectors
 
-## Shared configuration
+All connectors normalize provider-specific payloads into the same tenant-scoped `CIEvent`. The analyzer, incident engine, DORA metrics, cost tracking and notifications are shared across providers.
+
+## Common connector fields
 
 ```json
 {
-  "connectors": [
-    {
-      "name": "gitlab-prod",
-      "provider": "gitlab",
-      "enabled": true,
-      "tenant_id": "acme",
-      "base_url": "https://gitlab.com",
-      "token": "env:GITLAB_TOKEN",
-      "webhook_secret": "env:GITLAB_WEBHOOK_SECRET"
-    }
-  ]
+  "name": "provider-prod",
+  "provider": "azuredevops",
+  "enabled": true,
+  "tenant_id": "acme",
+  "base_url": "https://dev.azure.com/acme",
+  "token": "env:CIRADAR_PROVIDER_TOKEN",
+  "webhook_secret": "env:CIRADAR_PROVIDER_WEBHOOK_SECRET"
 }
 ```
 
-Secrets may be `env:NAME` or AES-GCM `enc:v1:...`.
+Supported secret forms are `env:NAME` and `enc:v1:...`.
 
-## GitLab
+## Provider endpoints
 
-Webhook: `/webhooks/gitlab`
+| Provider | Webhook endpoint | Log source |
+|---|---|---|
+| GitHub Actions | `/webhooks/github` | GitHub Actions job logs |
+| GitLab CI | `/webhooks/gitlab` | Job trace API |
+| Buildkite | `/webhooks/buildkite` | Build/job log API |
+| CircleCI | `/webhooks/circleci` | Job steps and output URLs |
+| Jenkins | `/webhooks/jenkins` | `consoleText` from an allowlisted base URL |
+| Azure DevOps Pipelines | `/webhooks/azuredevops` | Build Logs REST API |
+| Bitrise | `/webhooks/bitrise` | Build log API |
+| TeamCity | `/webhooks/teamcity` | Build log endpoint |
+| Travis CI | `/webhooks/travis` | Job log API |
+| AWS CodeBuild | `/webhooks/codebuild` | EventBridge phase context or supplied log context |
 
-Enable Job events. CI Radar accepts the standard secret token and GitLab HMAC signing token format. The API token needs permission to read job traces. When the Job Hook contains a merge request IID, CI Radar creates/updates a sticky merge request note.
+## GitHub Actions
 
-## Buildkite
+GitHub uses a GitHub App installation. CI Radar verifies HMAC-SHA256 webhooks, resolves the installation to a tenant, retrieves failed job logs, publishes a Check Run and optionally maintains one sticky Pull Request comment.
 
-Webhook: `/webhooks/buildkite`
+## GitLab CI
 
-Enable job/build events. Verification supports `X-Buildkite-Token` and timestamped HMAC signatures. The API token needs build-log read access.
+Enable job webhooks and configure the project access token needed to read traces. When an event contains a Merge Request IID, CI Radar maintains a sticky Merge Request note.
 
-## CircleCI
+## Jenkins adapter
 
-Webhook: `/webhooks/circleci`
-
-Use `job-completed` or `workflow-completed` and configure a signing secret. CI Radar validates `circleci-signature`, fetches job steps, then follows output URLs.
-
-## Jenkins
-
-Webhook: `/webhooks/jenkins`
-
-Jenkins has no universal webhook payload across plugins. CI Radar accepts a stable adapter payload:
+Jenkins payloads differ by plugin. CI Radar accepts a stable adapter payload and enforces the configured base URL before fetching `consoleText`.
 
 ```json
 {
@@ -59,12 +60,12 @@ Jenkins has no universal webhook payload across plugins. CI Radar accepts a stab
 }
 ```
 
-Send `X-CI-Radar-Token` or `X-CI-Radar-Signature-256`. The configured `base_url` is enforced before fetching `/consoleText` to block SSRF. Use username + API token for Basic authentication.
+## Delivery controls
 
-## Delivery safety
-
-- Webhook deliveries are deduplicated.
-- Only terminal conclusions are queued.
-- Payload size is bounded.
-- Log fetch has timeouts and byte limits.
-- Provider errors are redacted before persistence.
+- terminal events only
+- bounded request bodies and logs
+- webhook replay and duplicate suppression
+- fetch timeouts and maximum byte limits
+- secret redaction in transport errors
+- tenant resolution before queueing
+- disabled tenant rejection
