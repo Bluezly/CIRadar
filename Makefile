@@ -1,6 +1,6 @@
 .PHONY: test vet build windows linux clean
 
-VERSION ?= 0.2.0-beta.4
+VERSION ?= 0.3.0-beta.5
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X ciradar/internal/version.Version=$(VERSION) -X ciradar/internal/version.BuildDate=$(BUILD_DATE)
 
