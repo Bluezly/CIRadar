@@ -77,13 +77,34 @@ func CompareEnvironment(previous, current model.Environment) []string {
 	if previous.RunnerImage != "" && current.RunnerImage != "" && previous.RunnerImage != current.RunnerImage {
 		changes = append(changes, "runner image: "+previous.RunnerImage+" -> "+current.RunnerImage)
 	}
+	if previous.RunnerArch != "" && current.RunnerArch != "" && previous.RunnerArch != current.RunnerArch {
+		changes = append(changes, "runner architecture: "+previous.RunnerArch+" -> "+current.RunnerArch)
+	}
 	for k, old := range previous.ToolVersions {
 		if now, ok := current.ToolVersions[k]; ok && old != now {
 			changes = append(changes, k+": "+old+" -> "+now)
 		}
 	}
+	if len(previous.ActionVersions) > 0 && len(current.ActionVersions) > 0 && !equalStrings(previous.ActionVersions, current.ActionVersions) {
+		changes = append(changes, "actions: "+strings.Join(previous.ActionVersions, ", ")+" -> "+strings.Join(current.ActionVersions, ", "))
+	}
+	if len(previous.ContainerRefs) > 0 && len(current.ContainerRefs) > 0 && !equalStrings(previous.ContainerRefs, current.ContainerRefs) {
+		changes = append(changes, "containers: "+strings.Join(previous.ContainerRefs, ", ")+" -> "+strings.Join(current.ContainerRefs, ", "))
+	}
 	sort.Strings(changes)
 	return changes
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func appendUnique(xs []string, x string) []string {

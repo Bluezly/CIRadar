@@ -22,19 +22,16 @@ type Context struct {
 }
 
 type Analyzer struct {
-	rules      []Rule
-	redactor   *Redactor
-	privateKey []byte
-	maxExcerpt int
+	rules          []Rule
+	redactor       *Redactor
+	fingerprintKey []byte
+	maxExcerpt     int
 }
 
-func New(privateKey string, extraRules ...Rule) *Analyzer {
-	if privateKey == "" {
-		privateKey = "ciradar-local-development-key"
-	}
+func New(fingerprintKey string, extraRules ...Rule) *Analyzer {
 	rules := BuiltinRules()
 	rules = append(rules, extraRules...)
-	return &Analyzer{rules: rules, redactor: NewRedactor(), privateKey: []byte(privateKey), maxExcerpt: 5000}
+	return &Analyzer{rules: rules, redactor: NewRedactor(), fingerprintKey: []byte(strings.TrimSpace(fingerprintKey)), maxExcerpt: 5000}
 }
 
 func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisResult {
@@ -59,13 +56,13 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	}
 
 	norm := normalizeForFingerprint(redacted, primary)
-	sharedHash := sha256.Sum256([]byte(norm))
-	fingerprint := hex.EncodeToString(sharedHash[:16])
-	mac := hmac.New(sha256.New, a.privateKey)
-	_, _ = mac.Write([]byte(in.Repository + "\x00" + norm))
-	privateFP := hex.EncodeToString(mac.Sum(nil)[:16])
+	fingerprint := fingerprintValue(a.fingerprintKey, []byte(norm))
+	privateMaterial := []byte(tenantID(in.TenantID) + "\x00" + in.Repository + "\x00" + norm)
+	privateFP := fingerprintValue(a.fingerprintKey, privateMaterial)
 
 	score := 0
+	positiveScore := 0
+	negativeScore := 0
 	var evidence []model.Evidence
 	seenGroups := make(map[string]struct{})
 	for _, rule := range matched {
@@ -79,22 +76,41 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 		}
 		seenGroups[group] = struct{}{}
 		score += rule.Weight
+		if rule.Weight > 0 {
+			positiveScore += rule.Weight
+		} else if rule.Weight < 0 {
+			negativeScore += rule.Weight
+		}
 		evidence = append(evidence, model.Evidence{Kind: "rule", Description: "Matched rule " + rule.ID + ": " + rule.Summary, Weight: rule.Weight})
 	}
 	if in.PreviousSuccess {
 		score += 15
+		positiveScore += 15
 		evidence = append(evidence, model.Evidence{Kind: "history", Description: "The same commit or workflow previously succeeded", Weight: 15})
 	}
 	if in.ChangeInfoAvailable && !in.WorkflowChanged && in.Repository != "" {
 		score += 8
+		positiveScore += 8
 		evidence = append(evidence, model.Evidence{Kind: "change", Description: "No workflow change was reported", Weight: 8})
 	}
 	if in.ChangeInfoAvailable && !in.DependencyChanged && in.Repository != "" {
 		score += 8
+		positiveScore += 8
 		evidence = append(evidence, model.Evidence{Kind: "change", Description: "No dependency or lockfile change was reported", Weight: 8})
+	}
+	if in.ChangeInfoAvailable && in.WorkflowChanged {
+		score -= 18
+		negativeScore -= 18
+		evidence = append(evidence, model.Evidence{Kind: "change", Description: "Workflow configuration changed in this revision", Weight: -18})
+	}
+	if in.ChangeInfoAvailable && in.DependencyChanged {
+		score -= 20
+		negativeScore -= 20
+		evidence = append(evidence, model.Evidence{Kind: "change", Description: "Dependency or lockfile content changed in this revision", Weight: -20})
 	}
 	if ctx.ProviderIncident {
 		score += 40
+		positiveScore += 40
 		evidence = append(evidence, model.Evidence{Kind: "provider", Description: "The relevant provider reports an active incident or degradation", Weight: 40})
 	}
 	if ctx.CrossRepoCount >= 3 {
@@ -106,6 +122,7 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 			bonus = 35
 		}
 		score += bonus
+		positiveScore += bonus
 		evidence = append(evidence, model.Evidence{Kind: "correlation", Description: fmt.Sprintf("The same fingerprint appeared in %d repositories", ctx.CrossRepoCount), Weight: bonus})
 	}
 	if ctx.CrossOrgCount >= 2 {
@@ -114,6 +131,7 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 			bonus = 20
 		}
 		score += bonus
+		positiveScore += bonus
 		evidence = append(evidence, model.Evidence{Kind: "correlation", Description: fmt.Sprintf("The same fingerprint appeared across %d organizations", ctx.CrossOrgCount), Weight: bonus})
 	}
 	if ctx.RecentOccurrences >= 5 {
@@ -122,6 +140,7 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 			bonus = 18
 		}
 		score += bonus
+		positiveScore += bonus
 		evidence = append(evidence, model.Evidence{Kind: "burst", Description: fmt.Sprintf("%d matching failures occurred in the incident window", ctx.RecentOccurrences), Weight: bonus})
 	}
 
@@ -130,6 +149,7 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 		changes = CompareEnvironment(*ctx.PreviousEnvironment, env)
 		if len(changes) > 0 {
 			score += 22
+			positiveScore += 22
 			evidence = append(evidence, model.Evidence{Kind: "environment", Description: fmt.Sprintf("%d environment changes were detected since the last successful run", len(changes)), Weight: 22})
 			if primary.Category == model.CategoryUnknown {
 				primary.Category = model.CategoryRunnerImageDrift
@@ -141,6 +161,8 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 			}
 		}
 	}
+	rawScore := score
+	competingSignals := positiveScore >= 25 && negativeScore <= -25
 	if score > 100 {
 		score = 100
 	}
@@ -149,6 +171,11 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	}
 
 	confidence := confidenceFor(score, primary.Category)
+	if competingSignals {
+		confidence = model.ConfidenceMixed
+	}
+	attribution := attributionFor(confidence, primary.Category, competingSignals)
+	decisionReason := decisionReasonFor(attribution, positiveScore, negativeScore, ctx.ProviderIncident, len(changes) > 0)
 	matchedIDs := make([]string, 0, len(matched))
 	for _, m := range matched {
 		matchedIDs = append(matchedIDs, m.ID)
@@ -157,12 +184,19 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 
 	return model.AnalysisResult{
 		ID:                 newID("analysis", now, fingerprint),
+		TenantID:           tenantID(in.TenantID),
 		Category:           primary.Category,
+		Attribution:        attribution,
 		Provider:           primary.Provider,
 		Operation:          primary.Operation,
 		ErrorFamily:        primary.ErrorFamily,
 		Confidence:         confidence,
 		Score:              score,
+		RawScore:           rawScore,
+		PositiveScore:      positiveScore,
+		NegativeScore:      negativeScore,
+		CompetingSignals:   competingSignals,
+		DecisionReason:     decisionReason,
 		Fingerprint:        fingerprint,
 		PrivateFingerprint: privateFP,
 		Summary:            primary.Summary,
@@ -178,6 +212,16 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 		EnvironmentDrift:   len(changes) > 0,
 		EnvironmentChanges: changes,
 	}
+}
+
+func fingerprintValue(key, material []byte) string {
+	if len(key) > 0 {
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write(material)
+		return hex.EncodeToString(mac.Sum(nil)[:16])
+	}
+	h := sha256.Sum256(material)
+	return hex.EncodeToString(h[:16])
 }
 
 func matchesRule(rule Rule, log string) bool {
@@ -198,6 +242,9 @@ func confidenceFor(score int, category model.Category) model.Confidence {
 	if category == model.CategoryCodeFailure && score <= 0 {
 		return model.ConfidenceLikelyCode
 	}
+	if category == model.CategoryToolchainFailure && score >= 30 {
+		return model.ConfidenceModerate
+	}
 	if score >= 75 {
 		return model.ConfidenceStrong
 	}
@@ -211,6 +258,41 @@ func confidenceFor(score int, category model.Category) model.Confidence {
 		return model.ConfidenceLikelyCode
 	}
 	return model.ConfidenceInsufficient
+}
+
+func tenantID(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return model.DefaultTenantID
+	}
+	return v
+}
+
+func attributionFor(conf model.Confidence, category model.Category, competing bool) model.Attribution {
+	if competing || conf == model.ConfidenceMixed {
+		return model.AttributionMixed
+	}
+	if category == model.CategoryToolchainFailure {
+		return model.AttributionToolchain
+	}
+	if conf == model.ConfidenceLikelyCode || category == model.CategoryCodeFailure {
+		return model.AttributionCode
+	}
+	if conf == model.ConfidenceStrong || conf == model.ConfidenceModerate {
+		return model.AttributionExternal
+	}
+	return model.AttributionUnknown
+}
+
+func decisionReasonFor(a model.Attribution, positive, negative int, providerIncident, drift bool) string {
+	parts := []string{fmt.Sprintf("external evidence %+d", positive), fmt.Sprintf("code evidence %+d", negative)}
+	if providerIncident {
+		parts = append(parts, "provider incident active")
+	}
+	if drift {
+		parts = append(parts, "environment drift detected")
+	}
+	return fmt.Sprintf("%s attribution: %s", a, strings.Join(parts, "; "))
 }
 
 var (
