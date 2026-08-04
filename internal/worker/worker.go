@@ -216,7 +216,7 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 	jobID, _ := strconv.ParseInt(ev.JobID, 10, 64)
 	in := model.AnalysisInput{TenantID: tenantID, SourceProvider: ev.Provider, SourceRunURL: ev.RunURL, Repository: ev.Repository, Organization: ev.Organization, Workflow: ev.Workflow, Job: ev.Job, RunID: ev.RunID, JobID: jobID, CommitSHA: ev.CommitSHA, PullRequestNumber: ev.PullRequestNumber, MergeRequestNumber: ev.MergeRequestIID, Log: logText, OccurredAt: ev.OccurredAt}
 	initial := w.analyzer.Analyze(in, analyzer.Context{})
-	corr, err := w.store.CorrelationForTenant(ctx, tenantID, initial.Fingerprint, time.Now().UTC().Add(-w.cfg.IncidentWindow), w.cfg.CrossTenantCorrelation)
+	corr, err := w.store.CorrelationForTenant(ctx, tenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-w.cfg.IncidentWindow), w.cfg.CrossTenantCorrelation)
 	if err != nil {
 		return err
 	}
@@ -224,7 +224,7 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 	if err != nil {
 		return err
 	}
-	result := w.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: w.providerIncident(ctx, initial.Provider), PreviousEnvironment: prevEnv})
+	result := w.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: w.providerIncident(ctx, initial.Provider), PreviousEnvironment: prevEnv})
 	if err := w.store.RecordAnalysisForTenant(ctx, tenantID, in, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 		return err
 	}
@@ -507,7 +507,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 			input.PullRequestNumber = ev.WorkflowRun.PullRequests[0].Number
 		}
 		initial := w.analyzer.Analyze(input, analyzer.Context{})
-		corr, err := w.store.CorrelationForTenant(ctx, tenantID, initial.Fingerprint, time.Now().UTC().Add(-w.cfg.IncidentWindow), w.cfg.CrossTenantCorrelation)
+		corr, err := w.store.CorrelationForTenant(ctx, tenantID, initial.Fingerprint, input.Repository, input.Organization, time.Now().UTC().Add(-w.cfg.IncidentWindow), w.cfg.CrossTenantCorrelation)
 		if err != nil {
 			return err
 		}
@@ -516,7 +516,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 			return err
 		}
 		providerIncident := w.providerIncident(ctx, initial.Provider)
-		result := w.analyzer.Analyze(input, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: providerIncident, PreviousEnvironment: prevEnv})
+		result := w.analyzer.Analyze(input, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: providerIncident, PreviousEnvironment: prevEnv})
 		if err := w.store.RecordAnalysisForTenant(ctx, tenantID, input, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 			return err
 		}
