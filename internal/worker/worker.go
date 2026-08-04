@@ -229,7 +229,7 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 		return err
 	}
 	_ = w.store.PutObject(ctx, tenantID, "analysis_source", result.ID, model.RepairSource{TenantID: tenantID, Provider: ev.Provider, Repository: ev.Repository, InstallationID: ev.InstallationID, CommitSHA: ev.CommitSHA, BaseBranch: ev.Branch, RunURL: ev.RunURL, PullRequestNumber: ev.PullRequestNumber})
-	if w.cfg.LLM.AutoEnhance && result.Score >= w.cfg.LLM.MinimumScore {
+	if autoEnhanceEligible(w.cfg.LLM, result) {
 		_ = w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID}, time.Now().UTC())
 	}
 	if w.notifier != nil && w.notifier.Enabled() {
@@ -246,7 +246,7 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 		}
 		_ = w.store.EnqueueForTenant(ctx, tenantID, "notify.event", notifications.IncidentEvent(kind, *incident, w.cfg.PublicBaseURL), time.Now().UTC())
 	}
-	if ev.Provider == "gitlab" && ev.MergeRequestIID > 0 && w.cfg.PRComments.Enabled && result.Score >= w.cfg.PRComments.MinimumScore {
+	if ev.Provider == "gitlab" && ev.MergeRequestIID > 0 && prCommentEligible(w.cfg.PRComments, result) {
 		if shouldPublishDeveloperComment(w.cfg.PRComments.Mode, result) {
 			body := renderDeveloperComment(result, ev.RunURL)
 			if err := connectors.UpsertGitLabMRComment(ctx, *co, ev, "<!-- ci-radar-diagnosis -->", body, w.cfg.PRComments.UpdateExisting); err != nil {
@@ -329,14 +329,17 @@ func (w *Worker) maybeCreateDraftRepair(ctx context.Context, analysis model.Anal
 }
 
 func (w *Worker) createDraftRepair(ctx context.Context, analysis model.AnalysisResult, enhancement model.LLMEnhancement, explicit bool) (model.RepairResult, error) {
-	if !w.cfg.Repair.Enabled || w.github == nil || analysis.Score < w.cfg.Repair.MinimumScore || strings.TrimSpace(enhancement.Patch) == "" {
-		return model.RepairResult{}, errors.New("repair is disabled or analysis is not eligible")
+	if !w.cfg.Repair.Enabled || w.github == nil || strings.TrimSpace(enhancement.Patch) == "" {
+		return model.RepairResult{}, errors.New("repair is disabled or analysis has no patch")
 	}
 	if !explicit && !w.cfg.Repair.AutoDraftPR {
 		return model.RepairResult{}, nil
 	}
 	if analysis.Attribution != model.AttributionCode {
 		return model.RepairResult{}, errors.New("draft repair PR requires a code-attributed diagnosis")
+	}
+	if !explicit && !automaticRepairEligible(w.cfg.Repair, analysis) {
+		return model.RepairResult{}, fmt.Errorf("code evidence score %d is below automatic repair minimum %d", model.CodeEvidenceScoreOf(analysis), w.cfg.Repair.MinimumScore)
 	}
 	var existing model.RepairResult
 	if found, _ := w.store.GetObject(ctx, analysis.TenantID, "repair_result", analysis.ID, &existing); found && existing.Status == "draft_pr_created" {
@@ -387,6 +390,21 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func autoEnhanceEligible(cfg config.LLMConfig, r model.AnalysisResult) bool {
+	return cfg.AutoEnhance && model.EvidenceStrengthOf(r) >= cfg.MinimumScore
+}
+
+func automaticRepairEligible(cfg config.RepairConfig, r model.AnalysisResult) bool {
+	return cfg.Enabled && cfg.AutoDraftPR && r.Attribution == model.AttributionCode && model.CodeEvidenceScoreOf(r) >= cfg.MinimumScore
+}
+
+func prCommentEligible(cfg config.PRCommentConfig, r model.AnalysisResult) bool {
+	if !cfg.Enabled || model.EvidenceStrengthOf(r) < cfg.MinimumScore {
+		return false
+	}
+	return shouldPublishDeveloperComment(cfg.Mode, r)
+}
+
 func shouldPublishDeveloperComment(mode string, r model.AnalysisResult) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "disabled":
@@ -394,18 +412,18 @@ func shouldPublishDeveloperComment(mode string, r model.AnalysisResult) bool {
 	case "external_only":
 		return r.Attribution == model.AttributionExternal
 	case "strong_only":
-		return r.Confidence == model.ConfidenceStrong
+		return r.Confidence == model.ConfidenceStrong || r.Confidence == model.ConfidenceLikelyCode
 	case "all", "all_diagnoses":
 		return true
 	default:
-		return r.Attribution == model.AttributionExternal || r.Confidence == model.ConfidenceStrong
+		return r.Attribution == model.AttributionExternal || r.Confidence == model.ConfidenceStrong || r.Confidence == model.ConfidenceLikelyCode
 	}
 }
 
 func renderDeveloperComment(r model.AnalysisResult, runURL string) string {
 	var b strings.Builder
 	b.WriteString("## CI Radar diagnosis\n\n")
-	fmt.Fprintf(&b, "**%s** · %s confidence · score %d/100\n\n", r.Attribution, r.Confidence, r.Score)
+	fmt.Fprintf(&b, "**%s** · %s confidence · evidence %d/100 · externality %+d\n\n", r.Attribution, r.Confidence, model.EvidenceStrengthOf(r), model.ExternalityScoreOf(r))
 	fmt.Fprintf(&b, "**Cause:** %s\n\n", r.Summary)
 	if len(r.Evidence) > 0 {
 		b.WriteString("**Evidence:**\n")
@@ -525,7 +543,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 			pullRequestNumber = ev.WorkflowRun.PullRequests[0].Number
 		}
 		_ = w.store.PutObject(ctx, tenantID, "analysis_source", result.ID, model.RepairSource{TenantID: tenantID, Provider: "github", Repository: ev.Repository.FullName, InstallationID: ev.Installation.ID, CommitSHA: ev.WorkflowRun.HeadSHA, BaseBranch: ev.WorkflowRun.HeadBranch, RunURL: ev.WorkflowRun.HTMLURL, PullRequestNumber: pullRequestNumber})
-		if w.cfg.LLM.AutoEnhance && result.Score >= w.cfg.LLM.MinimumScore {
+		if autoEnhanceEligible(w.cfg.LLM, result) {
 			_ = w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID, "changed_files": changedFiles}, time.Now().UTC())
 		}
 		diagnoses = append(diagnoses, jobDiagnosis{Job: job, Input: input, Result: result})
@@ -681,7 +699,7 @@ func (w *Worker) publishCheck(ctx context.Context, ev model.GitHubWorkflowRunEve
 	title := fmt.Sprintf("%s evidence — %s", prettyConfidence(r.Confidence), r.Category)
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Diagnosis:** %s\n\n", r.Summary)
-	fmt.Fprintf(&b, "**Attribution:** %s  \n**Provider:** %s  \n**Operation:** %s  \n**Evidence score:** %d/100  \n**Fingerprint:** `%s`\n\n", r.Attribution, r.Provider, r.Operation, r.Score, r.Fingerprint)
+	fmt.Fprintf(&b, "**Attribution:** %s  \n**Provider:** %s  \n**Operation:** %s  \n**Evidence strength:** %d/100  \n**Externality score:** %+d  \n**Fingerprint:** `%s`\n\n", r.Attribution, r.Provider, r.Operation, model.EvidenceStrengthOf(r), model.ExternalityScoreOf(r), r.Fingerprint)
 	if r.DecisionReason != "" {
 		fmt.Fprintf(&b, "**Decision:** %s\n\n", r.DecisionReason)
 	}
@@ -711,26 +729,9 @@ func (w *Worker) publishCheck(ctx context.Context, ev model.GitHubWorkflowRunEve
 func (w *Worker) publishPRComment(ctx context.Context, ev model.GitHubWorkflowRunEvent, owner, repo string, diagnoses []jobDiagnosis) error {
 	filtered := make([]jobDiagnosis, 0, len(diagnoses))
 	for _, d := range diagnoses {
-		if d.Result.Score < w.cfg.PRComments.MinimumScore {
-			continue
+		if prCommentEligible(w.cfg.PRComments, d.Result) {
+			filtered = append(filtered, d)
 		}
-		strong := d.Result.Confidence == model.ConfidenceStrong || d.Result.Confidence == model.ConfidenceLikelyCode
-		external := d.Result.Attribution == model.AttributionExternal
-		switch w.cfg.PRComments.Mode {
-		case "strong_only":
-			if !strong {
-				continue
-			}
-		case "external_only":
-			if !external {
-				continue
-			}
-		case "external_or_strong":
-			if !external && !strong {
-				continue
-			}
-		}
-		filtered = append(filtered, d)
 	}
 	if len(filtered) == 0 {
 		return nil
@@ -739,7 +740,7 @@ func (w *Worker) publishPRComment(ctx context.Context, ev model.GitHubWorkflowRu
 	b.WriteString("## CI Radar diagnosis\n\n")
 	fmt.Fprintf(&b, "Workflow: **%s** · Run [%d](%s) · Commit `%s`\n\n", ev.WorkflowRun.Name, ev.WorkflowRun.ID, ev.WorkflowRun.HTMLURL, shortSHA(ev.WorkflowRun.HeadSHA))
 	for _, d := range filtered {
-		fmt.Fprintf(&b, "### %s — %s (%d/100)\n\n", d.Job.Name, d.Result.Attribution, d.Result.Score)
+		fmt.Fprintf(&b, "### %s — %s (evidence %d/100, externality %+d)\n\n", d.Job.Name, d.Result.Attribution, model.EvidenceStrengthOf(d.Result), model.ExternalityScoreOf(d.Result))
 		fmt.Fprintf(&b, "**Cause:** %s  \n**Category:** `%s` · **Provider:** `%s` · **Confidence:** `%s`\n\n", d.Result.Summary, d.Result.Category, d.Result.Provider, d.Result.Confidence)
 		if len(d.Result.Evidence) > 0 {
 			b.WriteString("**Evidence**\n")
