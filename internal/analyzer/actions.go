@@ -7,9 +7,6 @@ import (
 	"ciradar/internal/model"
 )
 
-// SuggestedActions converts deterministic evidence into concrete next steps.
-// It intentionally does not use an LLM: every suggestion is explainable,
-// versionable, and safe to review in regulated environments.
 func SuggestedActions(result model.AnalysisResult) []model.SuggestedAction {
 	seen := map[string]struct{}{}
 	out := make([]model.SuggestedAction, 0, 4)
