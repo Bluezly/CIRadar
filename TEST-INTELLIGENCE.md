@@ -1,12 +1,29 @@
 # Test Intelligence
 
-## Identity
+## Accepted report formats
 
-A test key is derived from tenant, repository, framework, suite, class, test name and parameters. This prevents unrelated tests with the same short name from sharing history.
+- JUnit XML
+- Playwright JSON reporter
+- Jest JSON output
+- pytest-json-report
+- Cypress JSON output
+- Mocha JSON output
 
-## Flake score
+```bash
+ciradar tests ingest --repo acme/api --format playwright examples/playwright-report.json
+ciradar tests ingest --repo acme/api --format jest examples/jest-results.json
+ciradar tests ingest --repo acme/api --format pytest examples/pytest-report.json
+ciradar tests ingest --repo acme/api --format cypress examples/cypress-results.json
+ciradar tests ingest --repo acme/api --format junit examples/junit-failing.xml
+```
 
-The score combines pass/fail transition rate and failure balance. Classification requires history:
+## Test identity
+
+A test key includes tenant, repository, framework, suite, class, test name and parameters. File location, workflow, job, runner environment and commit metadata are retained as context.
+
+## Flaky classification
+
+Historical pass/fail transitions and failure balance produce these states:
 
 - `insufficient_history`
 - `stable`
@@ -14,26 +31,22 @@ The score combines pass/fail transition rate and failure balance. Classification
 - `consistently_failing`
 - `mixed`
 
-## Quarantine
+Probable cause categories include selector, timing, network, environment, resource, order/state, concurrency, data and unknown. Cause confidence is evidence-based and is not presented as certainty.
 
-Quarantine requires owner, reason and expiry. It is auditable and expires automatically. Auto-quarantine is disabled by default and capped at 30 days.
+## Quarantine and enforcement
 
-## CI enforcement
+Quarantine requires an owner, reason and expiry and is written to the audit trail. Auto-quarantine is off by default.
 
 ```bash
-ciradar tests ingest --repo acme/api junit.xml
-ciradar tests gate --repo acme/api junit.xml
+ciradar tests gate --repo acme/api --format junit examples/junit-failing.xml
 ```
 
-`gate` returns failure when any failed/error test is not actively quarantined. It returns success when failures are all quarantined. CI Radar does not modify the underlying runner or test framework.
+The command fails when a failed test is not actively quarantined and succeeds when all failures are quarantined. CI Radar does not alter the test runner itself.
 
-## API
+## Predictive selection
 
-```text
-POST   /api/v1/tests/junit
-GET    /api/v1/tests
-GET    /api/v1/tests/quarantines
-GET    /api/v1/tests/quarantine-manifest
-POST   /api/v1/tests/{key}/quarantine
-DELETE /api/v1/tests/{key}/quarantine
+```bash
+ciradar tests select --repo acme/api --changed src/payments.go,src/ledger.go
 ```
+
+The RC.2 selector uses changed-file proximity, test names, file identity, historical failures and optional flaky coverage. It is a transparent ranking model, not a learned coverage graph.
