@@ -1,0 +1,1 @@
+{"testResults":[{"name":"src/payments.test.ts","assertionResults":[{"ancestorTitles":["payments"],"title":"calculates total","status":"failed","duration":12,"failureMessages":["Expected 120 but received 119"]}]}]}

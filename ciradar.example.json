@@ -42,12 +42,14 @@
           "environment_changed",
           "incident_opened",
           "incident_updated",
-          "incident_resolved"
+          "incident_resolved",
+          "test_flaky"
         ],
         "minimum_score": 65,
         "cooldown": "15m",
         "timeout": "10s",
-        "max_attempts": 5
+        "max_attempts": 5,
+        "url": "env:CIRADAR_SLACK_WEBHOOK"
       },
       {
         "name": "discord-ops",
@@ -58,12 +60,14 @@
           "environment_changed",
           "incident_opened",
           "incident_updated",
-          "incident_resolved"
+          "incident_resolved",
+          "test_flaky"
         ],
         "minimum_score": 65,
         "cooldown": "15m",
         "timeout": "10s",
-        "max_attempts": 5
+        "max_attempts": 5,
+        "url": "env:CIRADAR_DISCORD_WEBHOOK"
       },
       {
         "name": "telegram-ops",
@@ -74,12 +78,15 @@
           "environment_changed",
           "incident_opened",
           "incident_updated",
-          "incident_resolved"
+          "incident_resolved",
+          "test_flaky"
         ],
         "minimum_score": 65,
         "cooldown": "15m",
         "timeout": "10s",
-        "max_attempts": 5
+        "max_attempts": 5,
+        "bot_token": "env:CIRADAR_TELEGRAM_BOT_TOKEN",
+        "chat_id": "env:CIRADAR_TELEGRAM_CHAT_ID"
       },
       {
         "name": "custom-webhook",
@@ -90,7 +97,8 @@
           "environment_changed",
           "incident_opened",
           "incident_updated",
-          "incident_resolved"
+          "incident_resolved",
+          "test_flaky"
         ],
         "minimum_score": 65,
         "cooldown": "15m",
@@ -109,7 +117,8 @@
         "minimum_score": 70,
         "cooldown": "15m",
         "timeout": "10s",
-        "max_attempts": 5
+        "max_attempts": 5,
+        "url": "env:CIRADAR_TEAMS_WEBHOOK"
       },
       {
         "name": "pagerduty-ops",
@@ -123,7 +132,8 @@
         "minimum_severity": "major",
         "cooldown": "5m",
         "timeout": "10s",
-        "max_attempts": 5
+        "max_attempts": 5,
+        "routing_key": "env:CIRADAR_PAGERDUTY_ROUTING_KEY"
       },
       {
         "name": "opsgenie-ops",
@@ -137,7 +147,8 @@
         "minimum_severity": "major",
         "cooldown": "5m",
         "timeout": "10s",
-        "max_attempts": 5
+        "max_attempts": 5,
+        "api_key": "env:CIRADAR_OPSGENIE_API_KEY"
       },
       {
         "name": "email-ops",
@@ -146,14 +157,22 @@
         "events": [
           "analysis",
           "incident_opened",
-          "incident_resolved"
+          "incident_resolved",
+          "test_flaky"
         ],
         "minimum_score": 75,
         "cooldown": "15m",
         "timeout": "15s",
         "max_attempts": 5,
         "smtp_port": 587,
-        "smtp_mode": "starttls"
+        "smtp_mode": "starttls",
+        "smtp_host": "smtp.example.com",
+        "smtp_username": "env:CIRADAR_SMTP_USERNAME",
+        "smtp_password": "env:CIRADAR_SMTP_PASSWORD",
+        "email_from": "ci-radar@example.com",
+        "email_to": [
+          "platform@example.com"
+        ]
       }
     ]
   },
@@ -198,6 +217,53 @@
       "tenant_id": "default",
       "token": "",
       "webhook_secret": ""
+    },
+    {
+      "name": "azuredevops",
+      "provider": "azuredevops",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://dev.azure.com/YOUR_ORGANIZATION",
+      "organization": "YOUR_ORGANIZATION",
+      "project": "YOUR_PROJECT",
+      "token": "env:CIRADAR_AZURE_DEVOPS_PAT",
+      "webhook_secret": "env:CIRADAR_AZURE_WEBHOOK_TOKEN"
+    },
+    {
+      "name": "bitrise",
+      "provider": "bitrise",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://api.bitrise.io",
+      "token": "env:CIRADAR_BITRISE_TOKEN",
+      "webhook_secret": "env:CIRADAR_BITRISE_WEBHOOK_TOKEN"
+    },
+    {
+      "name": "teamcity",
+      "provider": "teamcity",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://teamcity.example.com",
+      "token": "env:CIRADAR_TEAMCITY_TOKEN",
+      "webhook_secret": "env:CIRADAR_TEAMCITY_WEBHOOK_TOKEN"
+    },
+    {
+      "name": "travis",
+      "provider": "travis",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://api.travis-ci.com",
+      "token": "env:CIRADAR_TRAVIS_TOKEN",
+      "webhook_secret": "env:CIRADAR_TRAVIS_WEBHOOK_TOKEN"
+    },
+    {
+      "name": "codebuild",
+      "provider": "codebuild",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://codebuild.amazonaws.com",
+      "region": "us-east-1",
+      "webhook_secret": "env:CIRADAR_CODEBUILD_WEBHOOK_TOKEN"
     }
   ],
   "test_intelligence": {
@@ -207,5 +273,108 @@
     "auto_quarantine_min_score": 65,
     "auto_quarantine_duration": "7d"
   },
-  "database_url": ""
+  "database_url": "",
+  "source_url": "https://your-git-host.example/your-org/ci-radar/tree/EXACT_COMMIT",
+  "sso": {
+    "enabled": false,
+    "mode": "oidc",
+    "issuer_url": "https://identity.example.com",
+    "client_id": "ci-radar",
+    "client_secret": "env:CIRADAR_SSO_CLIENT_SECRET",
+    "redirect_url": "https://ci-radar.example.com/auth/callback",
+    "scopes": [
+      "openid",
+      "profile",
+      "email"
+    ],
+    "allowed_domains": [
+      "example.com"
+    ],
+    "tenant_claim": "tenant_id",
+    "role_claim": "role",
+    "groups_claim": "groups",
+    "admin_groups": [
+      "ci-radar-admins"
+    ],
+    "operator_groups": [
+      "ci-radar-operators"
+    ],
+    "viewer_groups": [
+      "ci-radar-viewers"
+    ],
+    "default_tenant": "default",
+    "default_role": "viewer",
+    "session_secret": "env:CIRADAR_SSO_SESSION_SECRET",
+    "cookie_name": "ciradar_session",
+    "cookie_secure": true,
+    "trusted_proxy_cidrs": [
+      "127.0.0.0/8"
+    ],
+    "proxy_secret_header": "X-CI-Radar-Proxy-Secret",
+    "proxy_secret": "env:CIRADAR_SSO_PROXY_SECRET"
+  },
+  "llm": {
+    "enabled": false,
+    "provider": "openai-compatible",
+    "endpoint": "https://api.example.com/v1/chat/completions",
+    "api_key": "env:CIRADAR_LLM_API_KEY",
+    "model": "YOUR_MODEL",
+    "embeddings_endpoint": "https://api.example.com/v1/embeddings",
+    "embedding_model": "YOUR_EMBEDDING_MODEL",
+    "auto_enhance": false,
+    "minimum_score": 70,
+    "max_input_characters": 24000,
+    "max_output_tokens": 1200,
+    "timeout": "45s",
+    "send_redacted_excerpt": true,
+    "send_changed_files": true
+  },
+  "chatops": {
+    "enabled": false,
+    "default_tenant": "default",
+    "slack_signing_secret": "env:CIRADAR_SLACK_SIGNING_SECRET",
+    "slack_allowed_users": [],
+    "slack_allowed_teams": [],
+    "teams_signing_secret": "env:CIRADAR_TEAMS_SIGNING_SECRET",
+    "teams_allowed_users": [],
+    "allow_acknowledge": true,
+    "allow_resolve": true,
+    "allow_quarantine": true,
+    "quarantine_duration": "7d"
+  },
+  "costs": {
+    "enabled": true,
+    "currency": "USD",
+    "default_rates": {
+      "github": 0.008,
+      "gitlab": 0,
+      "azuredevops": 0,
+      "buildkite": 0,
+      "circleci": 0,
+      "jenkins": 0,
+      "bitrise": 0,
+      "teamcity": 0,
+      "travis": 0,
+      "codebuild": 0
+    },
+    "runner_rates": {
+      "ubuntu-latest": 0.008,
+      "windows-latest": 0.016,
+      "macos-latest": 0.08
+    },
+    "billing_rounds": {}
+  },
+  "semantic_similarity": {
+    "enabled": true,
+    "remote_embeddings": false,
+    "vector_dimensions": 256,
+    "candidate_limit": 1000
+  },
+  "predictive_tests": {
+    "enabled": true,
+    "default_limit": 200,
+    "minimum_score": 20,
+    "always_run_flaky": true,
+    "always_run_failed": true
+  }
 }

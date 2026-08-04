@@ -1,0 +1,1 @@
+{"suites":[{"title":"checkout","specs":[{"title":"submits payment","file":"tests/checkout.spec.ts","tests":[{"status":"unexpected","projectName":"chromium","results":[{"duration":850,"error":{"message":"locator timed out waiting for pay button"}}]}]}]}]}
