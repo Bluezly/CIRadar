@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,32 +11,37 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 type NotificationChannel struct {
-	Name                string            `json:"name"`
-	Type                string            `json:"type"`
-	Enabled             bool              `json:"enabled"`
-	URL                 string            `json:"url,omitempty"`
-	BotToken            string            `json:"bot_token,omitempty"`
-	ChatID              string            `json:"chat_id,omitempty"`
-	MessageThreadID     int64             `json:"message_thread_id,omitempty"`
-	Username            string            `json:"username,omitempty"`
-	Mention             string            `json:"mention,omitempty"`
-	Events              []string          `json:"events,omitempty"`
-	Categories          []string          `json:"categories,omitempty"`
-	MinimumScore        int               `json:"minimum_score,omitempty"`
-	MinimumSeverity     string            `json:"minimum_severity,omitempty"`
-	ExternalOnly        bool              `json:"external_only,omitempty"`
-	IncludeRepositories []string          `json:"include_repositories,omitempty"`
-	ExcludeRepositories []string          `json:"exclude_repositories,omitempty"`
-	CooldownText        string            `json:"cooldown,omitempty"`
-	Cooldown            time.Duration     `json:"-"`
-	TimeoutText         string            `json:"timeout,omitempty"`
-	Timeout             time.Duration     `json:"-"`
-	MaxAttempts         int               `json:"max_attempts,omitempty"`
-	Headers             map[string]string `json:"headers,omitempty"`
-	HMACSecret          string            `json:"hmac_secret,omitempty"`
+	Name                     string            `json:"name"`
+	Type                     string            `json:"type"`
+	Enabled                  bool              `json:"enabled"`
+	URL                      string            `json:"url,omitempty"`
+	BotToken                 string            `json:"bot_token,omitempty"`
+	ChatID                   string            `json:"chat_id,omitempty"`
+	MessageThreadID          int64             `json:"message_thread_id,omitempty"`
+	Username                 string            `json:"username,omitempty"`
+	Mention                  string            `json:"mention,omitempty"`
+	Events                   []string          `json:"events,omitempty"`
+	Categories               []string          `json:"categories,omitempty"`
+	MinimumScore             int               `json:"minimum_score,omitempty"`
+	MinimumSeverity          string            `json:"minimum_severity,omitempty"`
+	ExternalOnly             bool              `json:"external_only,omitempty"`
+	IncludeRepositories      []string          `json:"include_repositories,omitempty"`
+	ExcludeRepositories      []string          `json:"exclude_repositories,omitempty"`
+	CooldownText             string            `json:"cooldown,omitempty"`
+	Cooldown                 time.Duration     `json:"-"`
+	TimeoutText              string            `json:"timeout,omitempty"`
+	Timeout                  time.Duration     `json:"-"`
+	MaxAttempts              int               `json:"max_attempts,omitempty"`
+	Headers                  map[string]string `json:"headers,omitempty"`
+	HMACSecret               string            `json:"hmac_secret,omitempty"`
+	QuietHoursStart          string            `json:"quiet_hours_start,omitempty"`
+	QuietHoursEnd            string            `json:"quiet_hours_end,omitempty"`
+	Timezone                 string            `json:"timezone,omitempty"`
+	QuietHoursBypassSeverity string            `json:"quiet_hours_bypass_severity,omitempty"`
 }
 
 type NotificationConfig struct {
@@ -43,65 +50,77 @@ type NotificationConfig struct {
 }
 
 type Config struct {
-	ListenAddress            string             `json:"listen_address"`
-	DatabasePath             string             `json:"database_path"`
-	DataDirectory            string             `json:"data_directory"`
-	RulesDirectory           string             `json:"rules_directory"`
-	LogLevel                 string             `json:"log_level"`
-	RetentionDays            int                `json:"retention_days"`
-	StoreRedactedExcerpts    bool               `json:"store_redacted_excerpts"`
-	StoreRawLogs             bool               `json:"store_raw_logs"`
-	CrossRepositorySharing   bool               `json:"cross_repository_sharing"`
-	IncidentWindow           time.Duration      `json:"-"`
-	IncidentWindowText       string             `json:"incident_window"`
-	IncidentRepoThreshold    int                `json:"incident_repo_threshold"`
-	IncidentOrgThreshold     int                `json:"incident_org_threshold"`
-	WorkerCount              int                `json:"worker_count"`
-	MaxLogBytes              int64              `json:"max_log_bytes"`
-	ProviderPolling          bool               `json:"provider_polling"`
-	ProviderPollInterval     time.Duration      `json:"-"`
-	ProviderPollIntervalText string             `json:"provider_poll_interval"`
-	AutomaticRetryEnabled    bool               `json:"automatic_retry_enabled"`
-	AutomaticRetryMinScore   int                `json:"automatic_retry_min_score"`
-	GitHubAppID              int64              `json:"github_app_id"`
-	GitHubPrivateKeyPath     string             `json:"github_private_key_path"`
-	GitHubWebhookSecret      string             `json:"github_webhook_secret"`
-	GitHubAPIURL             string             `json:"github_api_url"`
-	PublicBaseURL            string             `json:"public_base_url"`
-	FingerprintHMACKey       string             `json:"fingerprint_hmac_key"`
-	AdminToken               string             `json:"admin_token"`
-	Notifications            NotificationConfig `json:"notifications"`
+	ListenAddress                 string             `json:"listen_address"`
+	DatabasePath                  string             `json:"database_path"`
+	DataDirectory                 string             `json:"data_directory"`
+	RulesDirectory                string             `json:"rules_directory"`
+	LogLevel                      string             `json:"log_level"`
+	RetentionDays                 int                `json:"retention_days"`
+	StoreRedactedExcerpts         bool               `json:"store_redacted_excerpts"`
+	StoreRawLogs                  bool               `json:"store_raw_logs"`
+	CrossTenantCorrelation        bool               `json:"cross_tenant_correlation"`
+	IncidentWindow                time.Duration      `json:"-"`
+	IncidentWindowText            string             `json:"incident_window"`
+	IncidentRepoThreshold         int                `json:"incident_repo_threshold"`
+	IncidentOrgThreshold          int                `json:"incident_org_threshold"`
+	WorkerCount                   int                `json:"worker_count"`
+	MaxLogBytes                   int64              `json:"max_log_bytes"`
+	ProviderPolling               bool               `json:"provider_polling"`
+	ProviderPollInterval          time.Duration      `json:"-"`
+	ProviderPollIntervalText      string             `json:"provider_poll_interval"`
+	AutomaticRetryEnabled         bool               `json:"automatic_retry_enabled"`
+	AutomaticRetryMinScore        int                `json:"automatic_retry_min_score"`
+	GitHubAppID                   int64              `json:"github_app_id"`
+	GitHubPrivateKeyPath          string             `json:"github_private_key_path"`
+	GitHubWebhookSecret           string             `json:"github_webhook_secret"`
+	GitHubAPIURL                  string             `json:"github_api_url"`
+	RequireInstallationBinding    bool               `json:"require_github_installation_binding"`
+	PublicBaseURL                 string             `json:"public_base_url"`
+	FingerprintHMACKey            string             `json:"fingerprint_hmac_key"`
+	AdminToken                    string             `json:"admin_token"`
+	DefaultTenantID               string             `json:"default_tenant_id"`
+	AllowUnauthenticatedLocalhost bool               `json:"allow_unauthenticated_localhost"`
+	DashboardEnabled              bool               `json:"dashboard_enabled"`
+	IncidentResolveAfterText      string             `json:"incident_resolve_after"`
+	IncidentResolveAfter          time.Duration      `json:"-"`
+	Notifications                 NotificationConfig `json:"notifications"`
 }
 
 func Default() Config {
 	dataDir := ".ciradar"
 	return Config{
-		ListenAddress:            "127.0.0.1:8787",
-		DatabasePath:             filepath.Join(dataDir, "ciradar-state.json"),
-		DataDirectory:            dataDir,
-		RulesDirectory:           "rules",
-		LogLevel:                 "info",
-		RetentionDays:            30,
-		StoreRedactedExcerpts:    true,
-		StoreRawLogs:             false,
-		CrossRepositorySharing:   false,
-		IncidentWindowText:       "15m",
-		IncidentWindow:           15 * time.Minute,
-		IncidentRepoThreshold:    3,
-		IncidentOrgThreshold:     2,
-		WorkerCount:              2,
-		MaxLogBytes:              32 << 20,
-		ProviderPolling:          true,
-		ProviderPollIntervalText: "2m",
-		ProviderPollInterval:     2 * time.Minute,
-		AutomaticRetryEnabled:    false,
-		AutomaticRetryMinScore:   85,
-		GitHubAPIURL:             "https://api.github.com",
+		ListenAddress:                 "127.0.0.1:8787",
+		DatabasePath:                  filepath.Join(dataDir, "ciradar-state.json"),
+		DataDirectory:                 dataDir,
+		RulesDirectory:                "rules",
+		LogLevel:                      "info",
+		RetentionDays:                 30,
+		StoreRedactedExcerpts:         true,
+		StoreRawLogs:                  false,
+		CrossTenantCorrelation:        false,
+		IncidentWindowText:            "15m",
+		IncidentWindow:                15 * time.Minute,
+		IncidentRepoThreshold:         3,
+		IncidentOrgThreshold:          2,
+		WorkerCount:                   2,
+		MaxLogBytes:                   32 << 20,
+		ProviderPolling:               true,
+		ProviderPollIntervalText:      "2m",
+		ProviderPollInterval:          2 * time.Minute,
+		AutomaticRetryEnabled:         false,
+		AutomaticRetryMinScore:        85,
+		GitHubAPIURL:                  "https://api.github.com",
+		RequireInstallationBinding:    true,
+		DefaultTenantID:               "default",
+		AllowUnauthenticatedLocalhost: false,
+		DashboardEnabled:              true,
+		IncidentResolveAfterText:      "30m",
+		IncidentResolveAfter:          30 * time.Minute,
 		Notifications: NotificationConfig{Enabled: false, Channels: []NotificationChannel{
-			{Name: "slack-ops", Type: "slack", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "discord-ops", Type: "discord", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "telegram-ops", Type: "telegram", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "custom-webhook", Type: "webhook", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "slack-ops", Type: "slack", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "discord-ops", Type: "discord", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "telegram-ops", Type: "telegram", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "custom-webhook", Type: "webhook", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
 		}},
 	}
 }
@@ -163,6 +182,21 @@ func (c *Config) normalize() error {
 	if c.GitHubAPIURL == "" {
 		c.GitHubAPIURL = "https://api.github.com"
 	}
+	c.DefaultTenantID = strings.ToLower(strings.TrimSpace(c.DefaultTenantID))
+	if c.DefaultTenantID == "" {
+		c.DefaultTenantID = "default"
+	}
+	if c.IncidentResolveAfterText == "" {
+		c.IncidentResolveAfterText = "30m"
+	}
+	d, err = time.ParseDuration(c.IncidentResolveAfterText)
+	if err != nil || d < c.IncidentWindow {
+		return fmt.Errorf("invalid incident_resolve_after %q", c.IncidentResolveAfterText)
+	}
+	c.IncidentResolveAfter = d
+	if c.CrossTenantCorrelation && strings.TrimSpace(c.FingerprintHMACKey) == "" {
+		return errors.New("cross_tenant_correlation requires fingerprint_hmac_key")
+	}
 	names := map[string]struct{}{}
 	for i := range c.Notifications.Channels {
 		ch := &c.Notifications.Channels[i]
@@ -208,7 +242,38 @@ func (c *Config) normalize() error {
 			ch.MinimumScore = 100
 		}
 		if len(ch.Events) == 0 {
-			ch.Events = []string{"analysis", "incident_opened", "incident_updated", "incident_resolved"}
+			ch.Events = []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}
+		}
+		if ch.Timezone == "" {
+			ch.Timezone = "UTC"
+		}
+		if ch.QuietHoursBypassSeverity == "" {
+			ch.QuietHoursBypassSeverity = "critical"
+		}
+		if !validSeverity(ch.MinimumSeverity, true) {
+			return fmt.Errorf("notification channel %q has invalid minimum_severity %q", ch.Name, ch.MinimumSeverity)
+		}
+		if !validSeverity(ch.QuietHoursBypassSeverity, false) {
+			return fmt.Errorf("notification channel %q has invalid quiet_hours_bypass_severity %q", ch.Name, ch.QuietHoursBypassSeverity)
+		}
+		for _, event := range ch.Events {
+			if !validNotificationEvent(event) {
+				return fmt.Errorf("notification channel %q has unsupported event %q", ch.Name, event)
+			}
+		}
+		if (ch.QuietHoursStart == "") != (ch.QuietHoursEnd == "") {
+			return fmt.Errorf("notification channel %q requires both quiet_hours_start and quiet_hours_end", ch.Name)
+		}
+		if ch.QuietHoursStart != "" {
+			if _, err := time.Parse("15:04", ch.QuietHoursStart); err != nil {
+				return fmt.Errorf("notification channel %q has invalid quiet_hours_start", ch.Name)
+			}
+			if _, err := time.Parse("15:04", ch.QuietHoursEnd); err != nil {
+				return fmt.Errorf("notification channel %q has invalid quiet_hours_end", ch.Name)
+			}
+			if _, err := time.LoadLocation(ch.Timezone); err != nil {
+				return fmt.Errorf("notification channel %q has invalid timezone %q", ch.Name, ch.Timezone)
+			}
 		}
 		if ch.Enabled {
 			if (ch.Type == "slack" || ch.Type == "discord" || ch.Type == "webhook") && strings.TrimSpace(ch.URL) == "" {
@@ -222,8 +287,32 @@ func (c *Config) normalize() error {
 	return nil
 }
 
+func validSeverity(v string, allowEmpty bool) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return allowEmpty
+	}
+	switch v {
+	case "info", "minor", "major", "critical":
+		return true
+	default:
+		return false
+	}
+}
+
+func validNotificationEvent(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test":
+		return true
+	default:
+		return false
+	}
+}
+
 func SaveDefault(path string) error {
 	cfg := Default()
+	cfg.AdminToken = generateToken(32)
+	cfg.FingerprintHMACKey = generateSecret(32)
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -232,6 +321,18 @@ func SaveDefault(path string) error {
 		return err
 	}
 	return os.WriteFile(path, append(b, '\n'), 0o600)
+}
+
+func generateToken(n int) string {
+	return "cir_root_" + generateSecret(n)
+}
+
+func generateSecret(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func (c Config) GitHubConfigured() bool {
@@ -250,13 +351,18 @@ func applyEnv(c *Config) {
 	setString(&c.PublicBaseURL, "CIRADAR_PUBLIC_BASE_URL")
 	setString(&c.FingerprintHMACKey, "CIRADAR_FINGERPRINT_KEY")
 	setString(&c.AdminToken, "CIRADAR_ADMIN_TOKEN")
+	setString(&c.DefaultTenantID, "CIRADAR_DEFAULT_TENANT")
 	setString(&c.IncidentWindowText, "CIRADAR_INCIDENT_WINDOW")
+	setString(&c.IncidentResolveAfterText, "CIRADAR_INCIDENT_RESOLVE_AFTER")
 	setString(&c.ProviderPollIntervalText, "CIRADAR_PROVIDER_POLL_INTERVAL")
 	setBool(&c.StoreRawLogs, "CIRADAR_STORE_RAW_LOGS")
-	setBool(&c.CrossRepositorySharing, "CIRADAR_CROSS_REPO_SHARING")
+	setBool(&c.CrossTenantCorrelation, "CIRADAR_CROSS_TENANT_CORRELATION")
+	setBool(&c.RequireInstallationBinding, "CIRADAR_REQUIRE_INSTALLATION_BINDING")
 	setBool(&c.ProviderPolling, "CIRADAR_PROVIDER_POLLING")
 	setBool(&c.AutomaticRetryEnabled, "CIRADAR_AUTO_RETRY")
 	setBool(&c.Notifications.Enabled, "CIRADAR_NOTIFICATIONS_ENABLED")
+	setBool(&c.AllowUnauthenticatedLocalhost, "CIRADAR_ALLOW_UNAUTHENTICATED_LOCALHOST")
+	setBool(&c.DashboardEnabled, "CIRADAR_DASHBOARD_ENABLED")
 	setInt(&c.RetentionDays, "CIRADAR_RETENTION_DAYS")
 	setInt(&c.WorkerCount, "CIRADAR_WORKERS")
 	setInt(&c.IncidentRepoThreshold, "CIRADAR_INCIDENT_REPO_THRESHOLD")
