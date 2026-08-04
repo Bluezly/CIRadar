@@ -23,11 +23,16 @@ import (
 	"ciradar/internal/connectors"
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
+	"ciradar/internal/insights"
+	"ciradar/internal/llm"
 	mcpserver "ciradar/internal/mcp"
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
+	"ciradar/internal/similarity"
+	"ciradar/internal/sso"
 	"ciradar/internal/testintelligence"
+	"ciradar/internal/testselection"
 	"ciradar/internal/version"
 )
 
@@ -44,13 +49,28 @@ type Server struct {
 	analyzer *analyzer.Analyzer
 	log      *slog.Logger
 	http     *http.Server
+	sso      *sso.Manager
+	llm      *llm.Enhancer
 }
 
 func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: store, analyzer: a, log: log}
+	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store)}
+	if cfg.SSO.Enabled {
+		mgr, err := sso.New(cfg.SSO)
+		if err != nil {
+			log.Error("SSO initialization failed", "error", err)
+		} else {
+			s.sso = mgr
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.dashboardPage)
+	mux.HandleFunc("GET /source", s.sourcePage)
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /auth/login", s.authLogin)
+	mux.HandleFunc("GET /auth/callback", s.authCallback)
+	mux.HandleFunc("GET /auth/logout", s.authLogout)
+	mux.HandleFunc("GET /api/v1/auth/me", s.require(model.RoleViewer, s.authMe))
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/status", s.require(model.RoleViewer, s.status))
 	mux.HandleFunc("GET /api/v1/dashboard", s.require(model.RoleViewer, s.dashboardData))
@@ -63,13 +83,22 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /api/v1/analyses/{id}", s.require(model.RoleViewer, s.analysis))
 	mux.HandleFunc("POST /api/v1/analyze", s.require(model.RoleOperator, s.analyze))
 	mux.HandleFunc("POST /api/v1/analyses/{id}/feedback", s.require(model.RoleViewer, s.analysisFeedback))
+	mux.HandleFunc("GET /api/v1/analyses/{id}/llm", s.require(model.RoleViewer, s.getLLMEnhancement))
+	mux.HandleFunc("POST /api/v1/analyses/{id}/llm", s.require(model.RoleOperator, s.createLLMEnhancement))
+	mux.HandleFunc("GET /api/v1/analyses/{id}/similar", s.require(model.RoleViewer, s.similarAnalyses))
 	mux.HandleFunc("GET /api/v1/feedback", s.require(model.RoleViewer, s.feedbackList))
-	mux.HandleFunc("POST /api/v1/tests/junit", s.require(model.RoleOperator, s.ingestJUnit))
+	mux.HandleFunc("POST /api/v1/tests/junit", s.require(model.RoleOperator, s.ingestTestReport))
+	mux.HandleFunc("POST /api/v1/tests/report", s.require(model.RoleOperator, s.ingestTestReport))
 	mux.HandleFunc("GET /api/v1/tests", s.require(model.RoleViewer, s.testCases))
 	mux.HandleFunc("GET /api/v1/tests/quarantines", s.require(model.RoleViewer, s.testQuarantines))
+	mux.HandleFunc("POST /api/v1/tests/select", s.require(model.RoleViewer, s.selectTests))
 	mux.HandleFunc("GET /api/v1/tests/quarantine-manifest", s.require(model.RoleViewer, s.testQuarantineManifest))
 	mux.HandleFunc("POST /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.quarantineTest))
 	mux.HandleFunc("DELETE /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.unquarantineTest))
+	mux.HandleFunc("POST /api/v1/deployments", s.require(model.RoleOperator, s.recordDeployment))
+	mux.HandleFunc("GET /api/v1/metrics/dora", s.require(model.RoleViewer, s.doraMetrics))
+	mux.HandleFunc("GET /api/v1/metrics/usage", s.require(model.RoleViewer, s.usageMetrics))
+	mux.HandleFunc("GET /api/v1/metrics/trends", s.require(model.RoleViewer, s.trendMetrics))
 
 	mux.HandleFunc("POST /api/v1/baselines", s.require(model.RoleOperator, s.baseline))
 	mux.HandleFunc("GET /api/v1/notifications/deliveries", s.require(model.RoleViewer, s.notificationDeliveries))
@@ -93,9 +122,25 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /webhooks/buildkite", s.ciWebhook("buildkite"))
 	mux.HandleFunc("POST /webhooks/circleci", s.ciWebhook("circleci"))
 	mux.HandleFunc("POST /webhooks/jenkins", s.ciWebhook("jenkins"))
+	mux.HandleFunc("POST /webhooks/azuredevops", s.ciWebhook("azuredevops"))
+	mux.HandleFunc("POST /webhooks/bitrise", s.ciWebhook("bitrise"))
+	mux.HandleFunc("POST /webhooks/teamcity", s.ciWebhook("teamcity"))
+	mux.HandleFunc("POST /webhooks/travis", s.ciWebhook("travis"))
+	mux.HandleFunc("POST /webhooks/codebuild", s.ciWebhook("codebuild"))
+	mux.HandleFunc("POST /chatops/slack", s.slackChatOps)
+	mux.HandleFunc("POST /chatops/teams", s.teamsChatOps)
 	h := requestID(securityHeaders(logging(log, rateLimit(newRateLimiter(600, time.Minute), mux))))
 	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 	return s
+}
+
+func (s *Server) sourcePage(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(s.cfg.SourceURL) != "" {
+		http.Redirect(w, r, s.cfg.SourceURL, http.StatusFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, "<!doctype html><meta charset=utf-8><title>CI Radar source</title><body style=font-family:system-ui;max-width:760px;margin:60px auto;padding:20px><h1>CI Radar source code</h1><p>This deployment runs free software licensed under AGPL-3.0-or-later.</p><p>The corresponding source archive is distributed beside the server binary. The administrator should set <code>source_url</code> to the exact public source revision for this deployment.</p><p>Version: "+version.Version+" · Commit: "+version.Commit+"</p></body>")
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -125,6 +170,35 @@ func (s *Server) dashboardPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
 	_, _ = io.WriteString(w, dashboardHTML)
+}
+
+func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
+	if s.sso == nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.sso.Login(w, r)
+}
+
+func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
+	if s.sso == nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.sso.Callback(w, r)
+}
+
+func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
+	if s.sso == nil {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+	s.sso.Logout(w, r)
+}
+
+func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": p.TenantID, "name": p.Name, "role": p.Role, "root": p.Root, "sso_enabled": s.cfg.SSO.Enabled, "sso_mode": s.cfg.SSO.Mode})
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -173,13 +247,87 @@ func (s *Server) dashboardData(w http.ResponseWriter, r *http.Request) {
 			dur = d
 		}
 	}
-	d, err := s.store.Dashboard(r.Context(), principal(r).TenantID, time.Now().UTC().Add(-dur))
+	tenantID := principal(r).TenantID
+	since := time.Now().UTC().Add(-dur)
+	until := time.Now().UTC()
+	d, err := s.store.Dashboard(r.Context(), tenantID, since)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
+	dora, _ := insights.DORA(r.Context(), s.store, tenantID, r.URL.Query().Get("environment"), since, until)
+	usage, _ := insights.Usage(r.Context(), s.store, tenantID, since, until)
+	trends, _ := insights.Trends(r.Context(), s.store, tenantID, since, until)
+	d.DORA = dora
+	d.Usage = usage
+	d.DailyCost = trends["cost"]
 	writeJSON(w, 200, d)
 }
+
+func (s *Server) recordDeployment(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	var ev model.DeploymentEvent
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&ev); err != nil {
+		writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	ev.TenantID = p.TenantID
+	if strings.TrimSpace(ev.Repository) == "" || strings.TrimSpace(ev.Environment) == "" || strings.TrimSpace(ev.CommitSHA) == "" {
+		writeError(w, 400, "repository, environment, and commit_sha are required")
+		return
+	}
+	out, err := insights.RecordDeployment(r.Context(), s.store, ev)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	s.audit(r, "deployment.record", "deployment", out.ID, map[string]string{"repository": out.Repository, "environment": out.Environment, "status": out.Status})
+	writeJSON(w, 201, out)
+}
+
+func metricRange(r *http.Request) (time.Time, time.Time) {
+	until := time.Now().UTC()
+	if v := r.URL.Query().Get("until"); v != "" {
+		if t, e := time.Parse(time.RFC3339, v); e == nil {
+			until = t
+		}
+	}
+	since := until.Add(-30 * 24 * time.Hour)
+	if v := r.URL.Query().Get("since"); v != "" {
+		if t, e := time.Parse(time.RFC3339, v); e == nil {
+			since = t
+		}
+	}
+	return since, until
+}
+func (s *Server) doraMetrics(w http.ResponseWriter, r *http.Request) {
+	since, until := metricRange(r)
+	m, e := insights.DORA(r.Context(), s.store, principal(r).TenantID, r.URL.Query().Get("environment"), since, until)
+	if e != nil {
+		writeError(w, 500, e.Error())
+		return
+	}
+	writeJSON(w, 200, m)
+}
+func (s *Server) usageMetrics(w http.ResponseWriter, r *http.Request) {
+	since, until := metricRange(r)
+	m, e := insights.Usage(r.Context(), s.store, principal(r).TenantID, since, until)
+	if e != nil {
+		writeError(w, 500, e.Error())
+		return
+	}
+	writeJSON(w, 200, m)
+}
+func (s *Server) trendMetrics(w http.ResponseWriter, r *http.Request) {
+	since, until := metricRange(r)
+	m, e := insights.Trends(r.Context(), s.store, principal(r).TenantID, since, until)
+	if e != nil {
+		writeError(w, 500, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"since": since, "until": until, "series": m})
+}
+
 func (s *Server) incidents(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListIncidentsForTenant(r.Context(), principal(r).TenantID, limit, r.URL.Query().Get("state"))
@@ -218,6 +366,51 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, item)
 }
+func (s *Server) getLLMEnhancement(w http.ResponseWriter, r *http.Request) {
+	if s.llm == nil || !s.llm.Enabled() {
+		writeError(w, http.StatusNotFound, "LLM enhancement is disabled")
+		return
+	}
+	item, err := s.llm.Get(r.Context(), principal(r).TenantID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if item == nil {
+		writeError(w, http.StatusNotFound, "LLM enhancement not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
+	if s.llm == nil || !s.llm.Enabled() {
+		writeError(w, http.StatusBadRequest, "LLM enhancement is disabled")
+		return
+	}
+	p := principal(r)
+	analysis, err := s.store.GetAnalysisForTenant(r.Context(), p.TenantID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if analysis == nil {
+		writeError(w, http.StatusNotFound, "analysis not found")
+		return
+	}
+	var body struct {
+		ChangedFiles []string `json:"changed_files"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body)
+	result, err := s.llm.Enhance(r.Context(), *analysis, body.ChangedFiles)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.audit(r, "analysis.llm_enhance", "analysis", analysis.ID, map[string]string{"model": result.Model})
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) analysisFeedback(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	var body struct {
@@ -254,11 +447,12 @@ func (s *Server) feedbackList(w http.ResponseWriter, r *http.Request) {
 	metrics, _ := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
 	writeJSON(w, 200, map[string]any{"feedback": items, "metrics": metrics})
 }
-func (s *Server) ingestJUnit(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	q := r.URL.Query()
 	runID, _ := strconv.ParseInt(q.Get("run_id"), 10, 64)
-	obs, err := testintelligence.ParseJUnit(http.MaxBytesReader(w, r.Body, 128<<20), testintelligence.Metadata{TenantID: p.TenantID, Repository: q.Get("repository"), Workflow: q.Get("workflow"), Job: q.Get("job"), RunID: runID, CommitSHA: q.Get("commit_sha"), Branch: q.Get("branch"), Framework: firstNonEmpty(q.Get("framework"), "junit"), OccurredAt: time.Now().UTC()})
+	format := firstNonEmpty(q.Get("format"), "junit")
+	obs, err := testintelligence.ParseReport(format, http.MaxBytesReader(w, r.Body, 128<<20), testintelligence.Metadata{TenantID: p.TenantID, Repository: q.Get("repository"), Workflow: q.Get("workflow"), Job: q.Get("job"), RunID: runID, CommitSHA: q.Get("commit_sha"), Branch: q.Get("branch"), Framework: firstNonEmpty(q.Get("framework"), format), OccurredAt: time.Now().UTC()})
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
@@ -287,6 +481,11 @@ func (s *Server) ingestJUnit(w http.ResponseWriter, r *http.Request) {
 				auto = append(auto, qu)
 				_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: "system", Role: model.RoleOperator, Action: "test.auto_quarantine", Resource: "test", ResourceID: st.TestKey, Metadata: map[string]string{"repository": st.Repository, "score": fmt.Sprintf("%.1f", st.FlakeScore)}})
 			}
+		}
+	}
+	for _, st := range stats {
+		if st.Classification == "flaky" && !st.Quarantined {
+			_ = s.store.EnqueueForTenant(r.Context(), p.TenantID, "notify.event", notifications.FlakyTestEvent(st, s.cfg.PublicBaseURL), time.Now().UTC())
 		}
 	}
 	s.audit(r, "tests.ingest", "repository", q.Get("repository"), map[string]string{"tests": strconv.Itoa(len(obs)), "auto_quarantined": strconv.Itoa(len(auto))})
@@ -361,6 +560,33 @@ func firstNonEmpty(v, d string) string {
 		return v
 	}
 	return d
+}
+
+func (s *Server) similarAnalyses(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, e := similarity.FindConfigured(r.Context(), s.store, principal(r).TenantID, r.PathValue("id"), limit, s.cfg.Semantic, s.cfg.LLM)
+	if e != nil {
+		writeError(w, 500, e.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"similar": items})
+}
+func (s *Server) selectTests(w http.ResponseWriter, r *http.Request) {
+	var req model.TestSelectionRequest
+	if e := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&req); e != nil {
+		writeError(w, 400, "invalid JSON: "+e.Error())
+		return
+	}
+	if strings.TrimSpace(req.Repository) == "" {
+		writeError(w, 400, "repository is required")
+		return
+	}
+	out, e := testselection.Select(r.Context(), s.store, principal(r).TenantID, req)
+	if e != nil {
+		writeError(w, 500, e.Error())
+		return
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) notificationDeliveries(w http.ResponseWriter, r *http.Request) {
@@ -683,7 +909,7 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	resp := (&mcpserver.Server{Store: s.store}).Handle(r.Context(), p.TenantID, req)
+	resp := (&mcpserver.Server{Store: s.store, Semantic: s.cfg.Semantic, LLM: s.cfg.LLM}).Handle(r.Context(), p.TenantID, req)
 	if req.ID == nil {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -943,6 +1169,14 @@ func (s *Server) authenticate(r *http.Request) (model.Principal, bool) {
 	}
 	if p, _ := s.store.AuthenticateAPIKey(r.Context(), token); p != nil {
 		return *p, true
+	}
+	if s.sso != nil {
+		if p, ok := s.sso.Authenticate(r); ok {
+			t, _ := s.store.GetTenant(r.Context(), p.TenantID)
+			if t != nil && t.Enabled {
+				return *p, true
+			}
+		}
 	}
 	if token == "" && s.cfg.AllowUnauthenticatedLocalhost && isLoopback(r.RemoteAddr) {
 		t, _ := s.store.GetTenant(r.Context(), s.cfg.DefaultTenantID)

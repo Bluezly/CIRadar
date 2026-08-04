@@ -60,8 +60,7 @@ func rateLimit(l *rateLimiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limiter := l
 		if r.URL.Path == "/webhooks/github" {
-			// GitHub deliveries are HMAC-authenticated and deduplicated. A separate,
-			// larger bucket prevents a busy organization from starving dashboard/API traffic.
+
 			limiter = webhooks
 		}
 		if !limiter.allow(clientIP(r), time.Now().UTC()) {
