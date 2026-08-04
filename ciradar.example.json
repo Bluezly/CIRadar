@@ -28,7 +28,22 @@
   "admin_token": "REPLACE_WITH_LONG_RANDOM_ROOT_TOKEN",
   "default_tenant_id": "default",
   "allow_unauthenticated_localhost": false,
+  "trusted_proxy_cidrs": [
+    "127.0.0.0/8",
+    "::1/128"
+  ],
   "dashboard_enabled": true,
+  "dashboard_session_secret": "env:CIRADAR_DASHBOARD_SESSION_SECRET",
+  "dashboard_cookie_secure": true,
+  "redaction_patterns": [],
+  "redaction_entropy_detection": true,
+  "github_marketplace": {
+    "enabled": false,
+    "webhook_secret": "env:CIRADAR_MARKETPLACE_WEBHOOK_SECRET",
+    "auto_create_tenant": true,
+    "cancellation_policy": "retain_free",
+    "free_plan_name": "free"
+  },
   "incident_resolve_after": "30m",
   "notifications": {
     "enabled": false,
