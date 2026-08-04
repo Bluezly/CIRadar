@@ -16,6 +16,8 @@ import (
 	"ciradar/internal/connectors"
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
+	"ciradar/internal/insights"
+	"ciradar/internal/llm"
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
@@ -33,11 +35,12 @@ type Worker struct {
 	analyzer *analyzer.Analyzer
 	github   *gh.Client
 	notifier *notifications.Dispatcher
+	llm      *llm.Enhancer
 	log      *slog.Logger
 }
 
 func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, github *gh.Client, notifier *notifications.Dispatcher, log *slog.Logger) *Worker {
-	return &Worker{cfg: cfg, store: store, analyzer: a, github: github, notifier: notifier, log: log}
+	return &Worker{cfg: cfg, store: store, analyzer: a, github: github, notifier: notifier, llm: llm.New(cfg.LLM, store), log: log}
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -87,6 +90,24 @@ func (w *Worker) process(ctx context.Context, job db.Job) error {
 			return nil
 		}
 		return w.notifier.Dispatch(ctx, ev)
+	case "llm.enhance":
+		var payload struct {
+			TenantID     string   `json:"tenant_id"`
+			AnalysisID   string   `json:"analysis_id"`
+			ChangedFiles []string `json:"changed_files,omitempty"`
+		}
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return err
+		}
+		if w.llm == nil || !w.llm.Enabled() {
+			return nil
+		}
+		analysis, err := w.store.GetAnalysisForTenant(ctx, payload.TenantID, payload.AnalysisID)
+		if err != nil || analysis == nil {
+			return err
+		}
+		_, err = w.llm.Enhance(ctx, *analysis, payload.ChangedFiles)
+		return err
 	case "ci.event":
 		var ev model.CIEvent
 		if err := json.Unmarshal(job.Payload, &ev); err != nil {
@@ -133,6 +154,10 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 	if tenant == nil || !tenant.Enabled {
 		return fmt.Errorf("tenant %q is missing or disabled", tenantID)
 	}
+	ev.TenantID = tenantID
+	if ev.DurationSeconds > 0 || (!ev.StartedAt.IsZero() && !ev.CompletedAt.IsZero()) {
+		_, _ = insights.RecordUsage(ctx, w.store, ev, co.CostPerMinute, co.Currency)
+	}
 	logText, err := connectors.FetchLog(ctx, *co, ev, w.cfg.MaxLogBytes)
 	if err != nil {
 		return fmt.Errorf("fetch %s log: %w", ev.Provider, err)
@@ -170,6 +195,9 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 	if err := w.store.RecordAnalysisForTenant(ctx, tenantID, in, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 		return err
 	}
+	if w.cfg.LLM.AutoEnhance && result.Score >= w.cfg.LLM.MinimumScore {
+		_ = w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID}, time.Now().UTC())
+	}
 	if w.notifier != nil && w.notifier.Enabled() {
 		_ = w.store.EnqueueForTenant(ctx, tenantID, "notify.event", notifications.AnalysisEvent(in, result, w.cfg.PublicBaseURL), time.Now().UTC())
 	}
@@ -193,6 +221,27 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 		}
 	}
 	return nil
+}
+
+func (w *Worker) costRate(provider, runnerClass string, labels []string) float64 {
+	if v, ok := w.cfg.Costs.RunnerRates[strings.ToLower(strings.TrimSpace(runnerClass))]; ok {
+		return v
+	}
+	for _, label := range labels {
+		if v, ok := w.cfg.Costs.RunnerRates[strings.ToLower(strings.TrimSpace(label))]; ok {
+			return v
+		}
+	}
+	if v, ok := w.cfg.Costs.DefaultRates[strings.ToLower(provider)]; ok {
+		return v
+	}
+	return 0
+}
+func firstNonEmpty(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
 }
 
 func shouldPublishDeveloperComment(mode string, r model.AnalysisResult) bool {
@@ -269,6 +318,14 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 	if err != nil {
 		return err
 	}
+	for _, job := range jobs {
+		duration := int64(0)
+		if !job.StartedAt.IsZero() && !job.CompletedAt.IsZero() {
+			duration = int64(job.CompletedAt.Sub(job.StartedAt).Seconds())
+		}
+		rate := w.costRate("github", job.RunnerGroupName, job.Labels)
+		_, _ = insights.RecordUsage(ctx, w.store, model.CIEvent{TenantID: tenantID, Provider: "github", Repository: ev.Repository.FullName, Organization: owner, Workflow: ev.WorkflowRun.Name, Job: job.Name, RunID: ev.WorkflowRun.ID, JobID: strconv.FormatInt(job.ID, 10), CommitSHA: ev.WorkflowRun.HeadSHA, Conclusion: job.Conclusion, Status: job.Status, RunURL: ev.WorkflowRun.HTMLURL, StartedAt: job.StartedAt, CompletedAt: job.CompletedAt, DurationSeconds: duration, RunnerClass: firstNonEmpty(job.RunnerGroupName, job.RunnerName), RunnerLabels: job.Labels, Currency: w.cfg.Costs.Currency, OccurredAt: job.CompletedAt}, rate, w.cfg.Costs.Currency)
+	}
 	if ev.WorkflowRun.Conclusion == "success" {
 		return w.captureSuccessfulEnvironment(ctx, tenantID, ev, jobs, owner, repo)
 	}
@@ -278,11 +335,13 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 	}
 	workflowChanged, dependencyChanged := false, false
 	changeInfoAvailable := false
+	changedFiles := []string{}
 	if len(ev.WorkflowRun.PullRequests) > 0 {
 		files, err := w.github.ListPullRequestFiles(ctx, ev.Installation.ID, owner, repo, ev.WorkflowRun.PullRequests[0].Number)
 		if err != nil {
 			w.log.Warn("could not inspect PR files", "error", err)
 		} else {
+			changedFiles = append(changedFiles, files...)
 			workflowChanged, dependencyChanged = classifyChangedFiles(files)
 			changeInfoAvailable = true
 		}
@@ -317,6 +376,9 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		result := w.analyzer.Analyze(input, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: providerIncident, PreviousEnvironment: prevEnv})
 		if err := w.store.RecordAnalysisForTenant(ctx, tenantID, input, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 			return err
+		}
+		if w.cfg.LLM.AutoEnhance && result.Score >= w.cfg.LLM.MinimumScore {
+			_ = w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID, "changed_files": changedFiles}, time.Now().UTC())
 		}
 		diagnoses = append(diagnoses, jobDiagnosis{Job: job, Input: input, Result: result})
 		if w.notifier != nil && w.notifier.Enabled() {
