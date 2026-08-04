@@ -82,3 +82,65 @@ func writeTestFile(t *testing.T, root, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestCoverageReadableIdentitySelectsIngestedTest(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	obs := model.TestObservation{TenantID: "default", Repository: "fake/repo", Framework: "junit", Suite: "payments", ClassName: "PaymentServiceTest", Name: "retries_transient_gateway_error", File: "tests/payment_service_test.go", Status: "failed", OccurredAt: time.Now().UTC()}
+	if _, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{obs}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = MergeCoverage(ctx, store, "default", model.TestCoverageInput{Repository: "fake/repo", Coverage: map[string][]string{"payments/PaymentServiceTest::retries_transient_gateway_error": {"fakerepo/src/payments.go"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Select(ctx, store, "default", model.TestSelectionRequest{Repository: "fake/repo", ChangedFiles: []string{"fakerepo/src/payments.go"}, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Selected) != 1 || out.Selected[0].Strategy != "coverage" {
+		t.Fatalf("%#v", out)
+	}
+	if len(out.Diagnostics) != 0 {
+		t.Fatalf("diagnostics=%v", out.Diagnostics)
+	}
+}
+
+func TestEmptySelectionExplainsCoverageIdentityMismatch(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	obs := model.TestObservation{TenantID: "default", Repository: "fake/repo", Framework: "junit", Suite: "accounts", ClassName: "AccountServiceTest", Name: "unrelated_behavior", Status: "passed", OccurredAt: time.Now().UTC()}
+	if _, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{obs}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = MergeCoverage(ctx, store, "default", model.TestCoverageInput{Repository: "fake/repo", Coverage: map[string][]string{"unrelated/test": {"src/payments.go"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Select(ctx, store, "default", model.TestSelectionRequest{Repository: "fake/repo", ChangedFiles: []string{"src/payments.go"}, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Selected) != 0 || len(out.Diagnostics) == 0 {
+		t.Fatalf("%#v", out)
+	}
+}
+
+func TestResolveTestAcceptsReadableIdentity(t *testing.T) {
+	stats := []model.TestCaseStats{{TestKey: "520c59865eaf60792dcadc23048c3660", Suite: "payments", ClassName: "PaymentServiceTest", Name: "retries_transient_gateway_error"}}
+	got, err := ResolveTest(stats, "payments/PaymentServiceTest/retries_transient_gateway_error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TestKey != stats[0].TestKey {
+		t.Fatalf("got=%s", got.TestKey)
+	}
+}
