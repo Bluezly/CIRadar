@@ -45,7 +45,7 @@ func Select(ctx context.Context, store db.Backend, tenant string, req model.Test
 		if scoreValue < req.MinimumScore {
 			continue
 		}
-		selected = append(selected, model.SelectedTest{TestKey: st.TestKey, Name: st.Name, Suite: st.Suite, ClassName: st.ClassName, File: st.File, Framework: st.Framework, PriorityScore: scoreValue, Confidence: confidence, Strategy: strategy, Reason: reason, ImpactPath: path, Quarantined: st.Quarantined})
+		selected = append(selected, model.SelectedTest{TestKey: st.TestKey, DisplayName: DisplayName(st), Name: st.Name, Suite: st.Suite, ClassName: st.ClassName, File: st.File, Framework: st.Framework, PriorityScore: scoreValue, Confidence: confidence, Strategy: strategy, Reason: reason, ImpactPath: path, Quarantined: st.Quarantined})
 	}
 	sort.SliceStable(selected, func(i, j int) bool {
 		if selected[i].PriorityScore == selected[j].PriorityScore {
@@ -71,7 +71,7 @@ func impactScore(st model.TestCaseStats, changed []string, graph model.ImpactGra
 		for _, changedFile := range changed {
 			for _, source := range covered {
 				if fileMatches(source, changedFile) {
-					return adjustTestSignals(100, .98, "coverage", "per-test coverage directly includes a changed file", coverageImpactPath(source, changedFile), st, includeFlaky)
+					return adjustTestSignals(100, .98, "coverage", "per-test coverage directly includes a changed file", coverageImpactPath(st.File, source, changedFile), st, includeFlaky)
 				}
 			}
 		}
@@ -95,13 +95,17 @@ func impactScore(st model.TestCaseStats, changed []string, graph model.ImpactGra
 	return score, confidence, strategy, reason, nil
 }
 
-func coverageImpactPath(source, changed string) []string {
-	source = norm(source)
-	changed = norm(changed)
-	if source == changed {
-		return []string{source}
+func coverageImpactPath(testFile, source, changedFile string) []string {
+	values := []string{norm(testFile), norm(source), norm(changedFile)}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
 	}
-	return []string{source, changed}
+	return out
 }
 
 func adjustTestSignals(score, confidence float64, strategy, reason string, path []string, st model.TestCaseStats, includeFlaky bool) (float64, float64, string, string, []string) {

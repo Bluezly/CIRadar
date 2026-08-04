@@ -134,13 +134,13 @@ func MergeCoverage(ctx context.Context, store db.Backend, tenant string, input m
 		graph.TestCoverage = map[string][]string{}
 	}
 	for key, covered := range input.Coverage {
-		key = strings.TrimSpace(key)
+		key = normalizeTestIdentity(key)
 		if key == "" {
 			continue
 		}
 		normalized := normalize(covered)
 		if len(normalized) > 0 {
-			graph.TestCoverage[key] = uniqueSorted(normalized)
+			graph.TestCoverage[key] = uniqueSorted(append(graph.TestCoverage[key], normalized...))
 		}
 	}
 	if err := SaveGraph(ctx, store, tenant, graph); err != nil {
