@@ -285,3 +285,80 @@ func TestBrowserAndGitLFSRegressionCases(t *testing.T) {
 		})
 	}
 }
+
+func TestToolchainAttributionIsDistinct(t *testing.T) {
+	r := New("test").Analyze(model.AnalysisInput{Log: "ERROR: Fatal Internal error [id=1]. Please report as a bug."}, Context{})
+	if r.Attribution != model.AttributionToolchain {
+		t.Fatalf("attribution=%s confidence=%s score=%d", r.Attribution, r.Confidence, r.Score)
+	}
+}
+
+func TestChangedDependencyCreatesCompetingEvidence(t *testing.T) {
+	r := New("test").Analyze(model.AnalysisInput{
+		Repository:          "acme/app",
+		Log:                 "npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/react failed",
+		ChangeInfoAvailable: true,
+		DependencyChanged:   true,
+		WorkflowChanged:     true,
+	}, Context{})
+	if r.NegativeScore > -30 {
+		t.Fatalf("negative score=%d evidence=%+v", r.NegativeScore, r.Evidence)
+	}
+	if r.Attribution != model.AttributionMixed {
+		t.Fatalf("attribution=%s score=%d +%d %d", r.Attribution, r.Score, r.PositiveScore, r.NegativeScore)
+	}
+}
+
+func TestScoreBreakdownAndCompetingSignals(t *testing.T) {
+	log := "npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/a failed\nerror TS2322: Type 'string' is not assignable to type 'number'"
+	r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
+	if r.Attribution != model.AttributionMixed {
+		t.Fatalf("attribution=%s evidence=%+v", r.Attribution, r.Evidence)
+	}
+	if !r.CompetingSignals {
+		t.Fatal("expected competing signals")
+	}
+	total := 0
+	for _, e := range r.Evidence {
+		total += e.Weight
+	}
+	if total != r.RawScore {
+		t.Fatalf("evidence sum=%d raw=%d", total, r.RawScore)
+	}
+	if r.Score < 0 || r.Score > 100 {
+		t.Fatalf("score=%d", r.Score)
+	}
+}
+
+func TestCompareEnvironmentIncludesArchitectureActionsAndContainers(t *testing.T) {
+	previous := model.Environment{RunnerArch: "X64", ActionVersions: []string{"actions/checkout@v4"}, ContainerRefs: []string{"postgres:16"}}
+	current := model.Environment{RunnerArch: "ARM64", ActionVersions: []string{"actions/checkout@v5"}, ContainerRefs: []string{"postgres:17"}}
+	changes := CompareEnvironment(previous, current)
+	joined := strings.Join(changes, "\n")
+	for _, expected := range []string{"runner architecture", "actions:", "containers:"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("missing %q in %v", expected, changes)
+		}
+	}
+}
+
+func TestFingerprintUsesHMACKey(t *testing.T) {
+	in := model.AnalysisInput{TenantID: "alpha", Repository: "acme/api", Log: "npm ERR! code ECONNRESET"}
+	a := New("key-a").Analyze(in, Context{})
+	b := New("key-b").Analyze(in, Context{})
+	again := New("key-a").Analyze(in, Context{})
+	if a.Fingerprint == b.Fingerprint {
+		t.Fatal("different HMAC keys produced the same shared fingerprint")
+	}
+	if a.Fingerprint != again.Fingerprint {
+		t.Fatal("same HMAC key did not produce a stable fingerprint")
+	}
+	in.Repository = "acme/web"
+	otherRepo := New("key-a").Analyze(in, Context{})
+	if a.Fingerprint != otherRepo.Fingerprint {
+		t.Fatal("shared fingerprint changed across repositories")
+	}
+	if a.PrivateFingerprint == otherRepo.PrivateFingerprint {
+		t.Fatal("private fingerprint did not include repository scope")
+	}
+}
