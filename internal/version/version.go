@@ -1,7 +1,7 @@
 package version
 
 var (
-	Version   = "1.1.0-oss-rc.2"
+	Version   = "1.2.0-oss-rc.3"
 	Commit    = "development"
 	BuildDate = "unknown"
 )
