@@ -4,7 +4,7 @@ chcp 65001 >nul
 if not exist ciradar.json CIRadar-Windows-x64.exe init --config ciradar.json >nul
 
 echo ============================================================
-echo CI Radar Beta 4 - Smoke Tests
+echo CI Radar Beta 5 - Smoke Tests
 echo ============================================================
 for %%F in (
   samples\npm-econnreset.log
