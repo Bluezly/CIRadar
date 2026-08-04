@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"ciradar/internal/config"
 	"ciradar/internal/db"
 	"ciradar/internal/model"
 )
@@ -66,4 +67,64 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestOAuthReadScopeHidesWriteTools(t *testing.T) {
+	srv := &Server{Store: mcpStore(t), Runtime: NewRuntime()}
+	principal := model.Principal{TenantID: model.DefaultTenantID, Name: "reader", Role: model.RoleOperator, Scopes: []string{"ciradar.read"}}
+	resp := srv.HandlePrincipal(context.Background(), principal, Request{JSONRPC: "2.0", ID: 1, Method: "tools/list"})
+	if resp.Error != nil {
+		t.Fatal(resp.Error)
+	}
+	b, _ := json.Marshal(resp.Result)
+	if contains(string(b), "prepare_action") || contains(string(b), "acknowledge_incident") {
+		t.Fatalf("write tools exposed: %s", b)
+	}
+}
+
+func TestRepairProposalAndConfirmedDraftPR(t *testing.T) {
+	store := mcpStore(t)
+	ctx := context.Background()
+	analysis := model.AnalysisResult{ID: "repair-analysis", TenantID: model.DefaultTenantID, Repository: "acme/api", Attribution: model.AttributionCode, CreatedAt: time.Now().UTC()}
+	if err := store.RecordAnalysisForTenant(ctx, model.DefaultTenantID, model.AnalysisInput{TenantID: model.DefaultTenantID, Repository: "acme/api"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	enhancement := model.LLMEnhancement{AnalysisID: analysis.ID, TenantID: model.DefaultTenantID, Patch: "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n", CreatedAt: time.Now().UTC()}
+	if err := store.PutObject(ctx, model.DefaultTenantID, "llm_enhancement", analysis.ID, enhancement); err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewRuntime()
+	srv := &Server{Store: store, Runtime: runtime, Repair: config.RepairConfig{Enabled: true}}
+	principal := model.Principal{TenantID: model.DefaultTenantID, Name: "operator", Role: model.RoleOperator}
+	proposal, err := srv.callTool(ctx, principal, CallParams{Name: "get_repair_proposal", Arguments: map[string]any{"analysis_id": analysis.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(proposal)
+	if !contains(string(encoded), "diff --git") || !contains(string(encoded), "repair-analysis") {
+		t.Fatalf("proposal=%s", encoded)
+	}
+	prepared, err := srv.callTool(ctx, principal, CallParams{Name: "prepare_action", Arguments: map[string]any{"action": "create_draft_repair_pr", "target": analysis.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmation := prepared.(map[string]any)["confirmation_token"].(string)
+	queued, err := srv.callTool(ctx, principal, CallParams{Name: "create_draft_repair_pr", Arguments: map[string]any{"target": analysis.ID, "confirmation_token": confirmation}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued.(map[string]any)["status"] != "queued" {
+		t.Fatalf("queued=%#v", queued)
+	}
+	job, err := store.ClaimJob(ctx, "mcp-test")
+	if err != nil || job == nil || job.Type != "repair.draft_pr" || job.TenantID != model.DefaultTenantID {
+		t.Fatalf("job=%#v err=%v", job, err)
+	}
+}
+
+func TestPrepareRejectsUnsupportedWriteAction(t *testing.T) {
+	_, _, err := NewRuntime().Prepare(model.Principal{TenantID: model.DefaultTenantID, Name: "operator", Role: model.RoleOperator}, "retry_everything", "target", "")
+	if err == nil {
+		t.Fatal("unsupported action was accepted")
+	}
 }
