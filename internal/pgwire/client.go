@@ -1,7 +1,3 @@
-// Package pgwire implements the small PostgreSQL protocol surface CI Radar
-// needs for its bundled PostgreSQL state backend. It intentionally supports
-// simple queries only, but includes TLS, cleartext, MD5, and SCRAM-SHA-256
-// authentication so deployments do not need a CGO client or downloaded driver.
 package pgwire
 
 import (
