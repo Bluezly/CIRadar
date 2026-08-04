@@ -1,76 +1,44 @@
-# CI Radar architecture — 1.2.0 OSS RC.3
+# CI Radar architecture — 1.3.0 OSS RC.4
 
-CI Radar is a free self-hosted CI failure intelligence service. The deterministic analyzer remains the decision core. Optional systems such as LLM enhancement and remote embeddings operate above the stored deterministic result and never replace it.
-
-## Processing path
+CI Radar is a self-hosted Go service with a deterministic diagnosis core and optional local or BYOK intelligence layers.
 
 ```text
-CI provider webhook or manual upload
-             |
-             v
-signature validation and tenant resolution
-             |
-             v
-normalized CIEvent and persistent queue
-             |
-             v
-bounded log retrieval and secret redaction
-             |
-             v
-rules, contradictory evidence, history, provider state and correlation
-             |
-             v
-AnalysisResult, suggested actions and protected fingerprint
-             |
-             +--> GitHub Check and sticky PR comment
-             +--> GitLab sticky MR note
-             +--> incident lifecycle and ChatOps
-             +--> notifications and on-call systems
-             +--> dashboard, DORA, cost and historical trends
-             +--> read-only MCP and optional BYOK LLM
+CI providers and uploaded reports
+              |
+       authenticated adapters
+              |
+         normalized CIEvent
+              |
+  redaction -> rules -> attribution
+              |
+ incidents, baselines, tests, DORA, cost
+              |
+ PostgreSQL or embedded storage
+              |
+ Dashboard, Checks, PR/MR comments, alerts, ChatOps, API, MCP
 ```
 
-## Packages
+## Main components
 
-- `internal/analyzer` contains deterministic rules, scoring, attribution, environment drift, fingerprints and suggested actions.
-- `internal/connectors` validates and normalizes GitLab, Buildkite, CircleCI, Jenkins, Azure DevOps, Bitrise, TeamCity, Travis CI and AWS CodeBuild events.
-- `internal/github` handles GitHub App authentication, Actions logs, Check Runs and sticky PR comments.
-- `internal/marketplace` records optional GitHub Marketplace installation metadata without product feature gates.
-- `internal/db` defines the storage contract and implements embedded and PostgreSQL backends.
-- `internal/pgwire` is the bundled PostgreSQL wire client with TLS and SCRAM-SHA-256.
-- `internal/testintelligence` parses JUnit, Playwright, Jest, pytest, Cypress and Mocha reports and infers probable flaky causes.
-- `internal/testselection` ranks tests against changed files and historical failures.
-- `internal/insights` calculates DORA metrics, CI usage, cost estimates and daily trends.
-- `internal/similarity` offers local vector similarity and optional remote embeddings.
-- `internal/llm` provides optional OpenAI-compatible explanation and patch generation.
-- `internal/sso` implements native OIDC and trusted authentication-proxy identity for SAML deployments.
-- `internal/notifications` provides policy routing, retries, deduplication and enterprise channels.
-- `internal/mcp` exposes tenant-scoped read-only tools and resources.
-- `internal/server` provides HTTP, dashboard, SSO, REST, webhooks, ChatOps, metrics and MCP.
-- `internal/worker` executes queued work, correlation, comments, drift events and safe retry decisions.
+- `internal/connectors` normalizes fifteen CI providers and performs provider-scoped log retrieval and safe rerun.
+- `internal/analyzer` redacts secrets, applies deterministic rules, weighs contradictory evidence, and produces explainable attribution.
+- `internal/incident` correlates fingerprints across repositories and organizations.
+- `internal/testselection` stores coverage maps and static import impact graphs for test selection.
+- `internal/testintel` tracks test observations, flake state, likely causes, quarantine, and CI gates.
+- `internal/similarity` separates lexical hashing from Ollama, local vector-file, and remote embedding engines.
+- `internal/sso` implements OIDC, native strict-profile SAML with `xmlsec1`, and trusted proxy identity.
+- `internal/mcp` provides stdio and HTTP MCP, OAuth metadata, PKCE, sessions, SSE notifications, and confirmed Operator actions.
+- `internal/repair` creates bounded patch plans and optional GitHub draft repair pull requests. It never auto-merges.
+- `internal/db` provides the embedded backend and relational PostgreSQL object, queue, delivery, migration, and indexing layers.
 
 ## Storage
 
-Every caller depends on `db.Backend`.
+The embedded backend targets evaluation and small single-process installations. PostgreSQL stores independent tenant-scoped entity rows and a separate `SKIP LOCKED` queue. It is suitable for replicated self-hosting, but CI Radar does not claim a globally distributed hyperscale event store.
 
-### Embedded backend
+## Automation boundary
 
-The embedded backend uses atomic replacement, fsync and backup recovery. It is suitable for evaluation and small single-process installations.
+Safe rerun is allowed only for high-confidence external failures and is disabled by default. Repair proposals require explicit enablement. MCP mutations require Operator authorization plus a short-lived action confirmation. Source changes are never auto-merged.
 
-### PostgreSQL backend
+## Data boundary
 
-The PostgreSQL backend supports verified TLS, SCRAM-SHA-256, migrations, transactions, row locks, and advisory locks. RC.3 stores one row per tenant entity in `ciradar_objects`, jobs in a queue table, and webhook idempotency records in a delivery table. Locks are scoped to the affected tenant and entity kind. This removes the global JSONB bottleneck while preserving the existing backend contract. It is a scalable self-hosted entity store, not a distributed hyperscale analytics claim.
-
-## Isolation and authorization
-
-All analyses, incidents, test history, quarantines, deployments, usage, notifications, API keys, installation bindings and audit records are tenant-scoped. Roles are Viewer, Operator, Admin and Root. SSO identities map to the same principal model as API keys.
-
-## Security boundaries
-
-- Raw logs are disabled by default.
-- Redaction runs before persistence and fingerprinting.
-- Cross-tenant correlation is disabled by default and requires an HMAC key.
-- LLM and remote embeddings are disabled by default.
-- ChatOps write actions are disabled until explicitly enabled.
-- MCP is read-only.
-- Auto-retry and auto-quarantine are disabled by default.
+Raw logs are off by default. Redaction occurs before excerpts, fingerprints, persistence, LLM requests, and similarity text. Cross-tenant correlation uses HMAC fingerprints when enabled.

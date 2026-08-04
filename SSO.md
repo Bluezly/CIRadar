@@ -1,8 +1,10 @@
-# SSO
+# Single sign-on
+
+CI Radar supports native OIDC, native SAML 2.0 SP mode, and a trusted identity-proxy mode. All successful flows create an encrypted HttpOnly CI Radar session and then apply the same tenant and role mapping.
 
 ## Native OIDC
 
-CI Radar supports OIDC Authorization Code with PKCE, discovery, JWKS rotation, RS256 and ES256 validation, issuer and audience validation, nonce validation, domain allowlists, group-to-role mapping, and signed HttpOnly sessions.
+OIDC uses Authorization Code with PKCE, discovery, rotating JWKS, issuer and audience checks, nonce validation, domain allowlists, and group-to-role mapping.
 
 ```json
 {
@@ -17,14 +19,61 @@ CI Radar supports OIDC Authorization Code with PKCE, discovery, JWKS rotation, R
     "cookie_secure": true,
     "allowed_domains": ["example.com"],
     "admin_groups": ["ci-radar-admins"],
-    "operator_groups": ["ci-radar-operators"]
+    "operator_groups": ["ci-radar-operators"],
+    "viewer_groups": ["ci-radar-viewers"]
   }
 }
 ```
 
-## SAML
+## Native SAML 2.0
 
-CI Radar does not implement a second XML-signature stack. SAML is supported through a trusted SAML-aware authentication proxy. The proxy validates the SAML assertion and sends identity headers to CI Radar over a private network. CI Radar verifies a shared secret and the proxy source CIDR before trusting the headers.
+Native SAML mode creates an SP AuthnRequest, accepts the HTTP-POST response at `/auth/callback`, validates response binding and assertion conditions, rejects replay, and verifies the XML signature with a pinned IdP certificate through `xmlsec1`.
+
+Install `xmlsec1` on every CI Radar replica and restrict `saml_xmlsec_path` to the expected executable. CI Radar invokes only that configured executable with fixed arguments and temporary files; it does not execute assertion-controlled commands.
+
+```json
+{
+  "sso": {
+    "enabled": true,
+    "mode": "saml",
+    "session_secret": "env:CIRADAR_SSO_SESSION_SECRET",
+    "cookie_secure": true,
+    "saml_entity_id": "https://ci-radar.example.com/saml/metadata",
+    "saml_idp_sso_url": "https://id.example.com/saml/sso",
+    "saml_idp_entity_id": "https://id.example.com/metadata",
+    "saml_idp_certificate": "/run/secrets/idp-signing-cert.pem",
+    "saml_acs_url": "https://ci-radar.example.com/auth/callback",
+    "saml_xmlsec_path": "/usr/bin/xmlsec1",
+    "saml_email_attribute": "email",
+    "saml_name_attribute": "name",
+    "saml_clock_skew": "2m",
+    "default_tenant": "default",
+    "default_role": "viewer"
+  }
+}
+```
+
+SP metadata is available at:
+
+```text
+GET /auth/saml/metadata
+```
+
+The accepted profile is intentionally strict:
+
+- one SAML Response and one Assertion
+- one XML Signature covering the Response or Assertion by same-document ID
+- signed XML verified against the configured IdP certificate
+- matching `InResponseTo`, ACS destination, recipient, issuer, audience, and bearer confirmation
+- bounded clock skew and replay prevention
+- no encrypted assertions
+- no external XML entities or processing instructions
+
+Encrypted assertions and uncommon SAML extensions require an upstream IdP or gateway to emit the supported profile.
+
+## Trusted identity proxy
+
+Proxy mode remains available for organizations that already centralize SSO at a gateway. CI Radar trusts identity headers only when the direct peer belongs to `trusted_proxy_cidrs` and the request contains the configured shared secret.
 
 ```json
 {
@@ -43,4 +92,4 @@ CI Radar does not implement a second XML-signature stack. SAML is supported thro
 }
 ```
 
-Never expose proxy identity headers directly to the public internet.
+Never expose trusted identity headers directly to an untrusted network.

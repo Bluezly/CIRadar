@@ -1,71 +1,63 @@
 # CI connectors
 
-All connectors normalize provider-specific payloads into the same tenant-scoped `CIEvent`. The analyzer, incident engine, DORA metrics, cost tracking and notifications are shared across providers.
+All provider adapters normalize webhook and API data into the same tenant-scoped `CIEvent`. Diagnosis, incidents, DORA metrics, CI cost, notifications, safe rerun, and test intelligence operate on that shared model.
 
-## Common connector fields
+## Supported providers
 
-```json
-{
-  "name": "provider-prod",
-  "provider": "azuredevops",
-  "enabled": true,
-  "tenant_id": "acme",
-  "base_url": "https://dev.azure.com/acme",
-  "token": "env:CIRADAR_PROVIDER_TOKEN",
-  "webhook_secret": "env:CIRADAR_PROVIDER_WEBHOOK_SECRET"
-}
+| Provider | Webhook ingestion | Log retrieval | Native safe rerun |
+|---|---:|---:|---:|
+| GitHub Actions | yes | yes | yes |
+| GitLab CI | yes | yes | yes |
+| Buildkite | yes | yes | yes |
+| CircleCI | yes | yes | yes |
+| Jenkins | yes | supplied or configured endpoint | configured endpoint |
+| Azure DevOps Pipelines | yes | yes | yes |
+| Bitrise | yes | yes | yes |
+| TeamCity | yes | yes | yes |
+| Travis CI | yes | yes | yes |
+| AWS CodeBuild | yes | event context or configured endpoint | configured endpoint |
+| Bitbucket Pipelines | yes | yes | yes |
+| Drone CI | yes | yes | yes |
+| Semaphore | yes | yes | yes |
+| AppVeyor | yes | yes | yes |
+| Google Cloud Build | yes | yes | yes |
+
+The generic retry endpoint exists for deployments where Jenkins or CodeBuild log and retry operations are exposed through an operator-controlled adapter.
+
+## Routes
+
+```text
+POST /webhooks/github
+POST /webhooks/gitlab
+POST /webhooks/buildkite
+POST /webhooks/circleci
+POST /webhooks/jenkins
+POST /webhooks/azuredevops
+POST /webhooks/bitrise
+POST /webhooks/teamcity
+POST /webhooks/travis
+POST /webhooks/codebuild
+POST /webhooks/bitbucket
+POST /webhooks/drone
+POST /webhooks/semaphore
+POST /webhooks/appveyor
+POST /webhooks/cloudbuild
 ```
 
-Supported secret forms are `env:NAME` and `enc:v1:...`.
+## Authentication and SSRF boundary
 
-## Provider endpoints
+Each connector has its own token or webhook secret. Provider log and retry requests use the configured provider base URL or a provider-defined host. Arbitrary log URLs from webhook payloads are not fetched unless they match the trusted connector boundary.
 
-| Provider | Webhook endpoint | Log source |
-|---|---|---|
-| GitHub Actions | `/webhooks/github` | GitHub Actions job logs |
-| GitLab CI | `/webhooks/gitlab` | Job trace API |
-| Buildkite | `/webhooks/buildkite` | Build/job log API |
-| CircleCI | `/webhooks/circleci` | Job steps and output URLs |
-| Jenkins | `/webhooks/jenkins` | `consoleText` from an allowlisted base URL |
-| Azure DevOps Pipelines | `/webhooks/azuredevops` | Build Logs REST API |
-| Bitrise | `/webhooks/bitrise` | Build log API |
-| TeamCity | `/webhooks/teamcity` | Build log endpoint |
-| Travis CI | `/webhooks/travis` | Job log API |
-| AWS CodeBuild | `/webhooks/codebuild` | EventBridge phase context or supplied log context |
+Keep connector tokens in environment references or encrypted secret values. Assign each connector to one tenant.
 
-## GitHub Actions
+## Safe rerun
 
-GitHub uses a GitHub App installation. CI Radar verifies HMAC-SHA256 webhooks, resolves the installation to a tenant, retrieves failed job logs, publishes a Check Run and optionally maintains one sticky Pull Request comment.
+Automatic rerun is disabled by default. It can run only when:
 
-## GitLab CI
+- deterministic attribution is `EXTERNAL`
+- the score meets `automatic_retry_min_score`
+- the category is on the safe-rerun allowlist
+- the run has not already been retried by CI Radar
+- no provider-wide incident suppresses individual reruns
 
-Enable job webhooks and configure the project access token needed to read traces. When an event contains a Merge Request IID, CI Radar maintains a sticky Merge Request note.
-
-## Jenkins adapter
-
-Jenkins payloads differ by plugin. CI Radar accepts a stable adapter payload and enforces the configured base URL before fetching `consoleText`.
-
-```json
-{
-  "name": "unit-tests",
-  "repository": "acme/api",
-  "commit": "abc123",
-  "branch": "main",
-  "build": {
-    "number": 42,
-    "phase": "FINALIZED",
-    "status": "FAILURE",
-    "full_url": "https://jenkins.example/job/api/42/"
-  }
-}
-```
-
-## Delivery controls
-
-- terminal events only
-- bounded request bodies and logs
-- webhook replay and duplicate suppression
-- fetch timeouts and maximum byte limits
-- secret redaction in transport errors
-- tenant resolution before queueing
-- disabled tenant rejection
+Every attempt is idempotently recorded and audited. Safe rerun does not modify source code or workflow configuration.

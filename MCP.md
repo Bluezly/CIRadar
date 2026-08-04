@@ -1,8 +1,30 @@
 # CI Radar MCP
 
-CI Radar exposes tenant-scoped read-only MCP tools. It deliberately excludes retry, resolve, quarantine and policy-changing operations.
+CI Radar exposes tenant-scoped MCP through stdio and Streamable HTTP. Read tools work with Viewer access. State-changing tools require Operator access, an active MCP session, and a short-lived confirmation token produced by `prepare_action`.
 
-## Tools
+## Transports
+
+### stdio
+
+```bash
+ciradar mcp --config ciradar.json --tenant acme
+```
+
+stdout is reserved for JSON-RPC messages.
+
+### HTTP
+
+- `POST /mcp` sends JSON-RPC requests
+- `GET /mcp` opens a server-sent event stream for an authenticated session
+- `DELETE /mcp` closes a session
+- `MCP-Session-Id` identifies the session
+- `Origin` is validated when present
+- protocol versions are validated
+- server notifications are emitted to active sessions
+
+CI Radar publishes OAuth protected-resource and authorization-server metadata, dynamic client registration, Authorization Code with PKCE, token issuance, and token revocation for MCP clients.
+
+## Read tools
 
 - `list_active_incidents`
 - `get_incident`
@@ -14,24 +36,28 @@ CI Radar exposes tenant-scoped read-only MCP tools. It deliberately excludes ret
 - `select_impacted_tests`
 - `get_dora_metrics`
 - `get_ci_costs`
+- `get_repair_proposal`
 
-## Resources
+## Confirmed write tools
 
-- `ciradar://incidents/active`
-- `ciradar://analyses/recent`
-- `ciradar://tests/flaky`
-- dynamic incident, analysis and repository-health templates
+- `acknowledge_incident`
+- `resolve_incident`
+- `quarantine_test`
+- `unquarantine_test`
+- `create_draft_repair_pr`
 
-## stdio
+The client first calls:
 
-```bash
-ciradar mcp --config ciradar.json --tenant acme
+```json
+{
+  "name": "prepare_action",
+  "arguments": {
+    "action": "resolve_incident",
+    "target": "incident-fingerprint"
+  }
+}
 ```
 
-stdout is reserved for JSON-RPC messages.
+The returned confirmation token is short-lived and bound to the tenant, actor, action, and target. The client then passes it to the selected write tool. CI Radar records an audit event for every accepted mutation.
 
-## HTTP
-
-Use `POST /mcp` with a tenant-scoped Viewer API key.
-
-The HTTP transport validates `Origin` when present, validates supported MCP protocol versions and returns JSON-RPC responses as `application/json`. It does not implement OAuth discovery, sessions, SSE or server-initiated notifications. Authentication remains CI Radar SSO or API keys.
+MCP cannot run arbitrary commands, alter CI Radar configuration, apply a patch locally, or merge a repair pull request.

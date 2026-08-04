@@ -1,52 +1,67 @@
-# Test Intelligence
+# Test intelligence and impact selection
 
-## Accepted report formats
+CI Radar ingests JUnit XML, Playwright JSON, Jest JSON, pytest-json-report, Cypress JSON, and Mocha JSON. It tracks individual test identity, pass/fail history, likely flake cause, quarantine state, owner, expiry, and audit history.
 
-- JUnit XML
-- Playwright JSON reporter
-- Jest JSON output
-- pytest-json-report
-- Cypress JSON output
-- Mocha JSON output
+## Impact-aware selection
 
-```bash
-ciradar tests ingest --repo acme/api --format playwright examples/playwright-report.json
-ciradar tests ingest --repo acme/api --format jest examples/jest-results.json
-ciradar tests ingest --repo acme/api --format pytest examples/pytest-report.json
-ciradar tests ingest --repo acme/api --format cypress examples/cypress-results.json
-ciradar tests ingest --repo acme/api --format junit examples/junit-failing.xml
-```
+Selection uses three evidence layers, in descending strength:
 
-## Test identity
+1. per-test coverage maps supplied by the test runner or coverage tooling
+2. a repository impact graph built from Go, JavaScript/TypeScript, and Python imports
+3. transparent historical and path-proximity heuristics
 
-A test key includes tenant, repository, framework, suite, class, test name and parameters. File location, workflow, job, runner environment and commit metadata are retained as context.
+Each selected test reports:
 
-## Flaky classification
+- `strategy`: `coverage`, `dependency_graph`, or a heuristic strategy
+- `confidence`
+- `priority_score`
+- `impact_path` when a dependency path was found
+- the human-readable reason
 
-Historical pass/fail transitions and failure balance produce these states:
-
-- `insufficient_history`
-- `stable`
-- `flaky`
-- `consistently_failing`
-- `mixed`
-
-Probable cause categories include selector, timing, network, environment, resource, order/state, concurrency, data and unknown. Cause confidence is evidence-based and is not presented as certainty.
-
-## Quarantine and enforcement
-
-Quarantine requires an owner, reason and expiry and is written to the audit trail. Auto-quarantine is off by default.
+Build the repository graph:
 
 ```bash
-ciradar tests gate --repo acme/api --format junit examples/junit-failing.xml
+ciradar tests index --repo acme/app --root .
 ```
 
-The command fails when a failed test is not actively quarantined and succeeds when all failures are quarantined. CI Radar does not alter the test runner itself.
-
-## Predictive selection
+Merge a coverage map:
 
 ```bash
-ciradar tests select --repo acme/api --changed src/payments.go,src/ledger.go
+ciradar tests coverage --repo acme/app coverage-map.json
 ```
 
-The RC.2 selector uses changed-file proximity, test names, file identity, historical failures and optional flaky coverage. It is a transparent ranking model, not a learned coverage graph.
+Example coverage input:
+
+```json
+{
+  "repository": "acme/app",
+  "coverage": {
+    "tests/payments.spec.ts::declines expired cards": [
+      "src/payments/card.ts",
+      "src/ledger/write.ts"
+    ]
+  }
+}
+```
+
+Select tests:
+
+```bash
+ciradar tests select --repo acme/app --changed src/payments/card.ts,src/ledger/write.ts
+```
+
+The impact graph is a static import graph, not a whole-program dynamic call graph. Coverage data is the strongest available signal. Reflection, runtime code generation, framework routing, and native calls may require explicit coverage mappings or always-run suites.
+
+## Flake classification
+
+CI Radar can classify likely causes such as timing, selector, network, environment, resource pressure, order/state, concurrency, and data. These labels are evidence-based hints, not proof of a root cause.
+
+## Quarantine and gate
+
+Quarantine requires an owner, reason, and expiry. The CI gate ignores only active quarantines and fails on other failing tests:
+
+```bash
+ciradar tests gate --repo acme/app --format junit results.xml
+```
+
+Automatic quarantine is optional and disabled by default.

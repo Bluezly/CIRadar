@@ -1,63 +1,44 @@
-# Security
+# Security model
+
+CI Radar is designed for self-hosting around sensitive CI metadata. Operators still own network isolation, identity policy, PostgreSQL hardening, secret rotation, backups, and provider permissions.
 
 ## Safe defaults
 
-- raw log storage off
-- automatic retry off
-- auto-quarantine off
-- cross-tenant correlation off
-- optional LLM off
-- remote embeddings off
-- ChatOps writes off
-- MCP read-only
-- unauthenticated API access off
-- trusted proxy list empty
-- PostgreSQL TLS defaults to certificate and hostname verification
-
-## Reverse proxies and rate limits
-
-`X-Forwarded-For` and `X-Real-IP` are ignored unless the direct peer is inside `trusted_proxy_cidrs`. Configure only the load balancers and reverse proxies you operate.
-
-```json
-{
-  "trusted_proxy_cidrs": ["10.20.0.0/16", "2001:db8:1234::/48"]
-}
-```
-
-CI Radar walks the forwarding chain from the trusted edge toward the original client. Untrusted clients cannot select their own rate-limit identity. Localhost bypass also uses the resolved client address, so a local reverse proxy does not make remote clients local administrators.
+- raw-log persistence disabled
+- external LLM disabled
+- automatic rerun disabled
+- repair and draft repair PR disabled
+- automatic quarantine disabled
+- cross-tenant correlation disabled
+- MCP writes require Operator role and confirmation
+- forwarded client headers ignored unless the direct proxy is trusted
 
 ## Browser security
 
-The dashboard is served with a restrictive Content Security Policy and contains no inline script, inline style, or inline event handlers. Browser token login exchanges the token for an AES-GCM encrypted, HttpOnly, SameSite=Strict session cookie. The token is not retained in Web Storage.
-
-OIDC flow state and SSO identity sessions are also AES-GCM encrypted. Cookie-authenticated write requests require a same-origin `Origin` or `Referer`. HSTS is emitted when HTTPS is detected directly, through the configured public URL, or through a trusted proxy.
-
-## Secrets and redaction
-
-Environment references and AES-256-GCM encrypted configuration values are supported. API keys are stored as hashes. PostgreSQL indexes the hash for direct lookup instead of scanning and stopping at a matching key.
-
-Redaction includes known token formats, authorization headers, credential URLs, private keys, sensitive environment variables, JWTs, and an optional high-entropy detector. Operators can add organization-specific regular expressions with `redaction_patterns`. Custom patterns and entropy detection reduce risk but cannot prove that every proprietary secret format is recognized. Keep raw-log storage and external LLM transmission disabled unless the data boundary is understood.
-
-## Webhook verification
-
-- GitHub and GitHub Marketplace HMAC-SHA256
-- GitLab token or HMAC
-- Buildkite token or timestamped HMAC
-- CircleCI HMAC
-- provider adapter token or HMAC for Jenkins, Azure DevOps, Bitrise, TeamCity, Travis CI, and CodeBuild
-- Slack timestamped request signing
-- Teams outgoing-webhook HMAC
-
-Requests are size-limited and duplicate deliveries are suppressed.
+The dashboard has a restrictive Content Security Policy with external same-origin assets and no inline event handlers. Browser token login exchanges the token for an AES-GCM encrypted HttpOnly, SameSite=Strict cookie. Cookie-authenticated writes require a same-origin `Origin` or `Referer`. HSTS is emitted when HTTPS is known.
 
 ## SSO
 
-Native OIDC validates discovery metadata, issuer, audience, signature, expiration, not-before, nonce, and PKCE state. SAML uses a trusted authentication proxy. Identity headers are accepted only from configured proxy CIDRs and require a shared secret.
+OIDC validates discovery metadata, issuer, audience, signature, expiration, not-before, nonce, and PKCE state.
 
-## LLM boundary
+Native SAML accepts a strict response profile and verifies XML signatures with a pinned IdP certificate through the configured `xmlsec1` executable. The executable path is operator-controlled; arguments are fixed; input uses temporary files; execution is time-limited. Encrypted assertions are not accepted.
 
-The deterministic analysis is the source of truth. Raw logs are not sent by the LLM layer. Redacted excerpts and changed filenames are separately configurable. Repository and log text are untrusted data. Generated patches are suggestions and are never automatically applied.
+Trusted proxy identity remains optional and is accepted only from configured CIDRs with a shared secret.
+
+## Secrets and redaction
+
+Environment references and AES-256-GCM encrypted configuration values are supported. API keys are stored as hashes. Redaction covers known tokens, authorization headers, credential URLs, private keys, sensitive variables, JWTs, custom organization patterns, and optional high-entropy values.
+
+A denylist cannot guarantee discovery of every proprietary secret. Keep raw logs and external model transmission disabled until the data boundary is reviewed.
+
+## Provider and webhook security
+
+Webhook bodies are size-limited, signatures or configured secrets are verified, duplicate deliveries are suppressed, and connector HTTP requests stay inside provider-configured trust boundaries. Slack includes timestamp replay protection. GitHub Marketplace state is metadata only and never gates OSS features.
+
+## MCP and automation
+
+MCP OAuth tokens and API keys remain tenant-scoped. Stateful mutations require a prepared confirmation token bound to the actor, action, target, tenant, and expiry. Safe rerun is allowlisted and idempotent. Repair cannot execute arbitrary commands and cannot auto-merge.
 
 ## Reporting vulnerabilities
 
-Do not include customer logs, private keys, tokens, database URLs, or webhook URLs in public reports. Use the private security contact configured by the project operator.
+Do not place customer logs, keys, tokens, database URLs, SAML assertions, or webhook URLs in public reports. Use the project's private security contact.

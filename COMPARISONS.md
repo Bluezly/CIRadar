@@ -1,31 +1,36 @@
 # CI Radar comparison guide
 
-This page explains product positioning, not a claim that one tool replaces every other category. Competitor capabilities change, so verify current vendor documentation before publishing a purchasing comparison.
+This page explains product positioning rather than claiming that one self-hosted service replaces every CI or observability product.
 
-## Positioning
+## Where CI Radar is strongest
 
-CI Radar is strongest when a team wants:
-
-- self-hosted and auditable source code
-- a deterministic diagnosis core with visible evidence
-- multi-CI ingestion in one service
-- test intelligence, incidents, DORA, cost, ChatOps, and MCP without sending raw logs to a closed SaaS
-- optional BYOK LLM and embeddings rather than a mandatory AI data path
+- free AGPL self-hosting and auditable source
+- deterministic attribution with visible evidence and contradictory signals
+- fifteen CI providers normalized into one incident and test model
+- PostgreSQL, SSO, test intelligence, DORA, cost, alerts, ChatOps, and MCP in one service
+- optional Ollama, local vectors, remote embeddings, and BYOK LLM paths
+- conservative automation with audit and human confirmation
 
 ## Category comparison
 
-| Capability | CI Radar OSS | CI observability suites | Flaky-test specialists | AI CI repair tools |
+| Capability | CI Radar OSS | Managed CI observability | Flaky-test specialist | AI repair platform |
 |---|---|---|---|---|
-| Self-hosted source available | Core design | Varies | Varies | Varies |
-| Deterministic explainable diagnosis | Core design | Often mixed with proprietary analysis | Usually test-focused | Usually model-focused |
-| Multi-CI ingestion | Included | Common | Varies | Varies |
-| Test-level history and quarantine | Included | Often included | Core specialty | Varies |
-| Distributed hyperscale event store | Not claimed | Common in mature SaaS | Vendor-managed | Vendor-managed |
-| Automatic code repair | Deliberately not automatic | Varies | Sometimes | Core specialty |
-| BYOK LLM layer | Optional | Varies | Varies | Often required or hosted |
-| Read-only MCP | Included | Varies | Varies | Increasingly common |
-| AGPL self-hosting | Included | Usually no | Usually no | Usually no |
+| Self-hosted source | core | varies | varies | varies |
+| Deterministic diagnosis | core | often proprietary or mixed | test-focused | model-focused |
+| Multi-CI ingestion | 15 providers | common | varies | varies |
+| Test history and quarantine | included | often included | core specialty | varies |
+| Coverage/import-aware test selection | included | often proprietary | varies | varies |
+| Globally distributed event store | not claimed | common in mature SaaS | vendor-managed | vendor-managed |
+| Neural local similarity | Ollama or local vectors | vendor-managed | varies | commonly hosted |
+| Native OIDC and SAML | included | common | varies | common |
+| Automatic source repair | bounded proposal and draft PR | varies | sometimes | core specialty |
+| MCP writes | confirmed Operator actions | varies | varies | increasing |
 
-## Honest tradeoffs
+## Honest limits
 
-CI Radar does not have the operational history, contributor count, support organization, or globally distributed data plane of long-running SaaS vendors. Its advantage is control, inspectability, conservative automation, and coverage in one self-hosted service. Organizations needing contractual SLA, managed global scale, or fully automatic code repair should evaluate those requirements explicitly.
+- the impact graph is static imports plus optional per-test coverage, not a complete dynamic call graph
+- local neural similarity requires an Ollama embedding model or a supplied vector file; lexical hashing is labeled as fallback
+- native SAML requires `xmlsec1` on the host and supports a strict assertion profile
+- PostgreSQL is relational and tenant-scoped, but is not a globally distributed Datadog-scale event plane
+- macOS and ARM binaries are cross-built in CI; operators should run platform acceptance tests
+- project age, maintainer count, support history, and production scale must be evaluated from repository activity, not source claims

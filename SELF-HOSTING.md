@@ -1,42 +1,45 @@
 # Self-hosting
 
-Use PostgreSQL, TLS termination, encrypted secrets, a restricted service account, and a dedicated hostname for production.
+Production deployments should use PostgreSQL, HTTPS, encrypted secrets, SSO, restricted provider credentials, and at least one isolated worker.
 
 ```text
-reverse proxy or SSO gateway
-             |
-     CI Radar replicas
-             |
-         PostgreSQL
+load balancer or reverse proxy
+              |
+      CI Radar replicas
+              |
+          PostgreSQL
 ```
 
 ## Production checklist
 
-- configure `public_base_url` with HTTPS
-- set `trusted_proxy_cidrs` to the exact proxy networks, not `0.0.0.0/0`
-- enable secure dashboard and SSO cookies
-- use PostgreSQL `sslmode=verify-full` with the expected CA
-- provide secrets through environment references or encrypted values
-- keep raw logs off unless a retention and access policy exists
-- set retention limits for analyses, audits, deliveries, jobs, and test observations
+- set `public_base_url` to the HTTPS origin
+- trust only exact load-balancer networks in `trusted_proxy_cidrs`
+- use PostgreSQL `sslmode=verify-full` and the expected CA
+- use environment references or encrypted configuration values for secrets
+- enable OIDC or native SAML and secure cookies
+- install `xmlsec1` on every replica when native SAML is enabled
+- keep raw logs off unless retention and access policy are explicit
+- configure analysis, audit, job, test, and delivery retention
 - back up PostgreSQL and the exact source revision
-- monitor `/readyz`, `/metrics`, queue age, notification failures, and database latency
-- set `source_url` to the corresponding source for the deployed AGPL binary
+- monitor `/readyz`, `/metrics`, queue age, database latency, and failed notifications
+- set `source_url` to the corresponding AGPL source revision
+- validate every enabled CI connector against a non-production repository
 
-The embedded backend is for evaluation and small single-process installations. PostgreSQL is required for multiple server and worker processes.
+The embedded backend is intended for evaluation and small single-process use.
 
-## Proxy example
+## Multi-platform binaries
 
-```json
-{
-  "public_base_url": "https://ci-radar.example.com",
-  "trusted_proxy_cidrs": ["10.30.0.0/16"],
-  "dashboard_cookie_secure": true
-}
-```
+Release builds include Windows, Linux, and macOS for amd64 and arm64. macOS binaries are cross-built without CGO; test them on the exact macOS and Apple Silicon versions used by the organization.
 
-Forward the original `Host` and `X-Forwarded-Proto`. Send `X-Forwarded-For` only from trusted infrastructure.
+## Native SAML dependencies
 
-## Secrets
+The service account needs execute access to `xmlsec1`, read access to the pinned IdP certificate, and write access to the operating system temporary directory. Do not point `saml_xmlsec_path` at a wrapper controlled by untrusted users.
 
-Store database, SSO, GitHub, webhook, SMTP, LLM, embedding, and incident-management secrets outside the repository. Rotate dashboard, SSO, API, and webhook keys under a documented procedure. Rotation of cookie encryption keys invalidates existing sessions, which is safer than accepting old sessions indefinitely.
+## Similarity deployment choices
+
+- `lexical`: no model, deterministic hashing fallback
+- `ollama`: local neural embeddings through an Ollama endpoint
+- `local-vectors`: local word-vector file
+- `remote`: configured embedding API
+
+Keep the selected endpoint on a trusted network and treat repository and log text as untrusted input.

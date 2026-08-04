@@ -1,39 +1,22 @@
-# Tested features — 1.2.0 OSS RC.3
+# Tested features — 1.3.0 OSS RC.4
 
 Automated tests cover:
 
-- deterministic classification and contradictory evidence
-- secret redaction and HMAC fingerprints
-- tenant isolation, RBAC, API-key hashing and audit records
-- embedded persistence and PostgreSQL protocol transactions
-- GitHub App JWT, webhook verification, logs, Checks and sticky PR comments
-- GitLab sticky MR notes
-- webhook parsing for ten CI providers
-- Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie and generic webhooks
-- notification routing, retries, cooldowns, quiet hours and deduplication
-- Slack and Teams ChatOps authorization
-- JUnit, Playwright, Jest, pytest, Cypress and Mocha ingestion
-- flaky-cause inference, quarantine and CI gate behavior
-- DORA, usage, cost and trends
-- local similarity, optional remote embedding fallback and predictive test selection
-- optional OpenAI-compatible LLM enhancement
-- OIDC claim mapping and trusted proxy SSO
-- read-only tenant-scoped MCP
-- Windows and Linux static builds
+- deterministic classification, contrary evidence, redaction, and HMAC fingerprints
+- tenant isolation, RBAC, API-key hashing, audit, encrypted browser and SSO sessions
+- embedded persistence and relational PostgreSQL protocol behavior
+- GitHub Checks, sticky PR comments, GitLab sticky MR notes, and GitHub Marketplace metadata
+- webhook parsing for fifteen CI providers
+- provider-scoped log retrieval and native safe-rerun request construction
+- Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie, and generic webhooks
+- notification retries, cooldowns, quiet hours, deduplication, and ChatOps authorization
+- JUnit, Playwright, Jest, pytest, Cypress, and Mocha ingestion
+- flaky-cause inference, quarantine, gate behavior, impact graph indexing, and coverage-aware selection
+- DORA, usage, cost, and historical trends
+- lexical fallback, local vector files, Ollama embeddings, remote embeddings, and cache behavior
+- optional LLM enhancement, bounded repair plans, and GitHub draft repair pull requests
+- OIDC, native SAML flow and metadata, trusted proxy SSO, replay and binding checks
+- MCP stdio, HTTP sessions, OAuth/PKCE, SSE notifications, resources, read tools, and confirmed write tools
+- Windows, Linux, and macOS builds for amd64 and arm64
 
-Live credentials for third-party providers are not part of the automated suite. Protocol-compatible local servers are used for integration tests. A real PostgreSQL server should be included in the operator's deployment acceptance test.
-
-## RC.3 hardening
-
-- relational PostgreSQL object rows and independent queue
-- legacy global-state migration
-- tenant-scoped advisory locks
-- indexed cross-repository correlation
-- direct API-key hash lookup
-- trusted-proxy rate limiting
-- strict CSP without inline dashboard code
-- encrypted dashboard and SSO cookies
-- CSRF protection for cookie writes
-- verified PostgreSQL TLS defaults
-- custom and entropy-based redaction
-- optional GitHub Marketplace metadata without feature gates
+Third-party credentials are not present in the automated suite. Provider behavior is tested with protocol-compatible local servers. Native SAML signature tests use a controlled `xmlsec1` fixture; deployment acceptance must use the real binary and IdP. Cross-built macOS binaries require runtime acceptance on macOS.

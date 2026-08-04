@@ -1,36 +1,35 @@
 # CI Radar
 
-CI Radar is a free, self-hosted, open-source CI failure intelligence platform. It keeps a deterministic, explainable diagnosis core and adds optional SSO, LLM explanations, multi-CI ingestion, test intelligence, ChatOps, DORA metrics, cost tracking, semantic similarity, and predictive test selection.
+CI Radar is a free, self-hosted, open-source CI intelligence platform. It classifies failures with deterministic evidence, correlates incidents, tracks test reliability, measures CI cost and DORA signals, and can add optional local or BYOK AI without replacing the deterministic decision core.
 
 License: AGPL-3.0-or-later.
 
-## Core capabilities
+## What RC.4 includes
 
-- GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, and AWS CodeBuild
-- GitHub Checks and sticky GitHub PR comments
-- Sticky GitLab merge request comments
-- deterministic diagnosis rules, evidence weights, suggested actions, and feedback metrics
+- 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
+- GitHub Checks, sticky GitHub Pull Request comments, and sticky GitLab Merge Request comments
 - relational tenant-scoped PostgreSQL storage or portable embedded storage
-- tenant isolation, API keys, RBAC, audit events, retention, encrypted secrets, trusted-proxy controls, OIDC, and SAML through a trusted auth proxy
+- tenant isolation, RBAC, API keys, encrypted secrets, retention, audit events, trusted proxies, CSP, OIDC, and native SAML SP flow
 - Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie, and signed generic webhooks
-- Slack buttons and Teams commands for acknowledge, resolve, and test quarantine
-- JUnit, Playwright JSON, Jest JSON, pytest-json-report, Cypress JSON, and Mocha JSON
-- flaky-test history, likely-cause classification, quarantine, and CI test gates
+- ChatOps for acknowledge, resolve, quarantine, and restore
+- JUnit, Playwright, Jest, pytest, Cypress, and Mocha result ingestion
+- test history, likely flake cause, quarantine, CI gates, source impact indexing, and per-test coverage maps
 - DORA metrics, runner duration, estimated cost, and historical trends
-- local vector similarity or optional BYOK remote embeddings
-- predictive test selection from changed files and test history
-- read-only MCP over stdio and Streamable HTTP
-- optional BYOK OpenAI-compatible LLM enhancement over the deterministic result
+- lexical similarity fallback, local static vectors, local neural embeddings through Ollama, or BYOK remote embeddings
+- MCP over stdio and Streamable HTTP with OAuth discovery, PKCE, sessions, SSE, server notifications, and confirmation-gated write tools
+- safe automatic rerun for external failures, disabled by default
+- repair plan and confirmation-gated local patch application, plus optional GitHub draft repair Pull Requests
+- Windows, Linux, and macOS builds for amd64 and arm64
 
 ## Quick start
 
 ```bash
 ciradar init
-ciradar analyze samples/npm-econnreset.log
+ciradar analyze examples/npm-econnreset.log
 ciradar serve
 ```
 
-Open `http://127.0.0.1:8787/` and use the generated root token from `ciradar.json`.
+Open `http://127.0.0.1:8787/` and exchange the generated root token through the secure login field.
 
 ## PostgreSQL
 
@@ -46,59 +45,89 @@ ciradar database check
 ciradar serve
 ```
 
-## Native test reports
+## Test impact selection
+
+Build the repository import graph:
 
 ```bash
-ciradar tests ingest --repo acme/api --format playwright playwright-report.json
-ciradar tests ingest --repo acme/api --format jest jest-results.json
-ciradar tests ingest --repo acme/api --format pytest report.json
-ciradar tests ingest --repo acme/api --format cypress cypress-results.json
-ciradar tests gate --repo acme/api --format junit junit.xml
+ciradar tests index --repo acme/api --root .
 ```
 
-## Predictive test selection
+Optionally add exact per-test coverage links:
+
+```bash
+ciradar tests coverage --repo acme/api coverage-map.json
+```
+
+Select impacted tests:
 
 ```bash
 ciradar tests select --repo acme/api --changed src/payments.go,src/ledger.go
 ```
 
-## DORA and cost
+The selector reports its strategy, confidence, reasons, and impact path. Coverage matches outrank import-graph paths; history and flake signals are secondary. The built-in source index currently parses Go, JavaScript, TypeScript, and Python. Coverage maps work for any language.
 
-```bash
-ciradar deployment record --repo acme/api --environment production --sha "$GIT_SHA"
-ciradar metrics dora --days 30 --environment production
-ciradar metrics usage --days 30
-```
-
-## Optional LLM
-
-The LLM receives deterministic output, optional redacted excerpts, and optional changed file names. Raw logs and secrets are not sent by default.
+## Similarity modes
 
 ```json
 {
-  "llm": {
+  "semantic": {
     "enabled": true,
-    "endpoint": "https://provider.example/v1/chat/completions",
-    "api_key": "env:CIRADAR_LLM_API_KEY",
-    "model": "your-model",
-    "auto_enhance": false,
-    "send_redacted_excerpt": true
+    "mode": "ollama",
+    "local_endpoint": "http://127.0.0.1:11434/api/embed",
+    "local_model": "embeddinggemma"
   }
 }
 ```
 
+Modes:
+
+- `lexical`: transparent FNV bag-of-words fallback, not marketed as embeddings
+- `local-vectors`: local word-vector file
+- `ollama`: local neural embeddings
+- `remote`: BYOK remote embeddings
+
+Every result includes the engine used.
+
 ## SSO
 
-Native OIDC uses Authorization Code with PKCE. SAML deployments use a trusted SAML-aware reverse proxy and signed identity headers. See `SSO.md`.
+OIDC is native. SAML is also handled directly by CI Radar as an SP. SAML XML signatures are verified with a pinned IdP certificate through `xmlsec1`; no SAML auth proxy is required. Metadata is available at `/auth/saml/metadata`.
+
+See `SSO.md`.
+
+## MCP
+
+MCP supports:
+
+- stdio
+- Streamable HTTP
+- protected-resource and authorization-server metadata
+- dynamic client registration
+- Authorization Code with PKCE
+- session IDs
+- SSE event streams
+- server notifications
+- Viewer read tools
+- Operator write tools requiring a short-lived human confirmation token
+
+See `MCP.md`.
+
+## Safe rerun and repair
+
+Automatic rerun is off by default. It is considered only when attribution is `EXTERNAL`, confidence exceeds the configured threshold, the category is retry-safe, no provider-wide incident is active, and the run has not already been retried.
+
+Native rerun requests are available for GitHub, GitLab, CircleCI, Buildkite, Travis, Google Cloud Build, Azure DevOps, Bitbucket, Drone, Semaphore, AppVeyor, Bitrise, and TeamCity. Jenkins and AWS CodeBuild can use a same-origin configured retry endpoint.
+
+Repair is separate from rerun. A patch must pass path, size, binary-file, symlink, and confirmation checks. Automatic merge is not implemented.
 
 ## Security defaults
 
 - raw log storage disabled
-- redaction before persistence and fingerprints
-- tenant-scoped API and MCP access
-- write-capable ChatOps disabled until explicitly enabled
-- LLM and remote embeddings disabled by default
-- test auto-quarantine disabled by default
-- automatic CI retry disabled by default
+- redaction before persistence, fingerprints, and optional AI
+- LLM and embeddings optional
+- auto-rerun, auto-quarantine, and auto-repair disabled
+- tenant-scoped API, storage, dashboard, and MCP
+- strict CSP and HttpOnly encrypted dashboard sessions
+- PostgreSQL TLS verification enabled by default
 
-Read `SECURITY.md`, `POSTGRESQL.md`, `CONNECTORS.md`, `TEST-INTELLIGENCE.md`, `MCP.md`, `SELF-HOSTING.md`, `GITHUB-MARKETPLACE.md`, `COMPARISONS.md`, and `PROJECT-STATUS.md` before production deployment.
+Read `SECURITY.md`, `POSTGRESQL.md`, `CONNECTORS.md`, `TEST-INTELLIGENCE.md`, `MCP.md`, `SELF-HOSTING.md`, `COMPARISONS.md`, and `PROJECT-STATUS.md` before production use.

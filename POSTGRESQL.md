@@ -37,9 +37,9 @@ Supported modes:
 
 Authentication supports password, MD5, and SCRAM-SHA-256.
 
-## RC.3 storage model
+## Current relational storage model
 
-RC.3 no longer stores the installation in one global JSONB row.
+CI Radar no longer stores the installation in one global JSONB row.
 
 It uses:
 
