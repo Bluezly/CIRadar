@@ -62,18 +62,18 @@ func TestTenantCorrelationIsolationAndOptionalSharing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	isolated, err := s.CorrelationForTenant(context.Background(), "a", "shared", now.Add(-time.Hour), false)
+	isolated, err := s.CorrelationForTenant(context.Background(), "a", "shared", "a/api", "a", now.Add(-time.Hour), false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if isolated.Occurrences != 1 || isolated.Repositories != 1 || isolated.Organizations != 1 {
+	if isolated.Occurrences != 2 || isolated.Repositories != 1 || isolated.Organizations != 1 {
 		t.Fatalf("isolated=%+v", isolated)
 	}
-	shared, err := s.CorrelationForTenant(context.Background(), "a", "shared", now.Add(-time.Hour), true)
+	shared, err := s.CorrelationForTenant(context.Background(), "a", "shared", "a/api", "a", now.Add(-time.Hour), true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shared.Occurrences != 2 || shared.Repositories != 2 || shared.Organizations != 2 {
+	if shared.Occurrences != 3 || shared.Repositories != 2 || shared.Organizations != 2 {
 		t.Fatalf("shared=%+v", shared)
 	}
 }
@@ -308,5 +308,33 @@ func TestDashboardDailyTrends(t *testing.T) {
 	day := now.Format("2006-01-02")
 	if dashboard.DailyAnalyses[day] != 1 || dashboard.DailyIncidents[day] != 1 || dashboard.DailyTestFailures[day] != 1 {
 		t.Fatalf("analyses=%v incidents=%v tests=%v", dashboard.DailyAnalyses, dashboard.DailyIncidents, dashboard.DailyTestFailures)
+	}
+}
+
+func TestCorrelationCandidateDoesNotInventNewRepositoryOrOrganization(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	in := model.AnalysisInput{TenantID: "default", Repository: "local/test", Organization: "local", OccurredAt: now}
+	result := model.AnalysisResult{ID: "one", TenantID: "default", Fingerprint: "same", CreatedAt: now}
+	if err := s.RecordAnalysisForTenant(context.Background(), "default", in, result, false, false); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.CorrelationForTenant(context.Background(), "default", "same", "local/test", "local", now.Add(-time.Hour), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Repositories != 1 || stats.Organizations != 1 || stats.Occurrences != 2 {
+		t.Fatalf("stats=%+v", stats)
+	}
+	other, err := s.CorrelationForTenant(context.Background(), "default", "same", "other/repo", "other", now.Add(-time.Hour), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Repositories != 2 || other.Organizations != 2 || other.Occurrences != 2 {
+		t.Fatalf("other=%+v", other)
 	}
 }
