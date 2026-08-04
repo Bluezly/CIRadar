@@ -232,3 +232,72 @@ func TestConcurrentDuplicateFingerprintSendsOnce(t *testing.T) {
 		t.Fatalf("count=%d", count)
 	}
 }
+
+func TestRepositoryProfileRoutesChannel(t *testing.T) {
+	var a, b int
+	sa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { a++; w.WriteHeader(204) }))
+	defer sa.Close()
+	sb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { b++; w.WriteHeader(204) }))
+	defer sb.Close()
+	store := testStore(t)
+	_, err := store.UpsertRepositoryProfile(context.Background(), model.RepositoryProfile{TenantID: "default", Repository: "acme/api", NotificationChannels: []string{"team-a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{
+		{Name: "team-a", Type: "webhook", Enabled: true, URL: sa.URL, Timeout: time.Second, MaxAttempts: 2},
+		{Name: "team-b", Type: "webhook", Enabled: true, URL: sb.URL, Timeout: time.Second, MaxAttempts: 2},
+	}}
+	d := New(cfg, store, testLog())
+	ev := TestEvent()
+	ev.Repository = "acme/api"
+	if err := d.Dispatch(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if a != 1 || b != 0 {
+		t.Fatalf("team-a=%d team-b=%d", a, b)
+	}
+}
+
+func TestQuietHoursSuppressUnlessCritical(t *testing.T) {
+	count := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { count++; w.WriteHeader(204) }))
+	defer ts.Close()
+	now := time.Now().UTC()
+	start := now.Add(-time.Minute).Format("15:04")
+	end := now.Add(time.Minute).Format("15:04")
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: time.Second, MaxAttempts: 2, QuietHoursStart: start, QuietHoursEnd: end, Timezone: "UTC", QuietHoursBypassSeverity: "critical"}}}
+	store := testStore(t)
+	d := New(cfg, store, testLog())
+	ev := TestEvent()
+	ev.ID = "quiet"
+	ev.Incident = &model.Incident{Severity: "major"}
+	if err := d.Dispatch(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("quiet notification sent")
+	}
+	ev.ID = "critical"
+	ev.DedupeKey = "critical"
+	ev.Severity = "critical"
+	ev.Incident = &model.Incident{Severity: "critical"}
+	if err := d.Dispatch(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("critical bypass count=%d", count)
+	}
+}
+
+func TestRepositoryCriticalityElevatesSeverity(t *testing.T) {
+	if got := elevateSeverityForCriticality("minor", "high"); got != "major" {
+		t.Fatalf("high criticality severity=%s", got)
+	}
+	if got := elevateSeverityForCriticality("minor", "critical"); got != "critical" {
+		t.Fatalf("critical repository severity=%s", got)
+	}
+	if got := elevateSeverityForCriticality("critical", "normal"); got != "critical" {
+		t.Fatalf("severity downgraded=%s", got)
+	}
+}
