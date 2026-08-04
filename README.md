@@ -1,35 +1,32 @@
-# CI Radar 0.3.0 Beta 5
+# CI Radar 1.0.0 RC.1
 
-A portable, explainable CI failure-intelligence service for GitHub Actions, written entirely in Go.
+A single-binary Go platform for multi-CI failure diagnosis, cross-repository incident correlation, CI environment drift, test reliability, developer comments, enterprise notifications, and read-only MCP access.
 
-Beta 5 adds real tenant isolation, RBAC API keys, audit history, repository ownership/routing, incident workflows, proactive environment-drift alerts, an embedded dashboard, and a storage backend contract for a future PostgreSQL implementation.
+## Included
 
-## Quick start
+- GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins adapter, and manual log ingestion.
+- Explainable attribution: external, code, mixed, toolchain, unknown.
+- GitHub Checks plus sticky GitHub PR and GitLab MR comments.
+- Deterministic recommended actions and diagnosis feedback metrics.
+- JUnit ingestion, per-test history, flake scoring, expiring quarantine, manifest, and `tests gate`.
+- Slack, Discord, Telegram, signed webhook, SMTP email, Teams, PagerDuty, Opsgenie.
+- Embedded store or transactional PostgreSQL 18 backend.
+- Tenant isolation, RBAC API keys, audit log, encrypted/config-referenced secrets.
+- Dashboard, REST API, Prometheus metrics, stdio and basic Streamable HTTP MCP.
+
+Start with [README-AR.md](README-AR.md), [ARCHITECTURE.md](ARCHITECTURE.md), [CONNECTORS.md](CONNECTORS.md), [POSTGRESQL.md](POSTGRESQL.md), [TEST-INTELLIGENCE.md](TEST-INTELLIGENCE.md), and [MCP.md](MCP.md).
+
+## Build
 
 ```bash
-./ciradar init --config ciradar.json
-./ciradar analyze --config ciradar.json samples/npm-econnreset.log
-./ciradar serve --config ciradar.json
+go test ./...
+go test -race ./...
+go vet ./...
+make build VERSION=1.0.0-rc.1
 ```
 
-Open `http://127.0.0.1:8787/` and use the generated `admin_token`.
+No third-party Go modules and no CGO dependency.
 
-## Core capabilities
+## Release status
 
-- GitHub App webhook ingestion and Check Runs
-- secret redaction before storage/fingerprinting
-- EXTERNAL / CODE / MIXED / TOOLCHAIN / UNKNOWN attribution
-- positive and negative evidence scoring
-- tenant-scoped cross-repository incidents
-- successful-run environment baselines and drift alerts
-- Slack, Discord, Telegram, signed generic webhooks
-- notification filtering, cooldown, quiet hours, retry safety
-- tenants, viewer/operator/admin API keys, audit log
-- repository criticality and notification routing
-- embedded dashboard and Prometheus-format metrics
-
-Read [README-AR.md](README-AR.md) for complete setup instructions.
-
-## Honest scope
-
-The bundled JSON backend is a durable portable single-node implementation, not a multi-replica SaaS database. `db.Backend` now separates persistence from analysis, delivery, and HTTP layers so PostgreSQL can be added without rewriting the product core.
+This is a serious private-beta release candidate, not a claim of finished hyperscale enterprise SaaS. The PostgreSQL compatibility backend is durable and multi-process safe, but still serializes state through one JSONB row. External providers and notifications were mock-tested because live credentials were unavailable during the build.

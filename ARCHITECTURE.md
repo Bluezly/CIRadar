@@ -1,59 +1,77 @@
-# CI Radar Beta 5 Architecture
+# CI Radar architecture — 1.0.0 RC.1
 
-## Runtime flow
-
-```text
-GitHub workflow_run webhook
-  -> HMAC validation + delivery deduplication
-  -> installation-to-tenant resolution
-  -> durable tenant job queue
-  -> GitHub installation token
-  -> job/log retrieval
-  -> redaction
-  -> rules + change/history/provider/environment evidence
-  -> attribution + fingerprint
-  -> tenant-scoped persistence
-  -> incident correlation
-  -> GitHub Check
-  -> routed notifications
-```
-
-Successful runs follow a second path:
+## Data flow
 
 ```text
-successful job log
-  -> environment extraction
-  -> compare with prior successful baseline
-  -> store new baseline
-  -> environment_changed notification when runner/tool/action/container drift is detected
+GitHub / GitLab / Buildkite / CircleCI / Jenkins / manual API
+                         ↓
+                  verified CIEvent
+                         ↓
+                tenant-scoped job queue
+                         ↓
+        log fetch → redaction → environment extraction
+                         ↓
+ rules + evidence + history + correlation + provider status
+                         ↓
+ AnalysisResult + SuggestedActions + fingerprint
+                         ↓
+ Checks/comments · incidents · notifications · dashboard · MCP
 ```
 
 ## Packages
 
-- `internal/analyzer`: redaction, rule matching, evidence scoring, attribution, fingerprints, environment extraction.
-- `internal/github`: GitHub App JWT, installation tokens, logs, run history, PR files, Checks, reruns.
-- `internal/db`: portable atomic JSON backend and the `Backend` persistence contract.
-- `internal/worker`: tenant-aware durable job processing.
-- `internal/notifications`: routing, filtering, quiet hours, cooldown, retries, HMAC webhook signing.
-- `internal/server`: authenticated API, dashboard, webhook endpoint, RBAC, audit actions, rate limits.
-- `internal/providers`: provider status polling.
+- `internal/connectors`: webhook verification, payload normalization, provider log fetch, GitLab MR notes.
+- `internal/github`: GitHub App JWT/tokens, Actions API, job logs, Check Runs, sticky PR comments.
+- `internal/analyzer`: deterministic classification, evidence scoring, fingerprints, environment drift, actions.
+- `internal/testintelligence`: JUnit parsing and test identity.
+- `internal/db`: `Backend` contract, embedded atomic store, PostgreSQL compatibility backend.
+- `internal/pgwire`: pure-Go PostgreSQL protocol subset with TLS, MD5 and SCRAM-SHA-256.
+- `internal/notifications`: channel policy, dedup, quiet hours, retries and delivery tracking.
+- `internal/mcp`: read-only JSON-RPC tools/resources.
+- `internal/server`: REST, dashboard, webhooks, MCP HTTP, metrics, auth and RBAC.
+- `internal/worker`: background execution, correlation, comments, retry policy and environment baselines.
 
-## Isolation model
+## Storage
 
-Every analysis, environment baseline, job, incident, notification delivery, API key, repository profile, and audit event carries a tenant ID. GitHub installation IDs are explicitly bound to one tenant. API keys cannot select another tenant. Only the root bootstrap token can select an enabled tenant with `X-CI-Radar-Tenant`.
+`db.Backend` isolates all callers from storage details.
 
-Cross-tenant fingerprint correlation is disabled by default and requires a configured HMAC key. Cross-repository correlation inside one tenant is always enabled because it is the core incident-detection feature.
+### Embedded
 
-## Persistence
+- atomic temp-file replacement
+- fsync and backup recovery
+- single process only
+- portable local/private beta
 
-The bundled backend writes an atomic snapshot, fsyncs it, and keeps a backup for recovery. It is designed for portable single-node testing and smaller installations.
+### PostgreSQL RC backend
 
-The runtime layers depend on `db.Backend`, not the concrete JSON store. A future PostgreSQL backend should implement the same contract and provide transactional job claims, indexes, row-level tenant constraints, connection pooling, and HA deployment.
+- TLS and SCRAM-SHA-256 capable
+- automatic migration
+- `SELECT ... FOR UPDATE` transaction around state mutation
+- multiple API/worker processes cannot overwrite one another
+- compatible with every feature
 
-## Safety decisions
+Current tradeoff: one canonical JSONB state row serializes mutations. It provides durability and correctness, but not high-write horizontal scaling. A normalized backend can replace it behind the same interface without rewriting the analyzer or integrations.
 
-- Raw logs are not persisted by default.
-- Auto-retry is off by default and only eligible for external attribution, supported transient categories, no active provider incident, a score threshold, and the first run attempt.
-- Deterministic code/dependency/workflow changes subtract evidence rather than merely failing to add positive evidence.
-- Toolchain internal crashes are not labeled as source-code failures.
-- Unknown evidence produces UNKNOWN rather than a fabricated diagnosis.
+## Tenant isolation
+
+Every analysis, incident, queue job, baseline, notification, feedback entry, test, quarantine, API key, profile and audit event has a tenant boundary. GitHub installations and external connectors resolve a tenant before enqueueing work. Disabled tenants are not processed.
+
+## Decision model
+
+The analyzer separates:
+
+- rule evidence
+- contextual evidence
+- contradictory evidence
+- external and code scores
+- final attribution and confidence
+
+Automatic retry is only eligible when attribution is external, score passes threshold, and no unsafe contradiction applies.
+
+## Test reliability
+
+JUnit observations normalize to a deterministic test key. State tracks total runs, failures, transitions, flake score, classification and quarantine. `tests gate` makes quarantine enforceable from any CI provider.
+
+## MCP
+
+Read-only by design. HTTP shares tenant-scoped Viewer authentication with REST. stdio reads credentials/config from the process environment. No model-controlled write actions are exposed.

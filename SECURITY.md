@@ -1,42 +1,35 @@
-# Security Notes — CI Radar Beta 5
+# Security
 
-## Implemented
+## Defaults
 
-- GitHub webhook HMAC-SHA256 verification.
-- GitHub delivery deduplication.
-- RSA GitHub App JWT and short-lived installation tokens.
-- Secret redaction before fingerprinting and persistence.
-- HMAC-based shared fingerprints when `fingerprint_hmac_key` is configured; `init` generates one automatically.
-- Raw-log persistence disabled by default.
-- API tokens stored as SHA-256 digests; plaintext is shown once.
-- Viewer, operator, admin and root authorization.
-- Tenant-scoped reads, writes, jobs, incidents, baselines and notifications.
-- Installation-to-tenant binding required by default.
-- Audit trail for privileged actions and automatic retries.
-- HMAC signatures for generic outbound webhooks.
-- Notification URL/token sanitization in error records.
-- Per-channel retries, cooldown and atomic duplicate suppression.
-- Separate high-volume rate-limit bucket for authenticated GitHub webhooks.
-- Secure response headers and no-store caching.
-- Config generated with owner-only file permissions where supported.
+- raw log storage off
+- automatic retry off
+- cross-tenant correlation off
+- unauthenticated localhost API off
+- test auto-quarantine off
+- MCP read-only
 
-## Deployment requirements
+## Secrets
 
-- Put the server behind TLS; do not expose plain HTTP publicly.
-- Store GitHub keys, webhook secrets, root tokens and notification credentials in a secret manager or environment variables.
-- Restrict inbound GitHub webhook traffic where operationally possible.
-- Back up the state file and test recovery.
-- Rotate API keys and the root token periodically.
-- Keep `store_raw_logs`, `cross_tenant_correlation`, `automatic_retry_enabled`, and `allow_unauthenticated_localhost` disabled until deliberately reviewed.
-- Run the service as an unprivileged OS account.
+Config supports environment references and AES-256-GCM ciphertext. API tokens are hashed. Reversible delivery secrets must be encrypted or supplied through environment variables. Delivery errors are redacted.
 
-## Not yet provided
+## Webhooks
 
-- encrypted database columns at rest
-- SAML/OIDC SSO and SCIM
-- enterprise KMS integration
-- formal SOC 2 / ISO 27001 controls
-- PostgreSQL row-level security
-- multi-region or multi-replica HA
+- GitHub HMAC-SHA256
+- GitLab token or HMAC signing token
+- Buildkite token or timestamped HMAC with replay window
+- CircleCI HMAC
+- Jenkins custom token/HMAC adapter
+- duplicate-delivery suppression and bounded bodies
 
-The portable backend is for a single trusted host. Do not market Beta 5 as a certified enterprise SaaS platform.
+## Tenant controls
+
+API principal resolution occurs before data access. Root can choose a tenant explicitly; ordinary API keys remain locked to their tenant. Disabled tenants cannot authenticate or execute queued jobs.
+
+## MCP
+
+HTTP requires authentication and validates Origin to reduce DNS-rebinding risk. Tools are read-only. The implementation does not expose raw logs through MCP.
+
+## Reporting vulnerabilities
+
+Do not submit real customer logs, private keys, webhook URLs or access tokens in a public issue. Provide a minimized synthetic reproducer.
