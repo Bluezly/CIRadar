@@ -1,22 +1,42 @@
-# Security model — CI Radar 0.2.0 Beta 4
+# Security Notes — CI Radar Beta 5
 
-- Raw CI logs are not stored by default.
-- Redaction runs before fingerprinting, persistence, notifications, and GitHub Checks.
-- Notification payloads contain structured analysis results, never the raw CI log.
-- GitHub webhook signatures are verified with HMAC-SHA256 and duplicate deliveries are ignored.
-- Generic outgoing webhooks can be signed with `X-CI-Radar-Signature-256`.
-- Slack/Discord webhook URLs, Telegram bot tokens, and HMAC secrets are not returned by API status endpoints.
-- HTTP transport errors are sanitized before persistence to avoid leaking secret webhook URLs.
-- Each channel has independent delivery state, so retries do not duplicate channels that already succeeded.
-- Administrative endpoints can be protected with `admin_token`.
-- Automatic CI retries remain disabled by default.
+## Implemented
 
-Production recommendations:
+- GitHub webhook HMAC-SHA256 verification.
+- GitHub delivery deduplication.
+- RSA GitHub App JWT and short-lived installation tokens.
+- Secret redaction before fingerprinting and persistence.
+- HMAC-based shared fingerprints when `fingerprint_hmac_key` is configured; `init` generates one automatically.
+- Raw-log persistence disabled by default.
+- API tokens stored as SHA-256 digests; plaintext is shown once.
+- Viewer, operator, admin and root authorization.
+- Tenant-scoped reads, writes, jobs, incidents, baselines and notifications.
+- Installation-to-tenant binding required by default.
+- Audit trail for privileged actions and automatic retries.
+- HMAC signatures for generic outbound webhooks.
+- Notification URL/token sanitization in error records.
+- Per-channel retries, cooldown and atomic duplicate suppression.
+- Separate high-volume rate-limit bucket for authenticated GitHub webhooks.
+- Secure response headers and no-store caching.
+- Config generated with owner-only file permissions where supported.
 
-1. Store `ciradar.json`, GitHub PEM, and bot/webhook credentials in a secret manager.
-2. Run behind TLS and a reverse proxy.
-3. Use a strong `admin_token` and firewall administrative endpoints.
-4. Keep `store_raw_logs=false`.
-5. Rotate webhook URLs and bot tokens after any suspected exposure.
-6. Replace the embedded JSON store with PostgreSQL before multi-tenant SaaS use.
-7. Add tenant isolation, RBAC, audit logs, encrypted backups, and outbound egress controls.
+## Deployment requirements
+
+- Put the server behind TLS; do not expose plain HTTP publicly.
+- Store GitHub keys, webhook secrets, root tokens and notification credentials in a secret manager or environment variables.
+- Restrict inbound GitHub webhook traffic where operationally possible.
+- Back up the state file and test recovery.
+- Rotate API keys and the root token periodically.
+- Keep `store_raw_logs`, `cross_tenant_correlation`, `automatic_retry_enabled`, and `allow_unauthenticated_localhost` disabled until deliberately reviewed.
+- Run the service as an unprivileged OS account.
+
+## Not yet provided
+
+- encrypted database columns at rest
+- SAML/OIDC SSO and SCIM
+- enterprise KMS integration
+- formal SOC 2 / ISO 27001 controls
+- PostgreSQL row-level security
+- multi-region or multi-replica HA
+
+The portable backend is for a single trusted host. Do not market Beta 5 as a certified enterprise SaaS platform.

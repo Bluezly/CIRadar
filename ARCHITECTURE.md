@@ -1,24 +1,59 @@
-# Architecture — CI Radar 0.2.0 Beta 4
+# CI Radar Beta 5 Architecture
 
-CI Radar is a modular monolith compiled into one Go executable.
+## Runtime flow
 
-1. The HTTP server receives verified GitHub `workflow_run` webhooks.
-2. Background workers exchange a GitHub App JWT for installation tokens.
-3. Failed job logs are downloaded, bounded by `max_log_bytes`, and redacted.
-4. The analyzer classifies failures and extracts environment metadata.
-5. The store correlates fingerprints and maintains successful environment baselines.
-6. GitHub Checks publish the diagnosis in the developer's existing workflow.
-7. Notification events are enqueued separately from workflow processing.
-8. The notification dispatcher applies per-channel policies.
-9. Slack, Discord, Telegram, and generic webhook adapters build platform-specific payloads.
-10. Delivery records provide deduplication, retries, cooldowns, and failure visibility.
+```text
+GitHub workflow_run webhook
+  -> HMAC validation + delivery deduplication
+  -> installation-to-tenant resolution
+  -> durable tenant job queue
+  -> GitHub installation token
+  -> job/log retrieval
+  -> redaction
+  -> rules + change/history/provider/environment evidence
+  -> attribution + fingerprint
+  -> tenant-scoped persistence
+  -> incident correlation
+  -> GitHub Check
+  -> routed notifications
+```
 
-Notification queue behavior:
+Successful runs follow a second path:
 
-- A successful channel is marked `sent` and skipped on later job retries.
-- Retryable failures remain `retrying` and are retried by the embedded queue.
-- Permanent 4xx configuration errors are recorded as `failed` without retry loops.
-- Repeated fingerprints can be marked `suppressed` during a channel cooldown.
-- Generic outgoing payloads may be HMAC signed.
+```text
+successful job log
+  -> environment extraction
+  -> compare with prior successful baseline
+  -> store new baseline
+  -> environment_changed notification when runner/tool/action/container drift is detected
+```
 
-The embedded JSON state store is designed for portable evaluation. Its Store API is the seam for replacing persistence with PostgreSQL without changing analyzer, GitHub, server, worker, or notification packages.
+## Packages
+
+- `internal/analyzer`: redaction, rule matching, evidence scoring, attribution, fingerprints, environment extraction.
+- `internal/github`: GitHub App JWT, installation tokens, logs, run history, PR files, Checks, reruns.
+- `internal/db`: portable atomic JSON backend and the `Backend` persistence contract.
+- `internal/worker`: tenant-aware durable job processing.
+- `internal/notifications`: routing, filtering, quiet hours, cooldown, retries, HMAC webhook signing.
+- `internal/server`: authenticated API, dashboard, webhook endpoint, RBAC, audit actions, rate limits.
+- `internal/providers`: provider status polling.
+
+## Isolation model
+
+Every analysis, environment baseline, job, incident, notification delivery, API key, repository profile, and audit event carries a tenant ID. GitHub installation IDs are explicitly bound to one tenant. API keys cannot select another tenant. Only the root bootstrap token can select an enabled tenant with `X-CI-Radar-Tenant`.
+
+Cross-tenant fingerprint correlation is disabled by default and requires a configured HMAC key. Cross-repository correlation inside one tenant is always enabled because it is the core incident-detection feature.
+
+## Persistence
+
+The bundled backend writes an atomic snapshot, fsyncs it, and keeps a backup for recovery. It is designed for portable single-node testing and smaller installations.
+
+The runtime layers depend on `db.Backend`, not the concrete JSON store. A future PostgreSQL backend should implement the same contract and provide transactional job claims, indexes, row-level tenant constraints, connection pooling, and HA deployment.
+
+## Safety decisions
+
+- Raw logs are not persisted by default.
+- Auto-retry is off by default and only eligible for external attribution, supported transient categories, no active provider incident, a score threshold, and the first run attempt.
+- Deterministic code/dependency/workflow changes subtract evidence rather than merely failing to add positive evidence.
+- Toolchain internal crashes are not labeled as source-code failures.
+- Unknown evidence produces UNKNOWN rather than a fabricated diagnosis.

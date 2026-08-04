@@ -1,54 +1,24 @@
-# CI Radar Beta 3 benchmark report
+# CI Radar Benchmark Context
 
-## What was tested
+An earlier classifier-development corpus contained 215 curated excerpts from public GitHub issues across package managers, runners, caches, language toolchains and deployment systems. After iterative rule work, the earlier release agreed with the expected CI Radar taxonomy on 215/215 examples.
 
-The classifier was exercised against **215 curated error excerpts** collected
-from public GitHub issues and discussions. The sets cover GitHub Actions,
-package registries, runners, caches, Go/Rust, JVM builds, .NET/NuGet, Docker,
-Composer/Bazel, Terraform, Helm/Kubernetes, and RubyGems/Bundler.
+That number is **historical regression context**, not a Beta 5 claim of 100% real-world accuracy:
 
-| Dataset | Agreement | Score |
-|---|---:|---:|
-| core-public-issues-40 | 40/40 | 100.0% |
-| github-actions-artifacts-30 | 30/30 | 100.0% |
-| go-rust-holdout-20 | 20/20 | 100.0% |
-| jvm-holdout-25 | 25/25 | 100.0% |
-| dotnet-docker-holdout-20 | 20/20 | 100.0% |
-| composer-bazel-holdout-20 | 20/20 | 100.0% |
-| terraform-holdout-20 | 20/20 | 100.0% |
-| helm-k8s-holdout-20 | 20/20 | 100.0% |
-| ruby-bundler-holdout-20 | 20/20 | 100.0% |
-| **Total** | **215/215** | **100.0%** |
+- examples were selected and labeled by the product developer;
+- several sets influenced rule development;
+- the labels are CI Radar taxonomy judgments, not official root-cause labels;
+- the full excerpt corpus is not bundled in this source archive, so it was not freshly rerun during Beta 5 packaging.
 
-## Honest development history
+Beta 5 verification instead focuses on reproducible code tests included in the source:
 
-- The previous Beta 2 rules scored **26/40 (65%)** on the first real public set.
-- A new Ruby/Bundler blind set initially scored **4/20 (20%)** because the
-  product had no Ruby-specific resolver, permission, native-extension, or
-  package-integrity rules.
-- After adding general Ruby/Bundler rules, that set reached **20/20**.
-- A taxonomy audit added `TOOLCHAIN_FAILURE` so internal failures explicitly
-  reported by pip, Bundler, or a compiler are not mislabeled as project code.
+- analyzer and redaction tests;
+- positive/negative evidence and attribution tests;
+- HMAC fingerprint stability and key separation;
+- tenant isolation, RBAC and queue isolation;
+- notification retries, routing, quiet hours and deduplication;
+- environment drift for runner, architecture, tools, Actions and containers;
+- mock GitHub API end-to-end worker processing;
+- incident escalation for critical repositories;
+- server authorization and live API smoke tests.
 
-## What the 215/215 number does not mean
-
-This is a **regression agreement score**, not proof of perfect accuracy. Some of
-these examples were used while improving the rules, so the full set is not an
-independent statistical holdout. The expected categories are human judgments
-under CI Radar's product taxonomy, not labels published by the source projects.
-
-The safe interpretation is: all known regression examples now behave as
-intended. It does not mean every future CI log will be classified correctly.
-The product deliberately returns `UNKNOWN` when evidence is insufficient.
-
-## Additional verification
-
-- Unit, race, and vet checks pass.
-- Secret redaction and raw-log non-persistence are tested.
-- GitHub App authentication, log retrieval, previous-success lookup, and Check
-  creation are exercised against an in-process mock GitHub API.
-- A live GitHub App installation was not tested because no real credentials
-  were supplied. The first live trial should use a disposable repository.
-
-Machine-readable details are in `BENCHMARK-SUMMARY.json` and the separate
-benchmark-results archive delivered with the build.
+The correct interpretation remains: CI Radar handles its known regression classes and deliberately returns `UNKNOWN` for insufficient evidence. Accuracy on arbitrary unseen production logs still requires a genuinely independent evaluation corpus.
