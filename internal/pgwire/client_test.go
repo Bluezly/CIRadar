@@ -133,3 +133,23 @@ func dataRow(v string) []byte {
 	p = append(p, []byte(v)...)
 	return p
 }
+
+func TestParseDSNDefaultsToVerifyFull(t *testing.T) {
+	c, err := ParseDSN("postgres://user:pass@db.example/ciradar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SSLMode != "verify-full" {
+		t.Fatalf("unexpected sslmode %q", c.SSLMode)
+	}
+}
+
+func TestParseDSNExplicitInsecureMode(t *testing.T) {
+	c, err := ParseDSN("postgres://user:pass@db.example/ciradar?sslmode=insecure-require")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.SSLMode != "insecure-require" {
+		t.Fatalf("unexpected sslmode %q", c.SSLMode)
+	}
+}
