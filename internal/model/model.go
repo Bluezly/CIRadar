@@ -65,6 +65,10 @@ type Environment struct {
 }
 
 type AnalysisInput struct {
+	SourceProvider      string    `json:"source_provider,omitempty"`
+	SourceRunURL        string    `json:"source_run_url,omitempty"`
+	PullRequestNumber   int       `json:"pull_request_number,omitempty"`
+	MergeRequestNumber  int       `json:"merge_request_number,omitempty"`
 	TenantID            string    `json:"tenant_id,omitempty"`
 	Repository          string    `json:"repository,omitempty"`
 	Organization        string    `json:"organization,omitempty"`
@@ -82,57 +86,70 @@ type AnalysisInput struct {
 }
 
 type AnalysisResult struct {
-	ID                 string      `json:"id"`
-	TenantID           string      `json:"tenant_id,omitempty"`
-	Category           Category    `json:"category"`
-	Provider           string      `json:"provider,omitempty"`
-	Operation          string      `json:"operation,omitempty"`
-	ErrorFamily        string      `json:"error_family,omitempty"`
-	Attribution        Attribution `json:"attribution"`
-	Confidence         Confidence  `json:"confidence"`
-	Score              int         `json:"score"`
-	RawScore           int         `json:"raw_score"`
-	PositiveScore      int         `json:"positive_score"`
-	NegativeScore      int         `json:"negative_score"`
-	CompetingSignals   bool        `json:"competing_signals,omitempty"`
-	DecisionReason     string      `json:"decision_reason,omitempty"`
-	Fingerprint        string      `json:"fingerprint"`
-	PrivateFingerprint string      `json:"private_fingerprint,omitempty"`
-	Summary            string      `json:"summary"`
-	Recommendation     string      `json:"recommendation"`
-	Evidence           []Evidence  `json:"evidence"`
-	RedactedExcerpt    string      `json:"redacted_excerpt,omitempty"`
-	Environment        Environment `json:"environment"`
-	MatchedRules       []string    `json:"matched_rules,omitempty"`
-	CreatedAt          time.Time   `json:"created_at"`
-	CrossRepoCount     int         `json:"cross_repo_count,omitempty"`
-	CrossOrgCount      int         `json:"cross_org_count,omitempty"`
-	ProviderIncident   bool        `json:"provider_incident,omitempty"`
-	EnvironmentDrift   bool        `json:"environment_drift,omitempty"`
-	EnvironmentChanges []string    `json:"environment_changes,omitempty"`
+	ID                 string            `json:"id"`
+	TenantID           string            `json:"tenant_id,omitempty"`
+	Repository         string            `json:"repository,omitempty"`
+	Organization       string            `json:"organization,omitempty"`
+	Workflow           string            `json:"workflow,omitempty"`
+	Job                string            `json:"job,omitempty"`
+	RunID              int64             `json:"run_id,omitempty"`
+	CommitSHA          string            `json:"commit_sha,omitempty"`
+	SourceProvider     string            `json:"source_provider,omitempty"`
+	SourceRunURL       string            `json:"source_run_url,omitempty"`
+	PullRequestNumber  int               `json:"pull_request_number,omitempty"`
+	MergeRequestNumber int               `json:"merge_request_number,omitempty"`
+	Category           Category          `json:"category"`
+	Provider           string            `json:"provider,omitempty"`
+	Operation          string            `json:"operation,omitempty"`
+	ErrorFamily        string            `json:"error_family,omitempty"`
+	Attribution        Attribution       `json:"attribution"`
+	Confidence         Confidence        `json:"confidence"`
+	Score              int               `json:"score"`
+	RawScore           int               `json:"raw_score"`
+	PositiveScore      int               `json:"positive_score"`
+	NegativeScore      int               `json:"negative_score"`
+	CompetingSignals   bool              `json:"competing_signals,omitempty"`
+	DecisionReason     string            `json:"decision_reason,omitempty"`
+	Fingerprint        string            `json:"fingerprint"`
+	PrivateFingerprint string            `json:"private_fingerprint,omitempty"`
+	Summary            string            `json:"summary"`
+	Recommendation     string            `json:"recommendation"`
+	Evidence           []Evidence        `json:"evidence"`
+	RedactedExcerpt    string            `json:"redacted_excerpt,omitempty"`
+	Environment        Environment       `json:"environment"`
+	MatchedRules       []string          `json:"matched_rules,omitempty"`
+	CreatedAt          time.Time         `json:"created_at"`
+	CrossRepoCount     int               `json:"cross_repo_count,omitempty"`
+	CrossOrgCount      int               `json:"cross_org_count,omitempty"`
+	ProviderIncident   bool              `json:"provider_incident,omitempty"`
+	EnvironmentDrift   bool              `json:"environment_drift,omitempty"`
+	EnvironmentChanges []string          `json:"environment_changes,omitempty"`
+	SuggestedActions   []SuggestedAction `json:"suggested_actions,omitempty"`
+	FeedbackSummary    FeedbackSummary   `json:"feedback_summary,omitempty"`
 }
 
 type Incident struct {
-	ID                string      `json:"id"`
-	TenantID          string      `json:"tenant_id,omitempty"`
-	Fingerprint       string      `json:"fingerprint"`
-	Provider          string      `json:"provider,omitempty"`
-	ErrorFamily       string      `json:"error_family,omitempty"`
-	Category          Category    `json:"category,omitempty"`
-	Attribution       Attribution `json:"attribution,omitempty"`
-	State             string      `json:"state"`
-	Severity          string      `json:"severity"`
-	RepositoryCount   int         `json:"repository_count"`
-	OrganizationCount int         `json:"organization_count"`
-	OccurrenceCount   int         `json:"occurrence_count"`
-	FirstSeenAt       time.Time   `json:"first_seen_at"`
-	LastSeenAt        time.Time   `json:"last_seen_at"`
-	AcknowledgedAt    time.Time   `json:"acknowledged_at,omitempty"`
-	AcknowledgedBy    string      `json:"acknowledged_by,omitempty"`
-	ResolvedAt        time.Time   `json:"resolved_at,omitempty"`
-	ResolvedBy        string      `json:"resolved_by,omitempty"`
-	ResolutionNote    string      `json:"resolution_note,omitempty"`
-	Title             string      `json:"title"`
+	ID                string            `json:"id"`
+	TenantID          string            `json:"tenant_id,omitempty"`
+	Fingerprint       string            `json:"fingerprint"`
+	Provider          string            `json:"provider,omitempty"`
+	ErrorFamily       string            `json:"error_family,omitempty"`
+	Category          Category          `json:"category,omitempty"`
+	Attribution       Attribution       `json:"attribution,omitempty"`
+	State             string            `json:"state"`
+	Severity          string            `json:"severity"`
+	RepositoryCount   int               `json:"repository_count"`
+	OrganizationCount int               `json:"organization_count"`
+	OccurrenceCount   int               `json:"occurrence_count"`
+	FirstSeenAt       time.Time         `json:"first_seen_at"`
+	LastSeenAt        time.Time         `json:"last_seen_at"`
+	AcknowledgedAt    time.Time         `json:"acknowledged_at,omitempty"`
+	AcknowledgedBy    string            `json:"acknowledged_by,omitempty"`
+	ResolvedAt        time.Time         `json:"resolved_at,omitempty"`
+	ResolvedBy        string            `json:"resolved_by,omitempty"`
+	ResolutionNote    string            `json:"resolution_note,omitempty"`
+	Title             string            `json:"title"`
+	SuggestedActions  []SuggestedAction `json:"suggested_actions,omitempty"`
 }
 
 type ProviderStatus struct {
@@ -293,4 +310,129 @@ type DashboardSummary struct {
 	DailyAnalyses         map[string]int   `json:"daily_analyses"`
 	RecentIncidents       []Incident       `json:"recent_incidents"`
 	RecentAnalyses        []AnalysisResult `json:"recent_analyses"`
+	DiagnosisFeedback     FeedbackMetrics  `json:"diagnosis_feedback"`
+	FlakyTests            int              `json:"flaky_tests"`
+	QuarantinedTests      int              `json:"quarantined_tests"`
+	TestCasesTracked      int              `json:"test_cases_tracked"`
+}
+
+type SuggestedAction struct {
+	ID          string   `json:"id"`
+	Type        string   `json:"type"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Risk        string   `json:"risk"`
+	Automatic   bool     `json:"automatic,omitempty"`
+	Commands    []string `json:"commands,omitempty"`
+	References  []string `json:"references,omitempty"`
+}
+
+type DiagnosisFeedback struct {
+	ID          string      `json:"id"`
+	TenantID    string      `json:"tenant_id"`
+	AnalysisID  string      `json:"analysis_id"`
+	Verdict     string      `json:"verdict"`
+	ActualCause Attribution `json:"actual_cause,omitempty"`
+	Comment     string      `json:"comment,omitempty"`
+	Actor       string      `json:"actor,omitempty"`
+	CreatedAt   time.Time   `json:"created_at"`
+	UpdatedAt   time.Time   `json:"updated_at"`
+}
+
+type FeedbackSummary struct {
+	Correct   int `json:"correct"`
+	Partial   int `json:"partial"`
+	Incorrect int `json:"incorrect"`
+}
+
+type FeedbackMetrics struct {
+	Total             int     `json:"total"`
+	Correct           int     `json:"correct"`
+	Partial           int     `json:"partial"`
+	Incorrect         int     `json:"incorrect"`
+	PrecisionPercent  float64 `json:"precision_percent"`
+	ExternalPrecision float64 `json:"external_precision_percent"`
+}
+
+type TestObservation struct {
+	ID          string      `json:"id"`
+	TenantID    string      `json:"tenant_id"`
+	Repository  string      `json:"repository"`
+	Workflow    string      `json:"workflow,omitempty"`
+	Job         string      `json:"job,omitempty"`
+	RunID       int64       `json:"run_id,omitempty"`
+	CommitSHA   string      `json:"commit_sha,omitempty"`
+	Branch      string      `json:"branch,omitempty"`
+	Framework   string      `json:"framework,omitempty"`
+	Suite       string      `json:"suite,omitempty"`
+	ClassName   string      `json:"class_name,omitempty"`
+	Name        string      `json:"name"`
+	Parameters  string      `json:"parameters,omitempty"`
+	Status      string      `json:"status"`
+	DurationMS  int64       `json:"duration_ms,omitempty"`
+	Message     string      `json:"message,omitempty"`
+	Details     string      `json:"details,omitempty"`
+	Environment Environment `json:"environment,omitempty"`
+	OccurredAt  time.Time   `json:"occurred_at"`
+}
+
+type TestCaseStats struct {
+	TenantID        string    `json:"tenant_id"`
+	TestKey         string    `json:"test_key"`
+	Repository      string    `json:"repository"`
+	Framework       string    `json:"framework,omitempty"`
+	Suite           string    `json:"suite,omitempty"`
+	ClassName       string    `json:"class_name,omitempty"`
+	Name            string    `json:"name"`
+	Parameters      string    `json:"parameters,omitempty"`
+	TotalRuns       int       `json:"total_runs"`
+	Passes          int       `json:"passes"`
+	Failures        int       `json:"failures"`
+	Skipped         int       `json:"skipped"`
+	Transitions     int       `json:"transitions"`
+	FlakeScore      float64   `json:"flake_score"`
+	Classification  string    `json:"classification"`
+	FirstSeenAt     time.Time `json:"first_seen_at"`
+	LastSeenAt      time.Time `json:"last_seen_at"`
+	LastStatus      string    `json:"last_status"`
+	Quarantined     bool      `json:"quarantined"`
+	QuarantineUntil time.Time `json:"quarantine_until,omitempty"`
+	Owner           string    `json:"owner,omitempty"`
+}
+
+type TestQuarantine struct {
+	TenantID  string    `json:"tenant_id"`
+	TestKey   string    `json:"test_key"`
+	Reason    string    `json:"reason"`
+	Owner     string    `json:"owner"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Active    bool      `json:"active"`
+}
+
+type CIEvent struct {
+	TenantID          string            `json:"tenant_id,omitempty"`
+	Provider          string            `json:"provider"`
+	DeliveryID        string            `json:"delivery_id,omitempty"`
+	Repository        string            `json:"repository"`
+	Organization      string            `json:"organization,omitempty"`
+	Workflow          string            `json:"workflow,omitempty"`
+	Job               string            `json:"job,omitempty"`
+	RunID             int64             `json:"run_id,omitempty"`
+	JobID             string            `json:"job_id,omitempty"`
+	CommitSHA         string            `json:"commit_sha,omitempty"`
+	Branch            string            `json:"branch,omitempty"`
+	Conclusion        string            `json:"conclusion,omitempty"`
+	Status            string            `json:"status,omitempty"`
+	RunURL            string            `json:"run_url,omitempty"`
+	PullRequestNumber int               `json:"pull_request_number,omitempty"`
+	MergeRequestIID   int               `json:"merge_request_iid,omitempty"`
+	InstallationID    int64             `json:"installation_id,omitempty"`
+	ProjectID         string            `json:"project_id,omitempty"`
+	PipelineID        string            `json:"pipeline_id,omitempty"`
+	LogURL            string            `json:"log_url,omitempty"`
+	InlineLog         string            `json:"inline_log,omitempty"`
+	OccurredAt        time.Time         `json:"occurred_at,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
 }
