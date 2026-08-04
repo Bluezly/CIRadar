@@ -49,6 +49,8 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "analyze":
 		err = cmdAnalyze(os.Args[2:])
+	case "demo":
+		err = cmdDemo(os.Args[2:])
 	case "baseline":
 		err = cmdBaseline(os.Args[2:])
 	case "incidents":
@@ -114,7 +116,8 @@ func usage() {
 
 Usage:
   ciradar init [--config ciradar.json]
-  ciradar analyze [--config ciradar.json] [--json] [--correlate] [--sample npm-econnreset|go-test-failure] [<log-file|->]
+  ciradar analyze [--config ciradar.json] [--json] [--correlate] <log-file|->
+  ciradar demo [--config ciradar.json] [--json] npm-econnreset|go-test-failure
   ciradar baseline [--config ciradar.json] --repo OWNER/REPO <successful-log>
   ciradar incidents [--config ciradar.json] [--json]
   ciradar status [--config ciradar.json] [--json]
@@ -143,7 +146,7 @@ Usage:
 
 Fast local test:
   ciradar init
-  ciradar analyze --sample npm-econnreset
+  ciradar demo npm-econnreset
   ciradar serve
 `)
 }
@@ -421,7 +424,8 @@ func cmdInit(args []string) error {
 		return err
 	}
 	fmt.Println("Created", *path)
-	fmt.Println("Edit GitHub settings later; local analysis works immediately.")
+	fmt.Println("This file contains bootstrap secrets. It is created with owner-only permissions on POSIX systems; restrict its ACL on Windows.")
+	fmt.Println("For production, move secrets to environment variables or an external secret manager. Local analysis works immediately.")
 	return nil
 }
 
@@ -484,7 +488,6 @@ func cmdAnalyze(args []string) error {
 	path := fs.String("config", "ciradar.json", "configuration file path")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	correlate := fs.Bool("correlate", false, "include stored cross-run correlation in the score")
-	sample := fs.String("sample", "", "built-in sample: npm-econnreset or go-test-failure")
 	repo := fs.String("repo", "local/test", "repository name")
 	workflow := fs.String("workflow", "local-analysis", "workflow name")
 	job := fs.String("job", "local-job", "job name")
@@ -496,28 +499,16 @@ func cmdAnalyze(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*sample) == "" && fs.NArg() != 1 {
-		return errors.New("provide a log file path, - for stdin, or --sample")
-	}
-	if strings.TrimSpace(*sample) != "" && fs.NArg() != 0 {
-		return errors.New("do not combine --sample with a log file")
+	if fs.NArg() != 1 {
+		return errors.New("provide a log file path or - for stdin")
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
 	}
-	var b []byte
-	if strings.TrimSpace(*sample) != "" {
-		value, sampleErr := builtInAnalysisSample(*sample)
-		if sampleErr != nil {
-			return sampleErr
-		}
-		b = []byte(value)
-	} else {
-		b, err = readInput(fs.Arg(0), cfg.MaxLogBytes)
-		if err != nil {
-			return err
-		}
+	b, err := readInput(fs.Arg(0), cfg.MaxLogBytes)
+	if err != nil {
+		return err
 	}
 	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
@@ -562,15 +553,39 @@ func cmdAnalyze(args []string) error {
 	return nil
 }
 
-func builtInAnalysisSample(name string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "npm-econnreset":
-		return "npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/lodash failed, reason: socket hang up\n", nil
-	case "go-test-failure":
-		return "--- FAIL: TestCalculateDiscount (0.00s)\n    discount_test.go:42: expected: 90, actual: 100\nFAIL\nFAIL\texample.com/shop\t0.013s\n", nil
-	default:
-		return "", fmt.Errorf("unknown sample %q; available samples: npm-econnreset, go-test-failure", name)
+func cmdDemo(args []string) error {
+	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: ciradar demo [--config ciradar.json] [--json] npm-econnreset|go-test-failure")
+	}
+	samples := map[string]string{
+		"npm-econnreset":  "npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/react failed, reason: socket hang up\n",
+		"go-test-failure": "--- FAIL: TestCalculateDiscount (0.00s)\n    discount_test.go:42: expected: 90, actual: 100\nFAIL\nFAIL\texample.com/shop\t0.013s\n",
+	}
+	logText, ok := samples[strings.ToLower(strings.TrimSpace(fs.Arg(0)))]
+	if !ok {
+		return fmt.Errorf("unknown demo %q; choose npm-econnreset or go-test-failure", fs.Arg(0))
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	a, err := buildAnalyzer(cfg)
+	if err != nil {
+		return err
+	}
+	in := model.AnalysisInput{TenantID: cfg.DefaultTenantID, Repository: "demo/local", Organization: "demo", Workflow: "demo", Job: "demo", Log: logText, OccurredAt: time.Now().UTC()}
+	result := a.Analyze(in, analyzer.Context{})
+	if *jsonOut {
+		return printJSON(result)
+	}
+	printHuman(result)
+	return nil
 }
 
 func cmdBaseline(args []string) error {
@@ -805,7 +820,7 @@ func cmdSimulate(args []string) error {
 		}
 		if r.CrossRepoCount >= cfg.IncidentRepoThreshold || r.CrossOrgCount >= cfg.IncidentOrgThreshold {
 			now := time.Now().UTC()
-			_ = store.UpsertIncidentForTenant(context.Background(), tenantID, model.Incident{ID: "inc_" + r.Fingerprint, TenantID: tenantID, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: "major", RepositoryCount: r.CrossRepoCount, OrganizationCount: r.CrossOrgCount, OccurrenceCount: r.CrossRepoCount, FirstSeenAt: now, LastSeenAt: now, Title: r.Provider + ": " + r.Summary})
+			_ = store.UpsertIncidentForTenant(context.Background(), tenantID, model.Incident{ID: "inc_" + r.Fingerprint, TenantID: tenantID, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: "major", RepositoryCount: r.CrossRepoCount, OrganizationCount: r.CrossOrgCount, OccurrenceCount: corr.Occurrences, FirstSeenAt: now, LastSeenAt: now, Title: r.Provider + ": " + r.Summary})
 		}
 	}
 	st, _ := store.StatsForTenant(context.Background(), tenantID)
@@ -827,6 +842,13 @@ func cmdDoctor(args []string) error {
 	fmt.Println("  Version:", version.Version)
 	fmt.Println("  OS/Arch:", runtime.GOOS+"/"+runtime.GOARCH)
 	fmt.Println("  Config:", *path)
+	if info, statErr := os.Stat(*path); statErr == nil && runtime.GOOS != "windows" {
+		mode := info.Mode().Perm()
+		fmt.Printf("  Config permissions: %04o\n", mode)
+		if mode&0o077 != 0 {
+			fmt.Println("  Config warning: bootstrap secrets are readable by group or other users; use chmod 600")
+		}
+	}
 	if cfg.DatabaseDriver == "postgres" {
 		fmt.Println("  Database: PostgreSQL")
 	} else {
@@ -865,7 +887,7 @@ func cmdDoctor(args []string) error {
 	fmt.Println("  Automatic retry:", cfg.AutomaticRetryEnabled)
 	fmt.Println("  Notifications enabled:", cfg.Notifications.Enabled)
 	for _, ch := range cfg.Notifications.Channels {
-		fmt.Printf("    - %s (%s): enabled=%v events=%d min_score=%d\n", ch.Name, ch.Type, ch.Enabled, len(ch.Events), ch.MinimumScore)
+		fmt.Printf("    - %s (%s): enabled=%v events=%d min_evidence=%d\n", ch.Name, ch.Type, ch.Enabled, len(ch.Events), ch.MinimumScore)
 	}
 	extra, err := analyzer.LoadCustomRules(cfg.RulesDirectory)
 	if err != nil {
@@ -920,7 +942,7 @@ func buildAnalyzer(cfg config.Config) (*analyzer.Analyzer, error) {
 func printHuman(r model.AnalysisResult) {
 	fmt.Println("\nCI Radar diagnosis")
 	fmt.Println(strings.Repeat("=", 60))
-	fmt.Printf("Attribution: %s\nConfidence : %s\nCategory   : %s\nProvider   : %s\nOperation  : %s\nScore      : %d/100 (raw %d, external +%d, code %d)\nFingerprint: %s\n\n", r.Attribution, r.Confidence, r.Category, r.Provider, r.Operation, r.Score, r.RawScore, r.PositiveScore, r.NegativeScore, r.Fingerprint)
+	fmt.Printf("Attribution      : %s\nConfidence       : %s\nCategory         : %s\nProvider         : %s\nOperation        : %s\nEvidence strength: %d/100\nExternality score: %+d (-100 code, +100 external)\nEvidence split   : external %d, code %d\nFingerprint      : %s\n\n", r.Attribution, r.Confidence, r.Category, r.Provider, r.Operation, model.EvidenceStrengthOf(r), model.ExternalityScoreOf(r), model.ExternalEvidenceScoreOf(r), model.CodeEvidenceScoreOf(r), r.Fingerprint)
 	if r.DecisionReason != "" {
 		fmt.Println("Decision:", r.DecisionReason)
 	}
