@@ -65,3 +65,14 @@ ciradar tests gate --repo acme/app --format junit results.xml
 ```
 
 Automatic quarantine is optional and disabled by default.
+
+## Human-readable quarantine selectors
+
+`tests list` returns `display_name` and `aliases`. Quarantine and unquarantine accept either the stable hash through `--key` or a readable identity through `--test`:
+
+```bash
+ciradar tests quarantine --repo acme/api --test payments/PaymentServiceTest/retries_transient_gateway_error --owner payments --reason "known intermittent gateway fixture"
+ciradar tests unquarantine --repo acme/api --test payments/PaymentServiceTest/retries_transient_gateway_error
+```
+
+When no tests are selected, the response includes diagnostics such as missing test history, missing impact graph, or coverage identities that did not match ingested tests.

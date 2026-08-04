@@ -4,7 +4,7 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-## What RC.4 includes
+## What RC.5 includes
 
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, and sticky GitLab Merge Request comments
@@ -20,16 +20,22 @@ License: AGPL-3.0-or-later.
 - safe automatic rerun for external failures, disabled by default
 - repair plan and confirmation-gated local patch application, plus optional GitHub draft repair Pull Requests
 - Windows, Linux, and macOS builds for amd64 and arm64
+- field-test fixes: stable local analysis scores by default, opt-in `--correlate`, readable test quarantine selectors, coverage identity aliases, selection diagnostics, built-in CLI samples, and standard Go test failure classification
 
 ## Quick start
 
 ```bash
 ciradar init
-ciradar analyze examples/npm-econnreset.log
+ciradar analyze --sample npm-econnreset
+ciradar analyze --sample go-test-failure
 ciradar serve
 ```
 
-Open `http://127.0.0.1:8787/` and exchange the generated root token through the secure login field.
+Open `http://127.0.0.1:8787/` and exchange the generated root token through the secure login field. `ciradar.json` contains generated administrative and cryptographic secrets, is created with mode `0600` on Unix, and must not be committed or shared.
+
+## Local analysis behavior
+
+Local CLI analyses are deterministic by default and do not change score because the same file was analyzed earlier. Add `--correlate` only when you intentionally want stored cross-run correlation included.
 
 ## PostgreSQL
 

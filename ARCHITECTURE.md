@@ -1,4 +1,4 @@
-# CI Radar architecture — 1.3.0 OSS RC.4
+# CI Radar architecture — 1.3.0 OSS RC.5
 
 CI Radar is a self-hosted Go service with a deterministic diagnosis core and optional local or BYOK intelligence layers.
 

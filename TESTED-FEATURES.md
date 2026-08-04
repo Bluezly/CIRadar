@@ -1,8 +1,14 @@
-# Tested features — 1.3.0 OSS RC.4
+# Tested features — 1.3.0 OSS RC.5
 
 Automated tests cover:
 
 - deterministic classification, contrary evidence, redaction, and HMAC fingerprints
+- repeated local CLI analysis does not self-inflate scores unless `--correlate` is requested
+- correlation counts distinct repositories and organizations without inventing a new one for repeat runs
+- readable test identities resolve to stable test keys for quarantine operations
+- coverage maps accept stable keys and human-readable test aliases and return diagnostics on empty selection
+- standard Go `--- FAIL: Test...` assertion output is classified as a deterministic code failure
+- built-in npm and Go test samples work without external example files
 - tenant isolation, RBAC, API-key hashing, audit, encrypted browser and SSO sessions
 - embedded persistence and relational PostgreSQL protocol behavior
 - GitHub Checks, sticky PR comments, GitLab sticky MR notes, and GitHub Marketplace metadata
