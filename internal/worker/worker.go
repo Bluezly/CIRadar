@@ -21,14 +21,14 @@ import (
 
 type Worker struct {
 	cfg      config.Config
-	store    *db.Store
+	store    db.Backend
 	analyzer *analyzer.Analyzer
 	github   *gh.Client
 	notifier *notifications.Dispatcher
 	log      *slog.Logger
 }
 
-func New(cfg config.Config, store *db.Store, a *analyzer.Analyzer, github *gh.Client, notifier *notifications.Dispatcher, log *slog.Logger) *Worker {
+func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, github *gh.Client, notifier *notifications.Dispatcher, log *slog.Logger) *Worker {
 	return &Worker{cfg: cfg, store: store, analyzer: a, github: github, notifier: notifier, log: log}
 }
 
@@ -84,7 +84,15 @@ func (w *Worker) process(ctx context.Context, job db.Job) error {
 		if err := json.Unmarshal(job.Payload, &ev); err != nil {
 			return err
 		}
-		return w.processWorkflowRun(ctx, ev)
+		err := w.processWorkflowRun(ctx, ev)
+		if ev.DeliveryID != "" {
+			status, detail := "processed", ""
+			if err != nil {
+				status, detail = "error", err.Error()
+			}
+			_ = w.store.UpdateDelivery(ctx, ev.DeliveryID, status, detail)
+		}
+		return err
 	default:
 		return fmt.Errorf("unknown job type %q", job.Type)
 	}
@@ -94,6 +102,19 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 	if w.github == nil {
 		return fmt.Errorf("GitHub client is not configured")
 	}
+	tenantID := strings.TrimSpace(ev.TenantID)
+	if tenantID == "" {
+		var bound bool
+		tenantID, bound = w.store.ResolveInstallationTenant(ctx, ev.Installation.ID)
+		if w.cfg.RequireInstallationBinding && !bound {
+			return fmt.Errorf("GitHub installation %d is not assigned to a tenant", ev.Installation.ID)
+		}
+	}
+	tenant, _ := w.store.GetTenant(ctx, tenantID)
+	if tenant == nil || !tenant.Enabled {
+		return fmt.Errorf("tenant %q is missing or disabled", tenantID)
+	}
+	ev.TenantID = tenantID
 	parts := strings.SplitN(ev.Repository.FullName, "/", 2)
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid repository %q", ev.Repository.FullName)
@@ -104,7 +125,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		return err
 	}
 	if ev.WorkflowRun.Conclusion == "success" {
-		return w.captureSuccessfulEnvironment(ctx, ev, jobs, owner, repo)
+		return w.captureSuccessfulEnvironment(ctx, tenantID, ev, jobs, owner, repo)
 	}
 	previousSuccess, err := w.github.HasPreviousSuccessfulRun(ctx, ev.Installation.ID, owner, repo, ev.WorkflowRun.HeadSHA, ev.WorkflowRun.ID)
 	if err != nil {
@@ -133,25 +154,25 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 			w.log.Warn("download job log failed", "job", job.Name, "error", err)
 			continue
 		}
-		input := model.AnalysisInput{Repository: ev.Repository.FullName, Organization: owner, Workflow: ev.WorkflowRun.Name, Job: job.Name, RunID: ev.WorkflowRun.ID, JobID: job.ID, CommitSHA: ev.WorkflowRun.HeadSHA, PreviousSuccess: previousSuccess, WorkflowChanged: workflowChanged, DependencyChanged: dependencyChanged, ChangeInfoAvailable: changeInfoAvailable, Log: logText, OccurredAt: time.Now().UTC()}
+		input := model.AnalysisInput{TenantID: tenantID, Repository: ev.Repository.FullName, Organization: owner, Workflow: ev.WorkflowRun.Name, Job: job.Name, RunID: ev.WorkflowRun.ID, JobID: job.ID, CommitSHA: ev.WorkflowRun.HeadSHA, PreviousSuccess: previousSuccess, WorkflowChanged: workflowChanged, DependencyChanged: dependencyChanged, ChangeInfoAvailable: changeInfoAvailable, Log: logText, OccurredAt: time.Now().UTC()}
 		initial := w.analyzer.Analyze(input, analyzer.Context{})
-		corr, err := w.store.Correlation(ctx, initial.Fingerprint, time.Now().UTC().Add(-w.cfg.IncidentWindow))
+		corr, err := w.store.CorrelationForTenant(ctx, tenantID, initial.Fingerprint, time.Now().UTC().Add(-w.cfg.IncidentWindow), w.cfg.CrossTenantCorrelation)
 		if err != nil {
 			return err
 		}
-		prevEnv, err := w.store.LastSuccessfulEnvironment(ctx, input.Repository, input.Workflow, input.Job)
+		prevEnv, err := w.store.LastSuccessfulEnvironmentForTenant(ctx, tenantID, input.Repository, input.Workflow, input.Job)
 		if err != nil {
 			return err
 		}
 		providerIncident := w.providerIncident(ctx, initial.Provider)
 		result := w.analyzer.Analyze(input, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: providerIncident, PreviousEnvironment: prevEnv})
-		if err := w.store.RecordAnalysis(ctx, input, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
+		if err := w.store.RecordAnalysisForTenant(ctx, tenantID, input, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 			return err
 		}
 		if w.notifier != nil && w.notifier.Enabled() {
-			_ = w.store.Enqueue(ctx, "notify.event", notifications.AnalysisEvent(input, result, w.cfg.PublicBaseURL), time.Now().UTC())
+			_ = w.store.EnqueueForTenant(ctx, input.TenantID, "notify.event", notifications.AnalysisEvent(input, result, w.cfg.PublicBaseURL), time.Now().UTC())
 		}
-		incident, created, err := w.maybeCreateIncident(ctx, result, corr)
+		incident, created, err := w.maybeCreateIncident(ctx, tenantID, input.Repository, result, corr)
 		if err != nil {
 			w.log.Warn("incident update failed", "error", err)
 		} else if incident != nil && w.notifier != nil && w.notifier.Enabled() {
@@ -159,7 +180,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 			if created {
 				kind = "incident_opened"
 			}
-			_ = w.store.Enqueue(ctx, "notify.event", notifications.IncidentEvent(kind, *incident, w.cfg.PublicBaseURL), time.Now().UTC())
+			_ = w.store.EnqueueForTenant(ctx, incident.TenantID, "notify.event", notifications.IncidentEvent(kind, *incident, w.cfg.PublicBaseURL), time.Now().UTC())
 		}
 		if err := w.publishCheck(ctx, ev, job, result, owner, repo); err != nil {
 			w.log.Warn("publish GitHub check failed", "error", err)
@@ -167,7 +188,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		processed++
 		if result.Score > bestScore {
 			bestScore = result.Score
-			bestRetryEligible = !result.ProviderIncident && retryEligible(result.Category)
+			bestRetryEligible = result.Attribution == model.AttributionExternal && !result.ProviderIncident && retryEligible(result.Category)
 		}
 	}
 	if processed == 0 {
@@ -177,13 +198,14 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		if err := w.github.RerunFailedJobs(ctx, ev.Installation.ID, owner, repo, ev.WorkflowRun.ID); err != nil {
 			w.log.Warn("automatic retry failed", "error", err)
 		} else {
-			w.log.Info("automatic retry requested", "repository", ev.Repository.FullName, "run_id", ev.WorkflowRun.ID)
+			w.log.Info("automatic retry requested", "tenant", tenantID, "repository", ev.Repository.FullName, "run_id", ev.WorkflowRun.ID)
+			_ = w.store.RecordAudit(ctx, model.AuditEvent{TenantID: tenantID, Actor: "system", Role: model.RoleOperator, Action: "workflow.retry", Resource: "workflow_run", ResourceID: fmt.Sprint(ev.WorkflowRun.ID), Metadata: map[string]string{"repository": ev.Repository.FullName}})
 		}
 	}
 	return nil
 }
 
-func (w *Worker) captureSuccessfulEnvironment(ctx context.Context, ev model.GitHubWorkflowRunEvent, jobs []gh.Job, owner, repo string) error {
+func (w *Worker) captureSuccessfulEnvironment(ctx context.Context, tenantID string, ev model.GitHubWorkflowRunEvent, jobs []gh.Job, owner, repo string) error {
 	captured := 0
 	for _, job := range jobs {
 		if job.Conclusion != "success" {
@@ -197,8 +219,24 @@ func (w *Worker) captureSuccessfulEnvironment(ctx context.Context, ev model.GitH
 		if env.RunnerOS == "" && env.RunnerImage == "" && len(env.ToolVersions) == 0 {
 			continue
 		}
-		if err := w.store.RecordSuccessfulEnvironment(ctx, ev.Repository.FullName, ev.WorkflowRun.Name, job.Name, ev.WorkflowRun.HeadSHA, env, time.Now().UTC()); err != nil {
+		previous, err := w.store.LastSuccessfulEnvironmentForTenant(ctx, tenantID, ev.Repository.FullName, ev.WorkflowRun.Name, job.Name)
+		if err != nil {
 			return err
+		}
+		changes := []string{}
+		if previous != nil {
+			changes = analyzer.CompareEnvironment(*previous, env)
+		}
+		if err := w.store.RecordSuccessfulEnvironmentForTenant(ctx, tenantID, ev.Repository.FullName, ev.WorkflowRun.Name, job.Name, ev.WorkflowRun.HeadSHA, env, time.Now().UTC()); err != nil {
+			return err
+		}
+		if len(changes) > 0 {
+			w.log.Info("CI environment changed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "changes", len(changes))
+			_ = w.store.RecordAudit(ctx, model.AuditEvent{TenantID: tenantID, Actor: "system", Role: model.RoleOperator, Action: "environment.changed", Resource: "repository", ResourceID: ev.Repository.FullName, Metadata: map[string]string{"workflow": ev.WorkflowRun.Name, "job": job.Name, "changes": strings.Join(changes, "; ")}})
+			if w.notifier != nil && w.notifier.Enabled() {
+				event := notifications.EnvironmentChangedEvent(tenantID, ev.Repository.FullName, owner, ev.WorkflowRun.Name, job.Name, ev.WorkflowRun.HeadSHA, ev.WorkflowRun.HTMLURL, changes)
+				_ = w.store.Enqueue(ctx, "notify.event", event, time.Now().UTC())
+			}
 		}
 		captured++
 	}
@@ -219,7 +257,7 @@ func (w *Worker) providerIncident(ctx context.Context, provider string) bool {
 	return false
 }
 
-func (w *Worker) maybeCreateIncident(ctx context.Context, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
+func (w *Worker) maybeCreateIncident(ctx context.Context, tenantID, repository string, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
 	repos := c.Repositories + 1
 	orgs := c.Organizations + 1
 	occ := c.Occurrences + 1
@@ -233,24 +271,54 @@ func (w *Worker) maybeCreateIncident(ctx context.Context, r model.AnalysisResult
 	if repos >= 50 {
 		severity = "critical"
 	}
+	if profile, err := w.store.GetRepositoryProfile(ctx, tenantID, repository); err == nil && profile != nil {
+		switch strings.ToLower(strings.TrimSpace(profile.Criticality)) {
+		case "critical":
+			severity = "critical"
+		case "high":
+			if severity == "minor" {
+				severity = "major"
+			}
+		}
+	}
 	now := time.Now().UTC()
-	i := model.Incident{ID: "inc_" + r.Fingerprint, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: severity, RepositoryCount: repos, OrganizationCount: orgs, OccurrenceCount: occ, FirstSeenAt: now, LastSeenAt: now, Title: fmt.Sprintf("%s: %s", r.Provider, r.Summary)}
-	old, err := w.store.GetIncident(ctx, r.Fingerprint)
+	i := model.Incident{
+		ID:                "inc_" + tenantID + "_" + r.Fingerprint,
+		TenantID:          tenantID,
+		Fingerprint:       r.Fingerprint,
+		Provider:          r.Provider,
+		Category:          r.Category,
+		Attribution:       r.Attribution,
+		ErrorFamily:       r.ErrorFamily,
+		State:             "open",
+		Severity:          severity,
+		RepositoryCount:   repos,
+		OrganizationCount: orgs,
+		OccurrenceCount:   occ,
+		FirstSeenAt:       now,
+		LastSeenAt:        now,
+		Title:             fmt.Sprintf("%s: %s", r.Provider, r.Summary),
+	}
+	old, err := w.store.GetIncidentForTenant(ctx, tenantID, r.Fingerprint)
 	if err != nil {
 		return nil, false, err
 	}
-	created := old == nil || old.State != "open"
-	if err := w.store.UpsertIncident(ctx, i); err != nil {
+	created := old == nil || old.State == "resolved"
+	if err := w.store.UpsertIncidentForTenant(ctx, tenantID, i); err != nil {
 		return nil, false, err
 	}
-	return &i, created, nil
+	out, _ := w.store.GetIncidentForTenant(ctx, tenantID, r.Fingerprint)
+	return out, created, nil
 }
 
 func (w *Worker) publishCheck(ctx context.Context, ev model.GitHubWorkflowRunEvent, job gh.Job, r model.AnalysisResult, owner, repo string) error {
 	title := fmt.Sprintf("%s evidence — %s", prettyConfidence(r.Confidence), r.Category)
 	var b strings.Builder
 	fmt.Fprintf(&b, "**Diagnosis:** %s\n\n", r.Summary)
-	fmt.Fprintf(&b, "**Provider:** %s  \n**Operation:** %s  \n**Evidence score:** %d/100  \n**Fingerprint:** `%s`\n\n", r.Provider, r.Operation, r.Score, r.Fingerprint)
+	fmt.Fprintf(&b, "**Attribution:** %s  \n**Provider:** %s  \n**Operation:** %s  \n**Evidence score:** %d/100  \n**Fingerprint:** `%s`\n\n", r.Attribution, r.Provider, r.Operation, r.Score, r.Fingerprint)
+	if r.DecisionReason != "" {
+		fmt.Fprintf(&b, "**Decision:** %s\n\n", r.DecisionReason)
+	}
 	if len(r.Evidence) > 0 {
 		b.WriteString("### Evidence\n")
 		for _, e := range r.Evidence {
