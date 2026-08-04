@@ -114,7 +114,7 @@ func usage() {
 
 Usage:
   ciradar init [--config ciradar.json]
-  ciradar analyze [--config ciradar.json] [--json] <log-file|->
+  ciradar analyze [--config ciradar.json] [--json] [--correlate] [--sample npm-econnreset|go-test-failure] [<log-file|->]
   ciradar baseline [--config ciradar.json] --repo OWNER/REPO <successful-log>
   ciradar incidents [--config ciradar.json] [--json]
   ciradar status [--config ciradar.json] [--json]
@@ -143,7 +143,7 @@ Usage:
 
 Fast local test:
   ciradar init
-  ciradar analyze samples/npm-econnreset.log
+  ciradar analyze --sample npm-econnreset
   ciradar serve
 `)
 }
@@ -483,6 +483,8 @@ func cmdAnalyze(args []string) error {
 	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
 	path := fs.String("config", "ciradar.json", "configuration file path")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	correlate := fs.Bool("correlate", false, "include stored cross-run correlation in the score")
+	sample := fs.String("sample", "", "built-in sample: npm-econnreset or go-test-failure")
 	repo := fs.String("repo", "local/test", "repository name")
 	workflow := fs.String("workflow", "local-analysis", "workflow name")
 	job := fs.String("job", "local-job", "job name")
@@ -494,16 +496,28 @@ func cmdAnalyze(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return errors.New("provide a log file path or - for stdin")
+	if strings.TrimSpace(*sample) == "" && fs.NArg() != 1 {
+		return errors.New("provide a log file path, - for stdin, or --sample")
+	}
+	if strings.TrimSpace(*sample) != "" && fs.NArg() != 0 {
+		return errors.New("do not combine --sample with a log file")
 	}
 	cfg, err := config.Load(*path)
 	if err != nil {
 		return err
 	}
-	b, err := readInput(fs.Arg(0), cfg.MaxLogBytes)
-	if err != nil {
-		return err
+	var b []byte
+	if strings.TrimSpace(*sample) != "" {
+		value, sampleErr := builtInAnalysisSample(*sample)
+		if sampleErr != nil {
+			return sampleErr
+		}
+		b = []byte(value)
+	} else {
+		b, err = readInput(fs.Arg(0), cfg.MaxLogBytes)
+		if err != nil {
+			return err
+		}
 	}
 	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
@@ -518,10 +532,18 @@ func cmdAnalyze(args []string) error {
 	org := strings.SplitN(*repo, "/", 2)[0]
 	in := model.AnalysisInput{TenantID: tenantID, Repository: *repo, Organization: org, Workflow: *workflow, Job: *job, PreviousSuccess: *previous, WorkflowChanged: *workflowChanged, DependencyChanged: *dependencyChanged, ChangeInfoAvailable: *changeInfo, Log: string(b), OccurredAt: time.Now().UTC()}
 	initial := a.Analyze(in, analyzer.Context{})
-	corr, _ := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
 	prev, _ := store.LastSuccessfulEnvironmentForTenant(context.Background(), tenantID, in.Repository, in.Workflow, in.Job)
-	providerIncident := providerIncident(context.Background(), store, initial.Provider)
-	result := a.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: providerIncident, PreviousEnvironment: prev})
+	analysisContext := analyzer.Context{ProviderIncident: providerIncident(context.Background(), store, initial.Provider), PreviousEnvironment: prev}
+	if *correlate {
+		corr, corrErr := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
+		if corrErr != nil {
+			return corrErr
+		}
+		analysisContext.CrossRepoCount = corr.Repositories
+		analysisContext.CrossOrgCount = corr.Organizations
+		analysisContext.RecentOccurrences = corr.Occurrences
+	}
+	result := a.Analyze(in, analysisContext)
 	if err := store.RecordAnalysisForTenant(context.Background(), tenantID, in, result, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
 		return err
 	}
@@ -538,6 +560,17 @@ func cmdAnalyze(args []string) error {
 	}
 	printHuman(result)
 	return nil
+}
+
+func builtInAnalysisSample(name string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "npm-econnreset":
+		return "npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/lodash failed, reason: socket hang up\n", nil
+	case "go-test-failure":
+		return "--- FAIL: TestCalculateDiscount (0.00s)\n    discount_test.go:42: expected: 90, actual: 100\nFAIL\nFAIL\texample.com/shop\t0.013s\n", nil
+	default:
+		return "", fmt.Errorf("unknown sample %q; available samples: npm-econnreset, go-test-failure", name)
+	}
 }
 
 func cmdBaseline(args []string) error {
@@ -765,8 +798,8 @@ func cmdSimulate(args []string) error {
 		repo := fmt.Sprintf("simulation-org-%d/repo-%d", i%3, i)
 		in := model.AnalysisInput{TenantID: tenantID, Repository: repo, Organization: strings.SplitN(repo, "/", 2)[0], Workflow: "ci", Job: "test", Log: string(b), OccurredAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond)}
 		initial := a.Analyze(in, analyzer.Context{})
-		corr, _ := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
-		r := a.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1})
+		corr, _ := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
+		r := a.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences})
 		if err := store.RecordAnalysisForTenant(context.Background(), tenantID, in, r, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
 			return err
 		}
@@ -1102,6 +1135,7 @@ func cmdTests(args []string) error {
 	branch := fs.String("branch", "", "branch")
 	classification := fs.String("classification", "", "classification filter")
 	key := fs.String("key", "", "test key")
+	testSelector := fs.String("test", "", "readable test identity")
 	owner := fs.String("owner", "", "test owner")
 	reason := fs.String("reason", "", "quarantine reason")
 	duration := fs.Duration("duration", 7*24*time.Hour, "quarantine duration")
@@ -1139,6 +1173,7 @@ func cmdTests(args []string) error {
 		if err != nil {
 			return err
 		}
+		enrichTestStats(stats)
 		fmt.Printf("Ingested %d test observations; %d test cases updated.\n", len(obs), len(stats))
 		return printJSON(stats)
 	case "list":
@@ -1146,6 +1181,7 @@ func cmdTests(args []string) error {
 		if err != nil {
 			return err
 		}
+		enrichTestStats(items)
 		return printJSON(items)
 	case "gate":
 		if fs.NArg() < 1 || strings.TrimSpace(*repo) == "" {
@@ -1220,22 +1256,60 @@ func cmdTests(args []string) error {
 		fmt.Printf("Stored coverage links for %d test identities.\n", len(graph.TestCoverage))
 		return printJSON(graph)
 	case "quarantine":
-		if *key == "" || *owner == "" || *reason == "" {
-			return errors.New("--key, --owner, and --reason are required")
+		resolvedKey, err := resolveTestKey(context.Background(), store, tenantID, *repo, *key, *testSelector)
+		if err != nil {
+			return err
 		}
-		q, err := store.SetTestQuarantine(context.Background(), model.TestQuarantine{TenantID: tenantID, TestKey: *key, Owner: *owner, Reason: *reason, CreatedBy: "cli", ExpiresAt: time.Now().UTC().Add(*duration)})
+		if *owner == "" || *reason == "" {
+			return errors.New("--owner and --reason are required")
+		}
+		q, err := store.SetTestQuarantine(context.Background(), model.TestQuarantine{TenantID: tenantID, TestKey: resolvedKey, Owner: *owner, Reason: *reason, CreatedBy: "cli", ExpiresAt: time.Now().UTC().Add(*duration)})
 		if err != nil {
 			return err
 		}
 		return printJSON(q)
 	case "unquarantine":
-		if *key == "" {
-			return errors.New("--key is required")
+		resolvedKey, err := resolveTestKey(context.Background(), store, tenantID, *repo, *key, *testSelector)
+		if err != nil {
+			return err
 		}
-		return store.RemoveTestQuarantine(context.Background(), tenantID, *key)
+		return store.RemoveTestQuarantine(context.Background(), tenantID, resolvedKey)
 	default:
 		return fmt.Errorf("unknown tests command %q", sub)
 	}
+}
+
+func enrichTestStats(items []model.TestCaseStats) {
+	for i := range items {
+		items[i].DisplayName = testselection.DisplayName(items[i])
+		items[i].Aliases = testselection.TestAliases(items[i])
+	}
+}
+
+func resolveTestKey(ctx context.Context, store db.Backend, tenantID, repository, key, selector string) (string, error) {
+	key = strings.TrimSpace(key)
+	selector = strings.TrimSpace(selector)
+	if key != "" && selector != "" {
+		return "", errors.New("use either --key or --test, not both")
+	}
+	if key != "" {
+		return key, nil
+	}
+	if selector == "" {
+		return "", errors.New("--key or --test is required")
+	}
+	if strings.TrimSpace(repository) == "" {
+		return "", errors.New("--repo is required when using --test")
+	}
+	items, err := store.ListTestCaseStats(ctx, tenantID, repository, "", 5000)
+	if err != nil {
+		return "", err
+	}
+	match, err := testselection.ResolveTest(items, selector)
+	if err != nil {
+		return "", err
+	}
+	return match.TestKey, nil
 }
 
 func firstPositiveFloat(a, b float64) float64 {
