@@ -343,7 +343,7 @@ func TestMCPHTTPIsAuthenticatedAndReadOnly(t *testing.T) {
 	}
 	write := map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "retry_job", "arguments": map[string]any{}}}
 	rr = doReq(t, s, http.MethodPost, "/mcp", token, "", write)
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "unknown read-only tool") {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "unknown tool") {
 		t.Fatalf("write=%d %s", rr.Code, rr.Body.String())
 	}
 }
@@ -603,5 +603,54 @@ func TestMarketplacePurchaseUsesPrimaryGitHubWebhook(t *testing.T) {
 	}
 	if tenant, ok := store.ResolveInstallationTenant(context.Background(), 99); !ok || tenant == "" {
 		t.Fatalf("installation binding=%q %v", tenant, ok)
+	}
+}
+
+func TestRepairAPIQueuesDraftPullRequest(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	cfg.Repair.Enabled = true
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	server := New(cfg, store, analyzer.New("test-key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, token, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "operator", model.RoleOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := model.AnalysisResult{ID: "repair-api", TenantID: model.DefaultTenantID, Repository: "acme/api", Attribution: model.AttributionCode, CreatedAt: time.Now().UTC()}
+	if err := store.RecordAnalysisForTenant(context.Background(), model.DefaultTenantID, model.AnalysisInput{TenantID: model.DefaultTenantID, Repository: analysis.Repository}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	enhancement := model.LLMEnhancement{AnalysisID: analysis.ID, TenantID: model.DefaultTenantID, Patch: "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n", CreatedAt: time.Now().UTC()}
+	if err := store.PutObject(context.Background(), model.DefaultTenantID, "llm_enhancement", analysis.ID, enhancement); err != nil {
+		t.Fatal(err)
+	}
+	queued := doReq(t, server, http.MethodPost, "/api/v1/analyses/"+analysis.ID+"/repair/draft-pr", token, "", map[string]any{})
+	if queued.Code != http.StatusAccepted || !strings.Contains(queued.Body.String(), "queued") {
+		t.Fatalf("queued status=%d body=%s", queued.Code, queued.Body.String())
+	}
+	job, err := store.ClaimJob(context.Background(), "api-test")
+	if err != nil || job == nil || job.Type != "repair.draft_pr" || job.TenantID != model.DefaultTenantID {
+		t.Fatalf("job=%#v err=%v", job, err)
+	}
+	missing := doReq(t, server, http.MethodGet, "/api/v1/analyses/"+analysis.ID+"/repair", token, "", nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("repair result status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	result := model.RepairResult{TenantID: model.DefaultTenantID, AnalysisID: analysis.ID, Status: "draft_pr_created", PullRequestURL: "https://github.test/acme/api/pull/7", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := store.PutObject(context.Background(), model.DefaultTenantID, "repair_result", analysis.ID, result); err != nil {
+		t.Fatal(err)
+	}
+	found := doReq(t, server, http.MethodGet, "/api/v1/analyses/"+analysis.ID+"/repair", token, "", nil)
+	if found.Code != http.StatusOK || !strings.Contains(found.Body.String(), "draft_pr_created") {
+		t.Fatalf("repair result status=%d body=%s", found.Code, found.Body.String())
 	}
 }
