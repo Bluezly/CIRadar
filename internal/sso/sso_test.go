@@ -7,10 +7,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -138,5 +141,95 @@ func TestOIDCAuthorizationCodePKCEFlow(t *testing.T) {
 	principal, ok := callbackManager.Authenticate(authRequest)
 	if !ok || principal.TenantID != "acme" || principal.Role != model.RoleOperator {
 		t.Fatalf("principal=%#v ok=%v", principal, ok)
+	}
+}
+
+func TestNativeSAMLFlow(t *testing.T) {
+	xmlsec := filepath.Join(t.TempDir(), "xmlsec1")
+	if err := os.WriteFile(xmlsec, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.SSOConfig{Enabled: true, Mode: "saml", SessionSecret: "01234567890123456789012345678901", CookieName: "ciradar_session", SAMLEntityID: "https://ciradar.example/saml", SAMLIdPSSOURL: "https://idp.example/sso", SAMLIdPEntityID: "https://idp.example/metadata", SAMLIdPCertificate: "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", SAMLACSURL: "https://ciradar.example/auth/callback", SAMLXMLSecPath: xmlsec, SAMLEmailAttribute: "email", SAMLNameAttribute: "name", SAMLClockSkew: 2 * time.Minute, TenantClaim: "tenant_id", RoleClaim: "role", GroupsClaim: "groups", DefaultTenant: "default", DefaultRole: "viewer"}
+	manager, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := httptest.NewRequest(http.MethodGet, "https://ciradar.example/auth/login?return_to=/dashboard", nil)
+	loginResult := httptest.NewRecorder()
+	manager.Login(loginResult, login)
+	if loginResult.Code != http.StatusFound {
+		t.Fatalf("login status=%d body=%s", loginResult.Code, loginResult.Body.String())
+	}
+	location, err := url.Parse(loginResult.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay := location.Query().Get("RelayState")
+	cookies := loginResult.Result().Cookies()
+	if relay == "" || len(cookies) == 0 {
+		t.Fatalf("location=%s cookies=%d", location.String(), len(cookies))
+	}
+	flowRequest := httptest.NewRequest(http.MethodGet, "https://ciradar.example/", nil)
+	flowRequest.AddCookie(cookies[0])
+	flow, err := manager.readFlow(flowRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	response := fmt.Sprintf(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="_response" InResponseTo="%s" Destination="%s"><saml:Issuer>%s</saml:Issuer><ds:Signature><ds:SignedInfo><ds:Reference URI="#_assertion"/></ds:SignedInfo></ds:Signature><samlp:Status><samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/></samlp:Status><saml:Assertion ID="_assertion"><saml:Issuer>%s</saml:Issuer><saml:Subject><saml:NameID>alice@example.com</saml:NameID><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData InResponseTo="%s" Recipient="%s" NotOnOrAfter="%s"/></saml:SubjectConfirmation></saml:Subject><saml:Conditions NotBefore="%s" NotOnOrAfter="%s"><saml:AudienceRestriction><saml:Audience>%s</saml:Audience></saml:AudienceRestriction></saml:Conditions><saml:AttributeStatement><saml:Attribute Name="email"><saml:AttributeValue>alice@example.com</saml:AttributeValue></saml:Attribute><saml:Attribute Name="name"><saml:AttributeValue>Alice</saml:AttributeValue></saml:Attribute><saml:Attribute Name="tenant_id"><saml:AttributeValue>acme</saml:AttributeValue></saml:Attribute><saml:Attribute Name="role"><saml:AttributeValue>operator</saml:AttributeValue></saml:Attribute></saml:AttributeStatement></saml:Assertion></samlp:Response>`, flow.RequestID, cfg.SAMLACSURL, cfg.SAMLIdPEntityID, cfg.SAMLIdPEntityID, flow.RequestID, cfg.SAMLACSURL, now.Add(5*time.Minute).Format(time.RFC3339Nano), now.Add(-time.Minute).Format(time.RFC3339Nano), now.Add(5*time.Minute).Format(time.RFC3339Nano), cfg.SAMLEntityID)
+	form := url.Values{"SAMLResponse": {base64.StdEncoding.EncodeToString([]byte(response))}, "RelayState": {relay}}
+	callback := httptest.NewRequest(http.MethodPost, "https://ciradar.example/auth/callback", strings.NewReader(form.Encode()))
+	callback.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	callback.AddCookie(cookies[0])
+	callbackResult := httptest.NewRecorder()
+	manager.Callback(callbackResult, callback)
+	if callbackResult.Code != http.StatusFound || callbackResult.Header().Get("Location") != "/dashboard" {
+		t.Fatalf("callback status=%d location=%q body=%s", callbackResult.Code, callbackResult.Header().Get("Location"), callbackResult.Body.String())
+	}
+	var session *http.Cookie
+	for _, cookie := range callbackResult.Result().Cookies() {
+		if cookie.Name == cfg.CookieName && cookie.Value != "" {
+			session = cookie
+		}
+	}
+	if session == nil || strings.Contains(session.Value, "alice") || strings.Contains(session.Value, "acme") {
+		t.Fatalf("session=%#v", session)
+	}
+	authRequest := httptest.NewRequest(http.MethodGet, "https://ciradar.example/", nil)
+	authRequest.AddCookie(session)
+	principal, ok := manager.Authenticate(authRequest)
+	if !ok || principal.TenantID != "acme" || principal.Role != model.RoleOperator || principal.Name != "Alice" {
+		t.Fatalf("principal=%#v ok=%v", principal, ok)
+	}
+}
+
+func TestSAMLShapeRejectsWrappingAndNamespaces(t *testing.T) {
+	valid := `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="r"><ds:Signature><ds:SignedInfo><ds:Reference URI="#a"/></ds:SignedInfo></ds:Signature><saml:Assertion ID="a"/></samlp:Response>`
+	if err := validateSAMLShape([]byte(valid), "request"); err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{
+		`<!DOCTYPE x><samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"/>`,
+		`<Response xmlns="urn:wrong" ID="r"><Assertion xmlns="urn:oasis:names:tc:SAML:2.0:assertion" ID="a"/><Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo><Reference URI="#a"/></SignedInfo></Signature></Response>`,
+		`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="r"><ds:Signature><ds:SignedInfo><ds:Reference URI="#other"/></ds:SignedInfo></ds:Signature><saml:Assertion ID="a"/></samlp:Response>`,
+		`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" xmlns:ds="http://www.w3.org/2000/09/xmldsig#" ID="same"><ds:Signature><ds:SignedInfo><ds:Reference URI="#same"/></ds:SignedInfo></ds:Signature><saml:Assertion ID="same"/></samlp:Response>`,
+	}
+	for _, sample := range cases {
+		if err := validateSAMLShape([]byte(sample), "request"); err == nil {
+			t.Fatalf("expected rejection for %s", sample)
+		}
+	}
+}
+
+func TestSAMLMetadata(t *testing.T) {
+	m, err := New(config.SSOConfig{Enabled: true, Mode: "saml", SessionSecret: "01234567890123456789012345678901", SAMLEntityID: "https://ciradar.example/saml", SAMLACSURL: "https://ciradar.example/auth/callback"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/auth/saml/metadata", nil)
+	rr := httptest.NewRecorder()
+	m.SAMLMetadata(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `entityID="https://ciradar.example/saml"`) || !strings.Contains(rr.Body.String(), `WantAssertionsSigned="true"`) {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
