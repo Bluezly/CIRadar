@@ -2,6 +2,7 @@ package testselection
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -27,12 +28,20 @@ func Select(ctx context.Context, store db.Backend, tenant string, req model.Test
 	if err != nil {
 		return model.TestSelection{}, err
 	}
+	coverage := normalizedCoverage(graph.TestCoverage)
 	selected := []model.SelectedTest{}
+	candidates := 0
+	coveredCandidates := 0
 	for _, st := range stats {
 		if req.Framework != "" && !strings.EqualFold(st.Framework, req.Framework) {
 			continue
 		}
-		scoreValue, confidence, strategy, reason, path := impactScore(st, changed, graph, graphOK, req.IncludeFlaky)
+		candidates++
+		covered := coverageFor(st, coverage)
+		if len(covered) > 0 {
+			coveredCandidates++
+		}
+		scoreValue, confidence, strategy, reason, path := impactScore(st, changed, graph, graphOK, req.IncludeFlaky, covered)
 		if scoreValue < req.MinimumScore {
 			continue
 		}
@@ -49,20 +58,20 @@ func Select(ctx context.Context, store db.Backend, tenant string, req model.Test
 		skipped = len(selected) - req.Limit
 		selected = selected[:req.Limit]
 	}
-	return model.TestSelection{Repository: req.Repository, ChangedFiles: req.ChangedFiles, Selected: selected, Skipped: skipped, GeneratedAt: time.Now().UTC()}, nil
+	diagnostics := selectionDiagnostics(len(stats), candidates, len(changed), graphOK, len(coverage), coveredCandidates, len(selected), req.MinimumScore)
+	return model.TestSelection{Repository: req.Repository, ChangedFiles: req.ChangedFiles, Selected: selected, Skipped: skipped, CandidatesEvaluated: candidates, GraphAvailable: graphOK, CoverageIdentities: len(coverage), Diagnostics: diagnostics, GeneratedAt: time.Now().UTC()}, nil
 }
 
-func impactScore(st model.TestCaseStats, changed []string, graph model.ImpactGraph, graphOK, includeFlaky bool) (float64, float64, string, string, []string) {
+func impactScore(st model.TestCaseStats, changed []string, graph model.ImpactGraph, graphOK, includeFlaky bool, covered []string) (float64, float64, string, string, []string) {
 	if len(changed) == 0 {
 		score := minFloat(100, 20+float64(st.Failures)*3)
 		return score, .45, "history", "no changed files supplied; prioritized by recent failure history", nil
 	}
 	if graphOK {
-		covered := coverageFor(st, graph.TestCoverage)
 		for _, changedFile := range changed {
 			for _, source := range covered {
 				if fileMatches(source, changedFile) {
-					return adjustTestSignals(100, .98, "coverage", "per-test coverage directly includes a changed file", []string{st.File, changedFile}, st, includeFlaky)
+					return adjustTestSignals(100, .98, "coverage", "per-test coverage directly includes a changed file", coverageImpactPath(source, changedFile), st, includeFlaky)
 				}
 			}
 		}
@@ -86,6 +95,15 @@ func impactScore(st model.TestCaseStats, changed []string, graph model.ImpactGra
 	return score, confidence, strategy, reason, nil
 }
 
+func coverageImpactPath(source, changed string) []string {
+	source = norm(source)
+	changed = norm(changed)
+	if source == changed {
+		return []string{source}
+	}
+	return []string{source, changed}
+}
+
 func adjustTestSignals(score, confidence float64, strategy, reason string, path []string, st model.TestCaseStats, includeFlaky bool) (float64, float64, string, string, []string) {
 	reasons := []string{reason}
 	if st.Failures > 0 {
@@ -104,11 +122,10 @@ func adjustTestSignals(score, confidence float64, strategy, reason string, path 
 }
 
 func coverageFor(st model.TestCaseStats, coverage map[string][]string) []string {
-	keys := []string{st.TestKey, st.Name, st.Suite + "::" + st.Name, st.ClassName + "::" + st.Name, norm(st.File)}
 	out := []string{}
 	seen := map[string]bool{}
-	for _, key := range keys {
-		for _, file := range coverage[key] {
+	for _, key := range TestAliases(st) {
+		for _, file := range coverage[normalizeTestIdentity(key)] {
 			file = norm(file)
 			if file != "" && !seen[file] {
 				seen[file] = true
@@ -116,6 +133,119 @@ func coverageFor(st model.TestCaseStats, coverage map[string][]string) []string 
 			}
 		}
 	}
+	return out
+}
+
+func normalizedCoverage(coverage map[string][]string) map[string][]string {
+	out := map[string][]string{}
+	for key, files := range coverage {
+		normalizedKey := normalizeTestIdentity(key)
+		if normalizedKey == "" {
+			continue
+		}
+		out[normalizedKey] = uniqueSorted(append(out[normalizedKey], files...))
+	}
+	return out
+}
+
+func DisplayName(st model.TestCaseStats) string {
+	parts := []string{}
+	for _, value := range []string{st.Suite, st.ClassName, st.Name} {
+		value = strings.TrimSpace(value)
+		if value == "" || len(parts) > 0 && strings.EqualFold(parts[len(parts)-1], value) {
+			continue
+		}
+		parts = append(parts, value)
+	}
+	if len(parts) == 0 {
+		return st.TestKey
+	}
+	return strings.Join(parts, "/")
+}
+
+func TestAliases(st model.TestCaseStats) []string {
+	values := []string{st.TestKey, st.Name, DisplayName(st), st.Suite + "::" + st.Name, st.ClassName + "::" + st.Name, st.Suite + "/" + st.Name, st.ClassName + "/" + st.Name, st.Suite + "/" + st.ClassName + "/" + st.Name, st.Suite + "/" + st.ClassName + "::" + st.Name, norm(st.File), norm(st.File) + "::" + st.Name}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.Trim(strings.TrimSpace(value), "/:")
+		key := normalizeTestIdentity(value)
+		if key != "" && !seen[key] {
+			seen[key] = true
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func ResolveTest(stats []model.TestCaseStats, selector string) (model.TestCaseStats, error) {
+	selector = normalizeTestIdentity(selector)
+	if selector == "" {
+		return model.TestCaseStats{}, fmt.Errorf("test selector is empty")
+	}
+	exact := []model.TestCaseStats{}
+	partial := []model.TestCaseStats{}
+	for _, st := range stats {
+		if normalizeTestIdentity(st.TestKey) == selector || len(selector) >= 8 && strings.HasPrefix(normalizeTestIdentity(st.TestKey), selector) {
+			exact = append(exact, st)
+			continue
+		}
+		matched := false
+		for _, alias := range TestAliases(st) {
+			alias = normalizeTestIdentity(alias)
+			if alias == selector {
+				exact = append(exact, st)
+				matched = true
+				break
+			}
+		}
+		if !matched && strings.Contains(normalizeTestIdentity(DisplayName(st)), selector) {
+			partial = append(partial, st)
+		}
+	}
+	matches := exact
+	if len(matches) == 0 {
+		matches = partial
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) == 0 {
+		return model.TestCaseStats{}, fmt.Errorf("no test matches %q", selector)
+	}
+	names := make([]string, 0, len(matches))
+	for _, st := range matches {
+		names = append(names, fmt.Sprintf("%s (%s)", DisplayName(st), st.TestKey))
+	}
+	sort.Strings(names)
+	if len(names) > 8 {
+		names = names[:8]
+	}
+	return model.TestCaseStats{}, fmt.Errorf("test selector %q is ambiguous: %s", selector, strings.Join(names, ", "))
+}
+
+func selectionDiagnostics(total, candidates, changed int, graphOK bool, coverageIdentities, coveredCandidates, selected int, minimumScore float64) []string {
+	if selected > 0 {
+		return nil
+	}
+	out := []string{}
+	if total == 0 {
+		return []string{"no test history exists for this repository; ingest a supported test report first"}
+	}
+	if candidates == 0 {
+		return []string{"test history exists, but no tests match the requested framework filter"}
+	}
+	if changed == 0 {
+		out = append(out, "no changed files were supplied")
+	}
+	if !graphOK {
+		out = append(out, "no impact graph exists; run `ciradar tests index --repo OWNER/REPO --root PATH`")
+	} else if coverageIdentities == 0 {
+		out = append(out, "the impact graph contains no per-test coverage identities")
+	} else if coveredCandidates == 0 {
+		out = append(out, "coverage identities did not match any ingested test; use a test key or a readable test identity from `ciradar tests list`")
+	}
+	out = append(out, fmt.Sprintf("all %d candidate tests scored below the minimum %.0f", candidates, minimumScore))
 	return out
 }
 
@@ -217,6 +347,12 @@ func normalize(values []string) []string {
 		}
 	}
 	return out
+}
+
+func normalizeTestIdentity(value string) string {
+	value = strings.ToLower(filepath.ToSlash(strings.TrimSpace(value)))
+	value = strings.ReplaceAll(value, " ", "")
+	return strings.Trim(value, "/:")
 }
 
 func norm(value string) string {
