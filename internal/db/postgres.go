@@ -12,11 +12,6 @@ import (
 	"ciradar/internal/pgwire"
 )
 
-// PostgresBackend persists the complete CI Radar state in a transactionally
-// locked JSONB document. It is intentionally compatibility-first: every
-// single-node capability works unchanged while PostgreSQL provides durable,
-// multi-process transactions and backups. High-volume installations can later
-// split this contract into normalized tables without touching callers.
 type PostgresBackend struct{ dsn string }
 
 func OpenPostgres(ctx context.Context, dsn string) (*PostgresBackend, error) {
@@ -343,3 +338,19 @@ func (p *PostgresBackend) Cleanup(ctx context.Context, d int) error {
 }
 
 var _ Backend = (*PostgresBackend)(nil)
+
+func (p *PostgresBackend) PutObject(ctx context.Context, tenant, kind, id string, value any) error {
+	return pgErr(ctx, p, true, func(s *Store) error { return s.PutObject(ctx, tenant, kind, id, value) })
+}
+
+func (p *PostgresBackend) GetObject(ctx context.Context, tenant, kind, id string, out any) (bool, error) {
+	return pgWith(ctx, p, false, func(s *Store) (bool, error) { return s.GetObject(ctx, tenant, kind, id, out) })
+}
+
+func (p *PostgresBackend) ListObjects(ctx context.Context, tenant, kind string, limit int) ([]ExtensionObject, error) {
+	return pgWith(ctx, p, false, func(s *Store) ([]ExtensionObject, error) { return s.ListObjects(ctx, tenant, kind, limit) })
+}
+
+func (p *PostgresBackend) DeleteObject(ctx context.Context, tenant, kind, id string) error {
+	return pgErr(ctx, p, true, func(s *Store) error { return s.DeleteObject(ctx, tenant, kind, id) })
+}

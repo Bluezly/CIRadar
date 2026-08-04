@@ -380,7 +380,7 @@ func (s *Store) Dashboard(ctx context.Context, tenantID string, since time.Time)
 	tenantID = normalizeTenant(tenantID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	d := model.DashboardSummary{TenantID: tenantID, Since: since.UTC(), GeneratedAt: time.Now().UTC(), Categories: map[string]int{}, Providers: map[string]int{}, RepositoryFailures: map[string]int{}, DailyAnalyses: map[string]int{}}
+	d := model.DashboardSummary{TenantID: tenantID, Since: since.UTC(), GeneratedAt: time.Now().UTC(), Categories: map[string]int{}, Providers: map[string]int{}, RepositoryFailures: map[string]int{}, DailyAnalyses: map[string]int{}, DailyIncidents: map[string]int{}, DailyTestFailures: map[string]int{}, DailyCost: map[string]float64{}}
 	for _, rec := range s.state.Analyses {
 		if normalizeTenant(rec.TenantID) != tenantID || rec.Result.CreatedAt.Before(since) {
 			continue
@@ -417,6 +417,9 @@ func (s *Store) Dashboard(ctx context.Context, tenantID string, since time.Time)
 		if normalizeTenant(inc.TenantID) != tenantID {
 			continue
 		}
+		if !inc.FirstSeenAt.Before(since) {
+			d.DailyIncidents[inc.FirstSeenAt.UTC().Format("2006-01-02")]++
+		}
 		if inc.State == "open" {
 			d.OpenIncidents++
 		}
@@ -451,6 +454,14 @@ func (s *Store) Dashboard(ctx context.Context, tenantID string, since time.Time)
 		d.DiagnosisFeedback.PrecisionPercent = (float64(d.DiagnosisFeedback.Correct) + 0.5*float64(d.DiagnosisFeedback.Partial)) * 100 / float64(d.DiagnosisFeedback.Total)
 	}
 	now := time.Now().UTC()
+	for _, observation := range s.state.TestObservations {
+		if normalizeTenant(observation.TenantID) != tenantID || observation.OccurredAt.Before(since) {
+			continue
+		}
+		if observation.Status == "failed" || observation.Status == "error" {
+			d.DailyTestFailures[observation.OccurredAt.UTC().Format("2006-01-02")]++
+		}
+	}
 	for _, st := range s.state.TestCaseStats {
 		if st.TenantID != tenantID {
 			continue

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ciradar/internal/model"
+	"ciradar/internal/testintelligence"
 )
 
 func feedbackKey(tenantID, analysisID, actor string) string {
@@ -144,7 +145,7 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 		sk := testStatsKey(tenantID, key)
 		stats := s.state.TestCaseStats[sk]
 		if stats.TestKey == "" {
-			stats = model.TestCaseStats{TenantID: tenantID, TestKey: key, Repository: o.Repository, Framework: o.Framework, Suite: o.Suite, ClassName: o.ClassName, Name: o.Name, Parameters: o.Parameters, FirstSeenAt: o.OccurredAt}
+			stats = model.TestCaseStats{TenantID: tenantID, TestKey: key, Repository: o.Repository, Framework: o.Framework, Suite: o.Suite, ClassName: o.ClassName, File: o.File, Name: o.Name, Parameters: o.Parameters, FirstSeenAt: o.OccurredAt, CauseCounts: map[string]int{}}
 		}
 		if stats.LastStatus != "" && stats.LastStatus != o.Status && ((stats.LastStatus == "passed" && (o.Status == "failed" || o.Status == "error")) || ((stats.LastStatus == "failed" || stats.LastStatus == "error") && o.Status == "passed")) {
 			stats.Transitions++
@@ -159,6 +160,20 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 			stats.Failures++
 		}
 		stats.LastStatus = o.Status
+		if stats.File == "" {
+			stats.File = o.File
+		}
+		if stats.CauseCounts == nil {
+			stats.CauseCounts = map[string]int{}
+		}
+		if o.Status == "failed" || o.Status == "error" {
+			cause, confidence := testintelligence.InferFlakeCause(o)
+			stats.CauseCounts[cause]++
+			if stats.PrimaryFlakeCause == "" || stats.CauseCounts[cause] >= stats.CauseCounts[stats.PrimaryFlakeCause] {
+				stats.PrimaryFlakeCause = cause
+				stats.CauseConfidence = confidence
+			}
+		}
 		stats.LastSeenAt = o.OccurredAt
 		if stats.TotalRuns >= 2 {
 			failureRate := float64(stats.Failures) / float64(stats.TotalRuns)

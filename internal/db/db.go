@@ -49,6 +49,7 @@ type state struct {
 	TestObservationOrder   []string                              `json:"test_observation_order"`
 	TestCaseStats          map[string]model.TestCaseStats        `json:"test_case_stats"`
 	TestQuarantines        map[string]model.TestQuarantine       `json:"test_quarantines"`
+	Extensions             map[string]ExtensionObject            `json:"extensions"`
 }
 
 type apiKeyRecord struct {
@@ -142,7 +143,7 @@ func Open(path string) (*Store, error) {
 
 func newState() state {
 	now := time.Now().UTC()
-	return state{Version: 3, NextJobID: 1, Deliveries: map[string]deliveryRecord{}, Analyses: map[string]analysisRecord{}, Incidents: map[string]model.Incident{}, ProviderStatuses: map[string]model.ProviderStatus{}, NotificationDeliveries: map[string]model.NotificationDelivery{}, Tenants: map[string]model.Tenant{model.DefaultTenantID: {ID: model.DefaultTenantID, Name: "Default", Enabled: true, CreatedAt: now, UpdatedAt: now}}, APIKeys: map[string]apiKeyRecord{}, AuditEvents: map[string]model.AuditEvent{}, InstallationTenants: map[string]string{}, RepositoryProfiles: map[string]model.RepositoryProfile{}, DiagnosisFeedback: map[string]model.DiagnosisFeedback{}, TestObservations: map[string]model.TestObservation{}, TestCaseStats: map[string]model.TestCaseStats{}, TestQuarantines: map[string]model.TestQuarantine{}}
+	return state{Version: 3, NextJobID: 1, Deliveries: map[string]deliveryRecord{}, Analyses: map[string]analysisRecord{}, Incidents: map[string]model.Incident{}, ProviderStatuses: map[string]model.ProviderStatus{}, NotificationDeliveries: map[string]model.NotificationDelivery{}, Tenants: map[string]model.Tenant{model.DefaultTenantID: {ID: model.DefaultTenantID, Name: "Default", Enabled: true, CreatedAt: now, UpdatedAt: now}}, APIKeys: map[string]apiKeyRecord{}, AuditEvents: map[string]model.AuditEvent{}, InstallationTenants: map[string]string{}, RepositoryProfiles: map[string]model.RepositoryProfile{}, DiagnosisFeedback: map[string]model.DiagnosisFeedback{}, TestObservations: map[string]model.TestObservation{}, TestCaseStats: map[string]model.TestCaseStats{}, TestQuarantines: map[string]model.TestQuarantine{}, Extensions: map[string]ExtensionObject{}}
 }
 func (s *Store) normalize() {
 	if s.state.Version < 3 {
@@ -196,6 +197,9 @@ func (s *Store) normalize() {
 	}
 	if s.state.TestQuarantines == nil {
 		s.state.TestQuarantines = map[string]model.TestQuarantine{}
+	}
+	if s.state.Extensions == nil {
+		s.state.Extensions = map[string]ExtensionObject{}
 	}
 	for id, rec := range s.state.Analyses {
 		t := normalizeTenant(rec.TenantID)
@@ -962,8 +966,6 @@ func (s *Store) ListNotificationDeliveriesForTenant(ctx context.Context, tenantI
 	return out, nil
 }
 
-// BeginNotificationDelivery atomically reserves a channel delivery and enforces
-// event idempotency plus fingerprint cooldown across concurrent workers.
 func (s *Store) BeginNotificationDelivery(ctx context.Context, eventID, channel, channelType, dedupeKey string, cooldown time.Duration, maxAttempts int) (string, model.NotificationDelivery, error) {
 	return s.BeginNotificationDeliveryForTenant(ctx, model.DefaultTenantID, eventID, channel, channelType, dedupeKey, cooldown, maxAttempts)
 }

@@ -7,10 +7,6 @@ import (
 	"ciradar/internal/model"
 )
 
-// Backend is the persistence contract used by the server, workers, notification
-// dispatcher, and provider poller. The bundled Store is the portable single-node
-// implementation. A PostgreSQL backend can implement this contract without
-// changing the analysis or delivery layers.
 type Backend interface {
 	Close() error
 	Migrate(context.Context) error
@@ -77,6 +73,10 @@ type Backend interface {
 	SetTestQuarantine(context.Context, model.TestQuarantine) (model.TestQuarantine, error)
 	RemoveTestQuarantine(context.Context, string, string) error
 	ListTestQuarantines(context.Context, string) ([]model.TestQuarantine, error)
+	PutObject(context.Context, string, string, string, any) error
+	GetObject(context.Context, string, string, string, any) (bool, error)
+	ListObjects(context.Context, string, string, int) ([]ExtensionObject, error)
+	DeleteObject(context.Context, string, string, string) error
 	Cleanup(context.Context, int) error
 }
 
