@@ -409,6 +409,8 @@ type TestCaseStats struct {
 	Quarantined       bool           `json:"quarantined"`
 	QuarantineUntil   time.Time      `json:"quarantine_until,omitempty"`
 	Owner             string         `json:"owner,omitempty"`
+	DisplayName       string         `json:"display_name,omitempty"`
+	Aliases           []string       `json:"aliases,omitempty"`
 }
 
 type TestQuarantine struct {

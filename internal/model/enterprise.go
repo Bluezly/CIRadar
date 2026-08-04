@@ -138,11 +138,15 @@ type SelectedTest struct {
 }
 
 type TestSelection struct {
-	Repository   string         `json:"repository"`
-	ChangedFiles []string       `json:"changed_files"`
-	Selected     []SelectedTest `json:"selected"`
-	Skipped      int            `json:"skipped"`
-	GeneratedAt  time.Time      `json:"generated_at"`
+	Repository          string         `json:"repository"`
+	ChangedFiles        []string       `json:"changed_files"`
+	Selected            []SelectedTest `json:"selected"`
+	Skipped             int            `json:"skipped"`
+	CandidatesEvaluated int            `json:"candidates_evaluated"`
+	GraphAvailable      bool           `json:"graph_available"`
+	CoverageIdentities  int            `json:"coverage_identities"`
+	Diagnostics         []string       `json:"diagnostics,omitempty"`
+	GeneratedAt         time.Time      `json:"generated_at"`
 }
 
 type SSOIdentity struct {
