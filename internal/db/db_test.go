@@ -281,3 +281,32 @@ func TestInstallationBindRequiresEnabledTenantAndCanUnbind(t *testing.T) {
 		t.Fatal("installation remains bound")
 	}
 }
+
+func TestDashboardDailyTrends(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	input := model.AnalysisInput{TenantID: "default", Repository: "acme/api", Organization: "acme", OccurredAt: now}
+	result := model.AnalysisResult{ID: "trend-analysis", TenantID: "default", Repository: "acme/api", Fingerprint: "trend-fp", Category: model.CategoryNetworkFailure, Attribution: model.AttributionExternal, CreatedAt: now}
+	if err := store.RecordAnalysisForTenant(ctx, "default", input, result, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertIncidentForTenant(ctx, "default", model.Incident{ID: "trend-incident", TenantID: "default", Fingerprint: "trend-fp", State: "open", Severity: "major", FirstSeenAt: now, LastSeenAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{{ID: "trend-test", TenantID: "default", Repository: "acme/api", Framework: "junit", Name: "fails", Status: "failed", OccurredAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := store.Dashboard(ctx, "default", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	day := now.Format("2006-01-02")
+	if dashboard.DailyAnalyses[day] != 1 || dashboard.DailyIncidents[day] != 1 || dashboard.DailyTestFailures[day] != 1 {
+		t.Fatalf("analyses=%v incidents=%v tests=%v", dashboard.DailyAnalyses, dashboard.DailyIncidents, dashboard.DailyTestFailures)
+	}
+}
