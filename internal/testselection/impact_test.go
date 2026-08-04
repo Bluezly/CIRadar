@@ -105,6 +105,12 @@ func TestCoverageReadableIdentitySelectsIngestedTest(t *testing.T) {
 	if len(out.Selected) != 1 || out.Selected[0].Strategy != "coverage" {
 		t.Fatalf("%#v", out)
 	}
+	if out.Selected[0].DisplayName != "payments/PaymentServiceTest/retries_transient_gateway_error" {
+		t.Fatalf("display_name=%q", out.Selected[0].DisplayName)
+	}
+	if len(out.Selected[0].ImpactPath) != 2 {
+		t.Fatalf("impact_path=%v", out.Selected[0].ImpactPath)
+	}
 	if len(out.Diagnostics) != 0 {
 		t.Fatalf("diagnostics=%v", out.Diagnostics)
 	}
