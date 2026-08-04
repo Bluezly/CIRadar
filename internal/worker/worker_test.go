@@ -196,3 +196,103 @@ func TestSuccessfulRunsCreateEnvironmentChangeNotification(t *testing.T) {
 		t.Fatalf("event=%+v", event)
 	}
 }
+
+func TestGenericCIEventEndToEnd(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/projects/7/jobs/42/trace" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("PRIVATE-TOKEN") != "token" {
+			t.Error("missing GitLab token")
+		}
+		_, _ = io.WriteString(w, "WARNING: Retrying after connection broken by NameResolutionError: Failed to resolve pypi.org")
+	}))
+	defer api.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTenant(context.Background(), "alpha", "Alpha"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.IncidentRepoThreshold = 1
+	cfg.ProviderPolling = false
+	cfg.Connectors = []config.CIConnector{{Name: "gitlab", Provider: "gitlab", Enabled: true, TenantID: "alpha", BaseURL: api.URL, Token: "token", WebhookSecret: "secret"}}
+	wkr := New(cfg, store, analyzer.New("test-key"), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ev := model.CIEvent{TenantID: "alpha", Provider: "gitlab", Repository: "acme/api", Organization: "acme", Workflow: "pipeline", Job: "test", RunID: 9, JobID: "42", CommitSHA: "abc", Conclusion: "failure", ProjectID: "7", RunURL: "https://gitlab/acme/api/-/pipelines/9"}
+	if err := wkr.processCIEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.ListAnalysesForTenant(context.Background(), "alpha", 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items=%#v err=%v", items, err)
+	}
+	if items[0].Repository != "acme/api" || items[0].SourceProvider != "gitlab" || items[0].Attribution != model.AttributionExternal {
+		t.Fatalf("analysis=%#v", items[0])
+	}
+	inc, err := store.GetIncidentForTenant(context.Background(), "alpha", items[0].Fingerprint)
+	if err != nil || inc == nil {
+		t.Fatalf("incident=%#v err=%v", inc, err)
+	}
+}
+
+func TestPRCommentIsStickyAndIncludesActions(t *testing.T) {
+	var created, updated int
+	var latest string
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/77/access_tokens":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "install-token", "expires_at": time.Now().Add(time.Hour)})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/api/issues/12/comments"):
+			if created > 0 {
+				_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 99, "body": latest}})
+			} else {
+				_ = json.NewEncoder(w).Encode([]any{})
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/issues/12/comments":
+			created++
+			var v map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&v)
+			latest = v["body"]
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": 99, "body": latest})
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/api/issues/comments/99":
+			updated++
+			var v map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&v)
+			latest = v["body"]
+			w.WriteHeader(200)
+		default:
+			http.Error(w, "not found "+r.URL.Path, 404)
+		}
+	})
+	client, server := testGitHubClient(t, api)
+	defer server.Close()
+	cfg := config.Default()
+	cfg.PRComments.Enabled = true
+	cfg.PRComments.Mode = "all"
+	cfg.PRComments.MinimumScore = 0
+	w := New(cfg, nil, nil, client, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var ev model.GitHubWorkflowRunEvent
+	ev.Installation.ID = 77
+	ev.Repository.FullName = "acme/api"
+	ev.WorkflowRun.ID = 1
+	ev.WorkflowRun.Name = "CI"
+	ev.WorkflowRun.HeadSHA = "abcdef123456"
+	ev.WorkflowRun.HTMLURL = "https://github/run/1"
+	ev.WorkflowRun.PullRequests = append(ev.WorkflowRun.PullRequests, struct {
+		Number int `json:"number"`
+	}{Number: 12})
+	d := jobDiagnosis{Job: gh.Job{Name: "tests"}, Result: model.AnalysisResult{Attribution: model.AttributionExternal, Score: 88, Summary: "registry outage", Category: model.CategoryDependencyRegistry, Provider: "npm", Confidence: model.ConfidenceStrong, Fingerprint: "fp", SuggestedActions: []model.SuggestedAction{{Type: "RETRY", Title: "Retry once", Risk: "SAFE"}}}}
+	if err := w.publishPRComment(context.Background(), ev, "acme", "api", []jobDiagnosis{d}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.publishPRComment(context.Background(), ev, "acme", "api", []jobDiagnosis{d}); err != nil {
+		t.Fatal(err)
+	}
+	if created != 1 || updated != 1 || !strings.Contains(latest, "<!-- ci-radar:acme/api -->") || !strings.Contains(latest, "Retry once") {
+		t.Fatalf("created=%d updated=%d body=%s", created, updated, latest)
+	}
+}
