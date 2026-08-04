@@ -362,3 +362,20 @@ func TestFingerprintUsesHMACKey(t *testing.T) {
 		t.Fatal("private fingerprint did not include repository scope")
 	}
 }
+
+func TestRedactorCustomAndHighEntropy(t *testing.T) {
+	r := NewRedactorWithPatterns([]string{`INTERNAL-[A-Z0-9]{12}`}, true)
+	input := "custom=INTERNAL-ABCDEF123456 access_token=Zp9kL2mN7qR4sT8vW1xY5aB6cD0eF3gH9jK2lM4nP7qR8sT1"
+	got := r.Redact(input)
+	if strings.Contains(got, "INTERNAL-ABCDEF123456") || strings.Contains(got, "Zp9kL2mN7qR4") {
+		t.Fatalf("secret was not redacted: %s", got)
+	}
+}
+
+func TestRedactorDoesNotEraseOrdinaryIdentifier(t *testing.T) {
+	r := NewRedactorWithPatterns(nil, true)
+	input := "package github.com/example/ordinary-project-name-with-many-characters"
+	if got := r.Redact(input); got != input {
+		t.Fatalf("ordinary text changed: %s", got)
+	}
+}
