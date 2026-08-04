@@ -290,30 +290,35 @@ type RepositoryProfile struct {
 }
 
 type DashboardSummary struct {
-	TenantID              string           `json:"tenant_id"`
-	Since                 time.Time        `json:"since"`
-	GeneratedAt           time.Time        `json:"generated_at"`
-	TotalAnalyses         int              `json:"total_analyses"`
-	ExternalAnalyses      int              `json:"external_analyses"`
-	CodeAnalyses          int              `json:"code_analyses"`
-	MixedAnalyses         int              `json:"mixed_analyses"`
-	ToolchainAnalyses     int              `json:"toolchain_analyses"`
-	UnknownAnalyses       int              `json:"unknown_analyses"`
-	OpenIncidents         int              `json:"open_incidents"`
-	AcknowledgedIncidents int              `json:"acknowledged_incidents"`
-	CriticalIncidents     int              `json:"critical_incidents"`
-	Repositories          int              `json:"repositories"`
-	NotificationFailures  int              `json:"notification_failures"`
-	Categories            map[string]int   `json:"categories"`
-	Providers             map[string]int   `json:"providers"`
-	RepositoryFailures    map[string]int   `json:"repository_failures"`
-	DailyAnalyses         map[string]int   `json:"daily_analyses"`
-	RecentIncidents       []Incident       `json:"recent_incidents"`
-	RecentAnalyses        []AnalysisResult `json:"recent_analyses"`
-	DiagnosisFeedback     FeedbackMetrics  `json:"diagnosis_feedback"`
-	FlakyTests            int              `json:"flaky_tests"`
-	QuarantinedTests      int              `json:"quarantined_tests"`
-	TestCasesTracked      int              `json:"test_cases_tracked"`
+	TenantID              string             `json:"tenant_id"`
+	Since                 time.Time          `json:"since"`
+	GeneratedAt           time.Time          `json:"generated_at"`
+	TotalAnalyses         int                `json:"total_analyses"`
+	ExternalAnalyses      int                `json:"external_analyses"`
+	CodeAnalyses          int                `json:"code_analyses"`
+	MixedAnalyses         int                `json:"mixed_analyses"`
+	ToolchainAnalyses     int                `json:"toolchain_analyses"`
+	UnknownAnalyses       int                `json:"unknown_analyses"`
+	OpenIncidents         int                `json:"open_incidents"`
+	AcknowledgedIncidents int                `json:"acknowledged_incidents"`
+	CriticalIncidents     int                `json:"critical_incidents"`
+	Repositories          int                `json:"repositories"`
+	NotificationFailures  int                `json:"notification_failures"`
+	Categories            map[string]int     `json:"categories"`
+	Providers             map[string]int     `json:"providers"`
+	RepositoryFailures    map[string]int     `json:"repository_failures"`
+	DailyAnalyses         map[string]int     `json:"daily_analyses"`
+	RecentIncidents       []Incident         `json:"recent_incidents"`
+	RecentAnalyses        []AnalysisResult   `json:"recent_analyses"`
+	DiagnosisFeedback     FeedbackMetrics    `json:"diagnosis_feedback"`
+	FlakyTests            int                `json:"flaky_tests"`
+	QuarantinedTests      int                `json:"quarantined_tests"`
+	TestCasesTracked      int                `json:"test_cases_tracked"`
+	DORA                  DORAMetrics        `json:"dora"`
+	Usage                 CIUsageSummary     `json:"usage"`
+	DailyIncidents        map[string]int     `json:"daily_incidents"`
+	DailyTestFailures     map[string]int     `json:"daily_test_failures"`
+	DailyCost             map[string]float64 `json:"daily_cost"`
 }
 
 type SuggestedAction struct {
@@ -368,6 +373,7 @@ type TestObservation struct {
 	ClassName   string      `json:"class_name,omitempty"`
 	Name        string      `json:"name"`
 	Parameters  string      `json:"parameters,omitempty"`
+	File        string      `json:"file,omitempty"`
 	Status      string      `json:"status"`
 	DurationMS  int64       `json:"duration_ms,omitempty"`
 	Message     string      `json:"message,omitempty"`
@@ -377,27 +383,31 @@ type TestObservation struct {
 }
 
 type TestCaseStats struct {
-	TenantID        string    `json:"tenant_id"`
-	TestKey         string    `json:"test_key"`
-	Repository      string    `json:"repository"`
-	Framework       string    `json:"framework,omitempty"`
-	Suite           string    `json:"suite,omitempty"`
-	ClassName       string    `json:"class_name,omitempty"`
-	Name            string    `json:"name"`
-	Parameters      string    `json:"parameters,omitempty"`
-	TotalRuns       int       `json:"total_runs"`
-	Passes          int       `json:"passes"`
-	Failures        int       `json:"failures"`
-	Skipped         int       `json:"skipped"`
-	Transitions     int       `json:"transitions"`
-	FlakeScore      float64   `json:"flake_score"`
-	Classification  string    `json:"classification"`
-	FirstSeenAt     time.Time `json:"first_seen_at"`
-	LastSeenAt      time.Time `json:"last_seen_at"`
-	LastStatus      string    `json:"last_status"`
-	Quarantined     bool      `json:"quarantined"`
-	QuarantineUntil time.Time `json:"quarantine_until,omitempty"`
-	Owner           string    `json:"owner,omitempty"`
+	TenantID          string         `json:"tenant_id"`
+	TestKey           string         `json:"test_key"`
+	Repository        string         `json:"repository"`
+	Framework         string         `json:"framework,omitempty"`
+	Suite             string         `json:"suite,omitempty"`
+	ClassName         string         `json:"class_name,omitempty"`
+	Name              string         `json:"name"`
+	Parameters        string         `json:"parameters,omitempty"`
+	File              string         `json:"file,omitempty"`
+	TotalRuns         int            `json:"total_runs"`
+	Passes            int            `json:"passes"`
+	Failures          int            `json:"failures"`
+	Skipped           int            `json:"skipped"`
+	Transitions       int            `json:"transitions"`
+	FlakeScore        float64        `json:"flake_score"`
+	Classification    string         `json:"classification"`
+	PrimaryFlakeCause string         `json:"primary_flake_cause,omitempty"`
+	CauseConfidence   float64        `json:"cause_confidence,omitempty"`
+	CauseCounts       map[string]int `json:"cause_counts,omitempty"`
+	FirstSeenAt       time.Time      `json:"first_seen_at"`
+	LastSeenAt        time.Time      `json:"last_seen_at"`
+	LastStatus        string         `json:"last_status"`
+	Quarantined       bool           `json:"quarantined"`
+	QuarantineUntil   time.Time      `json:"quarantine_until,omitempty"`
+	Owner             string         `json:"owner,omitempty"`
 }
 
 type TestQuarantine struct {
@@ -432,6 +442,13 @@ type CIEvent struct {
 	ProjectID         string            `json:"project_id,omitempty"`
 	PipelineID        string            `json:"pipeline_id,omitempty"`
 	LogURL            string            `json:"log_url,omitempty"`
+	StartedAt         time.Time         `json:"started_at,omitempty"`
+	CompletedAt       time.Time         `json:"completed_at,omitempty"`
+	DurationSeconds   int64             `json:"duration_seconds,omitempty"`
+	RunnerClass       string            `json:"runner_class,omitempty"`
+	RunnerLabels      []string          `json:"runner_labels,omitempty"`
+	EstimatedCost     float64           `json:"estimated_cost,omitempty"`
+	Currency          string            `json:"currency,omitempty"`
 	InlineLog         string            `json:"inline_log,omitempty"`
 	OccurredAt        time.Time         `json:"occurred_at,omitempty"`
 	Metadata          map[string]string `json:"metadata,omitempty"`
