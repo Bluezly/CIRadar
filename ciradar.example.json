@@ -7,8 +7,9 @@
   "retention_days": 30,
   "store_redacted_excerpts": true,
   "store_raw_logs": false,
-  "cross_repository_sharing": false,
+  "cross_tenant_correlation": false,
   "incident_window": "15m",
+  "incident_resolve_after": "30m",
   "incident_repo_threshold": 3,
   "incident_org_threshold": 2,
   "worker_count": 2,
@@ -21,9 +22,13 @@
   "github_private_key_path": "",
   "github_webhook_secret": "",
   "github_api_url": "https://api.github.com",
+  "require_github_installation_binding": true,
   "public_base_url": "",
-  "fingerprint_hmac_key": "",
-  "admin_token": "",
+  "fingerprint_hmac_key": "GENERATED_BY_CIRADAR_INIT",
+  "admin_token": "GENERATED_BY_CIRADAR_INIT",
+  "default_tenant_id": "default",
+  "allow_unauthenticated_localhost": false,
+  "dashboard_enabled": true,
   "notifications": {
     "enabled": false,
     "channels": [
@@ -31,74 +36,56 @@
         "name": "slack-ops",
         "type": "slack",
         "enabled": false,
-        "events": [
-          "analysis",
-          "incident_opened",
-          "incident_updated",
-          "incident_resolved"
-        ],
-        "minimum_score": 65,
+        "url": "https://hooks.slack.com/services/REPLACE/ME",
+        "mention": "<!channel>",
+        "events": ["analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"],
+        "minimum_score": 70,
+        "external_only": true,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5,
-        "url": "https://hooks.slack.com/services/REPLACE/ME",
-        "mention": "<!channel>"
+        "quiet_hours_start": "23:00",
+        "quiet_hours_end": "07:00",
+        "timezone": "Asia/Baghdad",
+        "quiet_hours_bypass_severity": "critical"
       },
       {
         "name": "discord-ops",
         "type": "discord",
         "enabled": false,
-        "events": [
-          "analysis",
-          "incident_opened",
-          "incident_updated",
-          "incident_resolved"
-        ],
-        "minimum_score": 65,
-        "cooldown": "15m",
-        "timeout": "10s",
-        "max_attempts": 5,
         "url": "https://discord.com/api/webhooks/REPLACE/ME",
         "username": "CI Radar",
-        "mention": "@here"
+        "events": ["incident_opened", "incident_updated", "incident_resolved"],
+        "minimum_score": 70,
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5
       },
       {
         "name": "telegram-ops",
         "type": "telegram",
         "enabled": false,
-        "events": [
-          "analysis",
-          "incident_opened",
-          "incident_updated",
-          "incident_resolved"
-        ],
-        "minimum_score": 65,
-        "cooldown": "15m",
-        "timeout": "10s",
-        "max_attempts": 5,
         "bot_token": "REPLACE_WITH_BOT_TOKEN",
         "chat_id": "REPLACE_WITH_CHAT_ID",
-        "message_thread_id": 0
+        "message_thread_id": 0,
+        "events": ["incident_opened", "incident_updated", "incident_resolved"],
+        "minimum_severity": "major",
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5
       },
       {
         "name": "custom-webhook",
         "type": "webhook",
         "enabled": false,
-        "events": [
-          "analysis",
-          "incident_opened",
-          "incident_updated",
-          "incident_resolved"
-        ],
-        "minimum_score": 65,
-        "cooldown": "15m",
-        "timeout": "10s",
-        "max_attempts": 5,
         "url": "https://alerts.example.com/ciradar",
         "hmac_secret": "REPLACE_WITH_LONG_RANDOM_SECRET",
-        "headers": {
-          "X-Environment": "production"
-        }
+        "headers": {"X-Environment": "production"},
+        "events": ["analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"],
+        "minimum_score": 70,
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5
       }
     ]
   }
