@@ -318,3 +318,66 @@ func (c *Client) HasPreviousSuccessfulRun(ctx context.Context, installationID in
 	}
 	return false, nil
 }
+
+type IssueComment struct {
+	ID   int64  `json:"id"`
+	Body string `json:"body"`
+	User struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"user"`
+}
+
+func (c *Client) ListIssueComments(ctx context.Context, installationID int64, owner, repo string, number int) ([]IssueComment, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return nil, err
+	}
+	var all []IssueComment
+	for page := 1; page <= 20; page++ {
+		var out []IssueComment
+		path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)
+		if err := c.doJSON(ctx, "GET", path, token, nil, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out...)
+		if len(out) < 100 {
+			break
+		}
+	}
+	return all, nil
+}
+func (c *Client) CreateIssueComment(ctx context.Context, installationID int64, owner, repo string, number int, body string) (IssueComment, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return IssueComment{}, err
+	}
+	var out IssueComment
+	path := fmt.Sprintf("/repos/%s/%s/issues/%d/comments", url.PathEscape(owner), url.PathEscape(repo), number)
+	err = c.doJSON(ctx, "POST", path, token, map[string]string{"body": body}, &out)
+	return out, err
+}
+func (c *Client) UpdateIssueComment(ctx context.Context, installationID int64, owner, repo string, id int64, body string) error {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues/comments/%d", url.PathEscape(owner), url.PathEscape(repo), id)
+	return c.doJSON(ctx, "PATCH", path, token, map[string]string{"body": body}, nil)
+}
+func (c *Client) UpsertPRComment(ctx context.Context, installationID int64, owner, repo string, number int, marker, body string, update bool) error {
+	body = marker + "\n" + body
+	if update {
+		comments, err := c.ListIssueComments(ctx, installationID, owner, repo, number)
+		if err != nil {
+			return err
+		}
+		for _, comment := range comments {
+			if strings.Contains(comment.Body, marker) {
+				return c.UpdateIssueComment(ctx, installationID, owner, repo, comment.ID, body)
+			}
+		}
+	}
+	_, err := c.CreateIssueComment(ctx, installationID, owner, repo, number, body)
+	return err
+}
