@@ -1,11 +1,36 @@
 services:
+  postgres:
+    image: postgres:18.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ciradar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-now}
+      POSTGRES_DB: ciradar
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - ciradar-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ciradar -d ciradar"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   ciradar:
     build: .
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
-      - "127.0.0.1:8787:8787"
+      - "8787:8787"
+    environment:
+      CIRADAR_DATABASE_DRIVER: postgres
+      CIRADAR_DATABASE_URL: postgres://ciradar:${POSTGRES_PASSWORD:-change-me-now}@postgres:5432/ciradar?sslmode=disable
+      CIRADAR_MASTER_KEY: ${CIRADAR_MASTER_KEY}
     volumes:
       - ./ciradar.json:/app/ciradar.json:ro
       - ./rules:/app/rules:ro
-      - ./data:/app/.ciradar
-      - ./github-app.pem:/run/secrets/github-app.pem:ro
+    command: ["serve", "--config", "/app/ciradar.json"]
+
+volumes:
+  ciradar-postgres:
