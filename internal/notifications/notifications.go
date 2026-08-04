@@ -103,6 +103,14 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 		return d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: delivery.ID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: "suppressed", Attempts: delivery.Attempts, SuppressedReason: reason, CreatedAt: delivery.CreatedAt, UpdatedAt: now})
 	}
 	attempt := delivery.Attempts
+	if ch.Type == "email" {
+		err := sendEmail(ctx, ch, ev)
+		if err != nil {
+			return d.recordFailure(ctx, ch, ev, attempt, 0, sanitizeError(err, ch, "smtp://"+ch.SMTPHost), false)
+		}
+		now := time.Now().UTC()
+		return d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: delivery.ID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: "sent", Attempts: attempt, CreatedAt: delivery.CreatedAt, UpdatedAt: now, SentAt: now})
+	}
 	body, endpoint, headers, err := buildRequest(ch, ev)
 	if err != nil {
 		return d.recordFailure(ctx, ch, ev, attempt, 0, err, true)
@@ -301,6 +309,18 @@ func buildRequest(ch config.NotificationChannel, ev model.NotificationEvent) ([]
 		payload = m
 	case "webhook":
 		payload = ev
+	case "teams":
+		payload = teamsPayload(ev)
+	case "pagerduty":
+		if endpoint == "" {
+			endpoint = "https://events.pagerduty.com/v2/enqueue"
+		}
+		payload = pagerDutyPayload(ch, ev)
+	case "opsgenie":
+		endpoint, payload = opsgenieEndpointAndPayload(ch, ev)
+		headers["Authorization"] = "GenieKey " + ch.APIKey
+	case "email":
+		return nil, "", nil, fmt.Errorf("email uses SMTP transport")
 	default:
 		return nil, "", nil, fmt.Errorf("unsupported notification type %q", ch.Type)
 	}
@@ -441,7 +461,7 @@ func sanitizeError(err error, ch config.NotificationChannel, endpoint string) er
 	return errors.New(sanitizeText(err.Error(), ch, endpoint))
 }
 func sanitizeText(s string, ch config.NotificationChannel, endpoint string) string {
-	for _, secret := range []string{endpoint, ch.URL, ch.BotToken, ch.HMACSecret} {
+	for _, secret := range []string{endpoint, ch.URL, ch.BotToken, ch.HMACSecret, ch.APIKey, ch.RoutingKey, ch.SMTPPassword} {
 		if secret != "" {
 			s = strings.ReplaceAll(s, secret, "[REDACTED]")
 		}
