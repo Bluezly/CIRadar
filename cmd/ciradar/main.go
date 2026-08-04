@@ -805,7 +805,7 @@ func buildAnalyzer(cfg config.Config) (*analyzer.Analyzer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load custom rules: %w", err)
 	}
-	return analyzer.New(cfg.FingerprintHMACKey, extra...), nil
+	return analyzer.NewConfigured(cfg.FingerprintHMACKey, cfg.RedactionPatterns, cfg.RedactionEntropyDetection, extra...), nil
 }
 
 func printHuman(r model.AnalysisResult) {
