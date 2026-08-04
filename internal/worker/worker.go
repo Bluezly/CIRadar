@@ -2,7 +2,10 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -21,6 +24,7 @@ import (
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
+	"ciradar/internal/repair"
 )
 
 type jobDiagnosis struct {
@@ -106,7 +110,36 @@ func (w *Worker) process(ctx context.Context, job db.Job) error {
 		if err != nil || analysis == nil {
 			return err
 		}
-		_, err = w.llm.Enhance(ctx, *analysis, payload.ChangedFiles)
+		enhancement, err := w.llm.Enhance(ctx, *analysis, payload.ChangedFiles)
+		if err != nil {
+			return err
+		}
+		w.maybeCreateDraftRepair(ctx, *analysis, enhancement)
+		return nil
+	case "repair.draft_pr":
+		var payload struct {
+			TenantID   string `json:"tenant_id"`
+			AnalysisID string `json:"analysis_id"`
+		}
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return err
+		}
+		analysis, err := w.store.GetAnalysisForTenant(ctx, payload.TenantID, payload.AnalysisID)
+		if err != nil || analysis == nil {
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("analysis %s was not found", payload.AnalysisID)
+		}
+		var enhancement model.LLMEnhancement
+		found, err := w.store.GetObject(ctx, payload.TenantID, "llm_enhancement", payload.AnalysisID, &enhancement)
+		if err != nil {
+			return err
+		}
+		if !found || strings.TrimSpace(enhancement.Patch) == "" {
+			return errors.New("analysis has no repair patch")
+		}
+		_, err = w.createDraftRepair(ctx, *analysis, enhancement, true)
 		return err
 	case "ci.event":
 		var ev model.CIEvent
@@ -195,6 +228,7 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 	if err := w.store.RecordAnalysisForTenant(ctx, tenantID, in, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 		return err
 	}
+	_ = w.store.PutObject(ctx, tenantID, "analysis_source", result.ID, model.RepairSource{TenantID: tenantID, Provider: ev.Provider, Repository: ev.Repository, InstallationID: ev.InstallationID, CommitSHA: ev.CommitSHA, BaseBranch: ev.Branch, RunURL: ev.RunURL, PullRequestNumber: ev.PullRequestNumber})
 	if w.cfg.LLM.AutoEnhance && result.Score >= w.cfg.LLM.MinimumScore {
 		_ = w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID}, time.Now().UTC())
 	}
@@ -220,7 +254,114 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 			}
 		}
 	}
+	if err := w.maybeRetryCIEvent(ctx, *co, ev, result); err != nil {
+		w.log.Warn("automatic connector retry failed", "provider", ev.Provider, "repository", ev.Repository, "error", err)
+	}
 	return nil
+}
+
+type connectorRetryRecord struct {
+	TenantID   string    `json:"tenant_id"`
+	Provider   string    `json:"provider"`
+	Repository string    `json:"repository"`
+	RunID      string    `json:"run_id"`
+	AnalysisID string    `json:"analysis_id"`
+	Status     string    `json:"status"`
+	HTTPStatus int       `json:"http_status,omitempty"`
+	RequestID  string    `json:"request_id,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (w *Worker) maybeRetryCIEvent(ctx context.Context, co config.CIConnector, ev model.CIEvent, result model.AnalysisResult) error {
+	if !w.cfg.AutomaticRetryEnabled || result.Score < w.cfg.AutomaticRetryMinScore {
+		return nil
+	}
+	if result.Attribution != model.AttributionExternal || result.ProviderIncident || !retryEligible(result.Category) {
+		return nil
+	}
+	if strings.TrimSpace(ev.Metadata["retry_attempt"]) != "" && strings.TrimSpace(ev.Metadata["retry_attempt"]) != "0" {
+		return nil
+	}
+	runKey := firstNonEmpty(ev.PipelineID, strconv.FormatInt(ev.RunID, 10), ev.JobID, ev.DeliveryID)
+	if runKey == "" || runKey == "0" {
+		return nil
+	}
+	keySource := strings.Join([]string{ev.Provider, ev.Repository, runKey}, "|")
+	digest := sha256.Sum256([]byte(keySource))
+	key := hex.EncodeToString(digest[:])
+	var existing connectorRetryRecord
+	found, err := w.store.GetObject(ctx, ev.TenantID, "automatic_retry", key, &existing)
+	if err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	now := time.Now().UTC()
+	record := connectorRetryRecord{TenantID: ev.TenantID, Provider: ev.Provider, Repository: ev.Repository, RunID: runKey, AnalysisID: result.ID, Status: "requesting", CreatedAt: now, UpdatedAt: now}
+	if err := w.store.PutObject(ctx, ev.TenantID, "automatic_retry", key, record); err != nil {
+		return err
+	}
+	retryResult, retryErr := connectors.Retry(ctx, co, ev)
+	record.UpdatedAt = time.Now().UTC()
+	if retryErr != nil {
+		record.Status = "failed"
+		record.Error = retryErr.Error()
+		_ = w.store.PutObject(ctx, ev.TenantID, "automatic_retry", key, record)
+		_ = w.store.RecordAudit(ctx, model.AuditEvent{TenantID: ev.TenantID, Actor: "system", Role: model.RoleOperator, Action: "workflow.retry_failed", Resource: "ci_run", ResourceID: runKey, Metadata: map[string]string{"provider": ev.Provider, "repository": ev.Repository, "error": retryErr.Error()}})
+		return retryErr
+	}
+	record.Status = "requested"
+	record.HTTPStatus = retryResult.HTTPStatus
+	record.RequestID = retryResult.RequestID
+	if err := w.store.PutObject(ctx, ev.TenantID, "automatic_retry", key, record); err != nil {
+		return err
+	}
+	_ = w.store.RecordAudit(ctx, model.AuditEvent{TenantID: ev.TenantID, Actor: "system", Role: model.RoleOperator, Action: "workflow.retry", Resource: "ci_run", ResourceID: runKey, Metadata: map[string]string{"provider": ev.Provider, "repository": ev.Repository, "request_id": retryResult.RequestID}})
+	w.log.Info("automatic connector retry requested", "tenant", ev.TenantID, "provider", ev.Provider, "repository", ev.Repository, "run_id", runKey)
+	return nil
+}
+
+func (w *Worker) maybeCreateDraftRepair(ctx context.Context, analysis model.AnalysisResult, enhancement model.LLMEnhancement) {
+	_, _ = w.createDraftRepair(ctx, analysis, enhancement, false)
+}
+
+func (w *Worker) createDraftRepair(ctx context.Context, analysis model.AnalysisResult, enhancement model.LLMEnhancement, explicit bool) (model.RepairResult, error) {
+	if !w.cfg.Repair.Enabled || w.github == nil || analysis.Score < w.cfg.Repair.MinimumScore || strings.TrimSpace(enhancement.Patch) == "" {
+		return model.RepairResult{}, errors.New("repair is disabled or analysis is not eligible")
+	}
+	if !explicit && !w.cfg.Repair.AutoDraftPR {
+		return model.RepairResult{}, nil
+	}
+	if analysis.Attribution != model.AttributionCode {
+		return model.RepairResult{}, errors.New("draft repair PR requires a code-attributed diagnosis")
+	}
+	var existing model.RepairResult
+	if found, _ := w.store.GetObject(ctx, analysis.TenantID, "repair_result", analysis.ID, &existing); found && existing.Status == "draft_pr_created" {
+		return existing, nil
+	}
+	var source model.RepairSource
+	found, err := w.store.GetObject(ctx, analysis.TenantID, "analysis_source", analysis.ID, &source)
+	if err != nil {
+		return model.RepairResult{}, err
+	}
+	if !found || source.Provider != "github" {
+		return model.RepairResult{}, errors.New("draft repair PR is available only for GitHub analyses with source metadata")
+	}
+	result, createErr := repair.CreateGitHubDraftPR(ctx, w.github, source, analysis, enhancement.Patch, w.cfg.Repair.BranchPrefix, w.cfg.Repair.MaximumFiles, w.cfg.Repair.MaximumLines)
+	if createErr != nil {
+		result = model.RepairResult{TenantID: analysis.TenantID, AnalysisID: analysis.ID, Provider: source.Provider, Status: "failed", Error: createErr.Error(), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+		w.log.Warn("draft repair PR failed", "analysis_id", analysis.ID, "error", createErr)
+	}
+	_ = w.store.PutObject(ctx, analysis.TenantID, "repair_result", analysis.ID, result)
+	action := "repair.draft_pr_failed"
+	if result.Status == "draft_pr_created" {
+		action = "repair.draft_pr_created"
+	}
+	_ = w.store.RecordAudit(ctx, model.AuditEvent{TenantID: analysis.TenantID, Actor: "system", Role: model.RoleOperator, Action: action, Resource: "analysis", ResourceID: analysis.ID, Metadata: map[string]string{"pull_request_url": result.PullRequestURL, "error": result.Error}})
+	return result, createErr
 }
 
 func (w *Worker) costRate(provider, runnerClass string, labels []string) float64 {
@@ -237,11 +378,13 @@ func (w *Worker) costRate(provider, runnerClass string, labels []string) float64
 	}
 	return 0
 }
-func firstNonEmpty(a, b string) string {
-	if strings.TrimSpace(a) != "" {
-		return a
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
 	}
-	return b
+	return ""
 }
 
 func shouldPublishDeveloperComment(mode string, r model.AnalysisResult) bool {
@@ -377,6 +520,11 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		if err := w.store.RecordAnalysisForTenant(ctx, tenantID, input, result, w.cfg.StoreRedactedExcerpts, w.cfg.StoreRawLogs); err != nil {
 			return err
 		}
+		pullRequestNumber := 0
+		if len(ev.WorkflowRun.PullRequests) > 0 {
+			pullRequestNumber = ev.WorkflowRun.PullRequests[0].Number
+		}
+		_ = w.store.PutObject(ctx, tenantID, "analysis_source", result.ID, model.RepairSource{TenantID: tenantID, Provider: "github", Repository: ev.Repository.FullName, InstallationID: ev.Installation.ID, CommitSHA: ev.WorkflowRun.HeadSHA, BaseBranch: ev.WorkflowRun.HeadBranch, RunURL: ev.WorkflowRun.HTMLURL, PullRequestNumber: pullRequestNumber})
 		if w.cfg.LLM.AutoEnhance && result.Score >= w.cfg.LLM.MinimumScore {
 			_ = w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID, "changed_files": changedFiles}, time.Now().UTC())
 		}
