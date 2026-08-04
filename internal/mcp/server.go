@@ -20,6 +20,8 @@ type Server struct {
 	Store    db.Backend
 	Semantic config.SemanticConfig
 	LLM      config.LLMConfig
+	Repair   config.RepairConfig
+	Runtime  *Runtime
 }
 
 type Request struct {
@@ -49,6 +51,11 @@ type ReadParams struct {
 }
 
 func (s *Server) Handle(ctx context.Context, tenant string, req Request) Response {
+	return s.HandlePrincipal(ctx, model.Principal{TenantID: tenant, Role: model.RoleViewer, Name: "mcp"}, req)
+}
+
+func (s *Server) HandlePrincipal(ctx context.Context, principal model.Principal, req Request) Response {
+	tenant := principal.TenantID
 	out := Response{JSONRPC: "2.0", ID: req.ID}
 	if req.JSONRPC != "2.0" {
 		out.Error = &RPCError{Code: -32600, Message: "invalid JSON-RPC version"}
@@ -62,14 +69,14 @@ func (s *Server) Handle(ctx context.Context, tenant string, req Request) Respons
 	case "ping":
 		out.Result = map[string]any{}
 	case "tools/list":
-		out.Result = map[string]any{"tools": toolDefinitions()}
+		out.Result = map[string]any{"tools": toolDefinitions(principal, s.Repair.Enabled)}
 	case "tools/call":
 		var p CallParams
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			out.Error = &RPCError{Code: -32602, Message: "invalid tool parameters"}
 			return out
 		}
-		result, err := s.callTool(ctx, tenant, p)
+		result, err := s.callTool(ctx, principal, p)
 		if err != nil {
 			out.Error = &RPCError{Code: -32000, Message: err.Error()}
 			return out
@@ -107,8 +114,8 @@ func (s *Server) Handle(ctx context.Context, tenant string, req Request) Respons
 	return out
 }
 
-func toolDefinitions() []any {
-	return []any{
+func toolDefinitions(principal model.Principal, repairEnabled bool) []any {
+	items := []any{
 		tool("list_active_incidents", "List active CI incidents", map[string]any{"type": "object", "properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}),
 		tool("get_incident", "Get one incident by fingerprint", map[string]any{"type": "object", "required": []string{"fingerprint"}, "properties": map[string]any{"fingerprint": map[string]any{"type": "string"}}}),
 		tool("get_diagnosis", "Get one diagnosis by ID", map[string]any{"type": "object", "required": []string{"id"}, "properties": map[string]any{"id": map[string]any{"type": "string"}}}),
@@ -119,13 +126,44 @@ func toolDefinitions() []any {
 		tool("select_impacted_tests", "Select tests likely impacted by changed files", map[string]any{"type": "object", "required": []string{"repository", "changed_files"}, "properties": map[string]any{"repository": map[string]any{"type": "string"}, "changed_files": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "framework": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}}),
 		tool("get_dora_metrics", "Get DORA metrics", map[string]any{"type": "object", "properties": map[string]any{"days": map[string]any{"type": "integer"}, "environment": map[string]any{"type": "string"}}}),
 		tool("get_ci_costs", "Get CI duration and estimated cost", map[string]any{"type": "object", "properties": map[string]any{"days": map[string]any{"type": "integer"}}}),
+		tool("get_repair_proposal", "Get the reviewable repair proposal and draft PR result for one diagnosis", map[string]any{"type": "object", "required": []string{"analysis_id"}, "properties": map[string]any{"analysis_id": map[string]any{"type": "string"}}}),
 	}
+	if operatorOrHigher(principal) && allowsScope(principal, "ciradar.write") {
+		items = append(items,
+			writeTool("prepare_action", "Prepare a human-confirmed write action", map[string]any{"type": "object", "required": []string{"action", "target"}, "properties": map[string]any{"action": map[string]any{"type": "string", "enum": []string{"acknowledge_incident", "resolve_incident", "quarantine_test", "unquarantine_test", "create_draft_repair_pr"}}, "target": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}}}),
+			writeTool("acknowledge_incident", "Acknowledge an incident after explicit confirmation", confirmationSchema()),
+			writeTool("resolve_incident", "Resolve an incident after explicit confirmation", confirmationSchema()),
+			writeTool("quarantine_test", "Quarantine a flaky test for a limited period after explicit confirmation", map[string]any{"type": "object", "required": []string{"target", "confirmation_token", "reason", "owner"}, "properties": map[string]any{"target": map[string]any{"type": "string"}, "confirmation_token": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}, "owner": map[string]any{"type": "string"}, "duration_hours": map[string]any{"type": "integer", "minimum": 1, "maximum": 720}}}),
+			writeTool("unquarantine_test", "Restore a quarantined test after explicit confirmation", confirmationSchema()),
+			writeTool("create_draft_repair_pr", "Create a reviewable GitHub draft pull request from the stored repair patch after explicit confirmation", confirmationSchema()),
+		)
+	}
+	return items
 }
+func allowsScope(principal model.Principal, scope string) bool {
+	if len(principal.Scopes) == 0 {
+		return true
+	}
+	for _, value := range principal.Scopes {
+		if value == scope {
+			return true
+		}
+	}
+	return false
+}
+
 func tool(name, desc string, input map[string]any) map[string]any {
 	return map[string]any{"name": name, "description": desc, "inputSchema": input, "annotations": map[string]any{"readOnlyHint": true, "destructiveHint": false, "idempotentHint": true}}
 }
+func writeTool(name, desc string, input map[string]any) map[string]any {
+	return map[string]any{"name": name, "description": desc, "inputSchema": input, "annotations": map[string]any{"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false}}
+}
+func confirmationSchema() map[string]any {
+	return map[string]any{"type": "object", "required": []string{"target", "confirmation_token"}, "properties": map[string]any{"target": map[string]any{"type": "string"}, "confirmation_token": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}}}
+}
 
-func (s *Server) callTool(ctx context.Context, tenant string, p CallParams) (any, error) {
+func (s *Server) callTool(ctx context.Context, principal model.Principal, p CallParams) (any, error) {
+	tenant := principal.TenantID
 	switch p.Name {
 	case "list_active_incidents":
 		return s.Store.ListIncidentsForTenant(ctx, tenant, intArg(p.Arguments, "limit", 50), "open")
@@ -213,8 +251,125 @@ func (s *Server) callTool(ctx context.Context, tenant string, p CallParams) (any
 		}
 		until := time.Now().UTC()
 		return insights.Usage(ctx, s.Store, tenant, until.Add(-time.Duration(days)*24*time.Hour), until)
+	case "get_repair_proposal":
+		id := stringArg(p.Arguments, "analysis_id")
+		if id == "" {
+			return nil, fmt.Errorf("analysis_id is required")
+		}
+		analysis, err := s.Store.GetAnalysisForTenant(ctx, tenant, id)
+		if err != nil {
+			return nil, err
+		}
+		if analysis == nil {
+			return nil, fmt.Errorf("diagnosis not found")
+		}
+		var enhancement model.LLMEnhancement
+		hasEnhancement, err := s.Store.GetObject(ctx, tenant, "llm_enhancement", id, &enhancement)
+		if err != nil {
+			return nil, err
+		}
+		var result model.RepairResult
+		hasResult, err := s.Store.GetObject(ctx, tenant, "repair_result", id, &result)
+		if err != nil {
+			return nil, err
+		}
+		var source model.RepairSource
+		hasSource, err := s.Store.GetObject(ctx, tenant, "analysis_source", id, &source)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"analysis": analysis, "enhancement": optionalValue(hasEnhancement, enhancement), "repair_result": optionalValue(hasResult, result), "source": optionalValue(hasSource, source), "repair_enabled": s.Repair.Enabled}, nil
+	case "prepare_action":
+		if s.Runtime == nil {
+			return nil, fmt.Errorf("MCP write runtime is not configured")
+		}
+		action, target, reason := stringArg(p.Arguments, "action"), stringArg(p.Arguments, "target"), stringArg(p.Arguments, "reason")
+		token, expires, err := s.Runtime.Prepare(principal, action, target, reason)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"confirmation_token": token, "action": action, "target": target, "expires_at": expires, "requires_human_confirmation": true}, nil
+	case "acknowledge_incident", "resolve_incident":
+		if s.Runtime == nil {
+			return nil, fmt.Errorf("MCP write runtime is not configured")
+		}
+		target, token := stringArg(p.Arguments, "target"), stringArg(p.Arguments, "confirmation_token")
+		if _, err := s.Runtime.Consume(principal, token, p.Name, target); err != nil {
+			return nil, err
+		}
+		state := "acknowledged"
+		if p.Name == "resolve_incident" {
+			state = "resolved"
+		}
+		value, err := s.Store.UpdateIncidentState(ctx, tenant, target, state, principal.Name, stringArg(p.Arguments, "reason"))
+		if err != nil {
+			return nil, err
+		}
+		if value == nil {
+			return nil, fmt.Errorf("incident not found")
+		}
+		return value, nil
+	case "quarantine_test":
+		if s.Runtime == nil {
+			return nil, fmt.Errorf("MCP write runtime is not configured")
+		}
+		target, token := stringArg(p.Arguments, "target"), stringArg(p.Arguments, "confirmation_token")
+		if _, err := s.Runtime.Consume(principal, token, p.Name, target); err != nil {
+			return nil, err
+		}
+		hours := intArg(p.Arguments, "duration_hours", 168)
+		if hours < 1 {
+			hours = 1
+		}
+		if hours > 720 {
+			hours = 720
+		}
+		return s.Store.SetTestQuarantine(ctx, model.TestQuarantine{TenantID: tenant, TestKey: target, Reason: stringArg(p.Arguments, "reason"), Owner: stringArg(p.Arguments, "owner"), CreatedBy: principal.Name, ExpiresAt: time.Now().UTC().Add(time.Duration(hours) * time.Hour)})
+	case "unquarantine_test":
+		if s.Runtime == nil {
+			return nil, fmt.Errorf("MCP write runtime is not configured")
+		}
+		target, token := stringArg(p.Arguments, "target"), stringArg(p.Arguments, "confirmation_token")
+		if _, err := s.Runtime.Consume(principal, token, p.Name, target); err != nil {
+			return nil, err
+		}
+		if err := s.Store.RemoveTestQuarantine(ctx, tenant, target); err != nil {
+			return nil, err
+		}
+		return map[string]any{"test_key": target, "quarantined": false}, nil
+	case "create_draft_repair_pr":
+		if !s.Repair.Enabled {
+			return nil, fmt.Errorf("repair is disabled")
+		}
+		if s.Runtime == nil {
+			return nil, fmt.Errorf("MCP write runtime is not configured")
+		}
+		target, token := stringArg(p.Arguments, "target"), stringArg(p.Arguments, "confirmation_token")
+		if _, err := s.Runtime.Consume(principal, token, p.Name, target); err != nil {
+			return nil, err
+		}
+		analysis, err := s.Store.GetAnalysisForTenant(ctx, tenant, target)
+		if err != nil {
+			return nil, err
+		}
+		if analysis == nil {
+			return nil, fmt.Errorf("diagnosis not found")
+		}
+		var enhancement model.LLMEnhancement
+		found, err := s.Store.GetObject(ctx, tenant, "llm_enhancement", target, &enhancement)
+		if err != nil {
+			return nil, err
+		}
+		if !found || strings.TrimSpace(enhancement.Patch) == "" {
+			return nil, fmt.Errorf("diagnosis has no repair patch")
+		}
+		if err := s.Store.EnqueueForTenant(ctx, tenant, "repair.draft_pr", map[string]any{"tenant_id": tenant, "analysis_id": target}, time.Now().UTC()); err != nil {
+			return nil, err
+		}
+		_ = s.Store.RecordAudit(ctx, model.AuditEvent{TenantID: tenant, Actor: principal.Name, Role: principal.Role, Action: "repair.draft_pr_requested", Resource: "analysis", ResourceID: target, CreatedAt: time.Now().UTC()})
+		return map[string]any{"status": "queued", "analysis_id": target, "review_required": true}, nil
 	default:
-		return nil, fmt.Errorf("unknown read-only tool %q", p.Name)
+		return nil, fmt.Errorf("unknown tool %q", p.Name)
 	}
 }
 
@@ -227,9 +382,9 @@ func (s *Server) readResource(ctx context.Context, tenant, uri string) (any, err
 	case uri == "ciradar://tests/flaky":
 		return s.Store.ListTestCaseStats(ctx, tenant, "", "flaky", 200)
 	case strings.HasPrefix(uri, "ciradar://incidents/"):
-		return s.callTool(ctx, tenant, CallParams{Name: "get_incident", Arguments: map[string]any{"fingerprint": strings.TrimPrefix(uri, "ciradar://incidents/")}})
+		return s.callTool(ctx, model.Principal{TenantID: tenant, Role: model.RoleViewer, Name: "resource"}, CallParams{Name: "get_incident", Arguments: map[string]any{"fingerprint": strings.TrimPrefix(uri, "ciradar://incidents/")}})
 	case strings.HasPrefix(uri, "ciradar://analyses/"):
-		return s.callTool(ctx, tenant, CallParams{Name: "get_diagnosis", Arguments: map[string]any{"id": strings.TrimPrefix(uri, "ciradar://analyses/")}})
+		return s.callTool(ctx, model.Principal{TenantID: tenant, Role: model.RoleViewer, Name: "resource"}, CallParams{Name: "get_diagnosis", Arguments: map[string]any{"id": strings.TrimPrefix(uri, "ciradar://analyses/")}})
 	case strings.HasPrefix(uri, "ciradar://repositories/") && strings.HasSuffix(uri, "/health"):
 		repo := strings.TrimSuffix(strings.TrimPrefix(uri, "ciradar://repositories/"), "/health")
 		return s.repositoryHealth(ctx, tenant, repo)
@@ -273,6 +428,13 @@ func (s *Server) repositoryHealth(ctx context.Context, tenant, repo string) (any
 	tests, _ := s.Store.ListTestCaseStats(ctx, tenant, repo, "", 100)
 	profile, _ := s.Store.GetRepositoryProfile(ctx, tenant, repo)
 	return map[string]any{"repository": repo, "diagnoses": len(filtered), "external": external, "code": code, "active_incidents": active, "recent_analyses": limitAnalyses(filtered, 20), "test_cases": tests, "profile": profile}, nil
+}
+
+func optionalValue[T any](ok bool, value T) any {
+	if !ok {
+		return nil
+	}
+	return value
 }
 
 func matchesAnalysis(a model.AnalysisResult, fp, cat, provider, repo string) bool {
