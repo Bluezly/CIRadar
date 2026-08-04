@@ -1,5 +1,5 @@
 .PHONY: test vet build windows linux darwin clean
-VERSION ?= 1.3.1-oss-rc.5
+VERSION ?= 1.3.2-oss-rc.6
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X ciradar/internal/version.Version=$(VERSION) -X ciradar/internal/version.Commit=$(COMMIT) -X ciradar/internal/version.BuildDate=$(BUILD_DATE)

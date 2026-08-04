@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.1-oss-rc.5" }
+$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.2-oss-rc.6" }
 $BuildDate = if ($env:BUILD_DATE) { $env:BUILD_DATE } else { (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
 try { $Commit = if ($env:COMMIT) { $env:COMMIT } else { (git rev-parse --short HEAD).Trim() } } catch { $Commit = "unknown" }
 $Ldflags = "-s -w -X ciradar/internal/version.Version=$Version -X ciradar/internal/version.BuildDate=$BuildDate -X ciradar/internal/version.Commit=$Commit"

@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-VERSION="${VERSION:-1.3.1-oss-rc.5}"
+VERSION="${VERSION:-1.3.2-oss-rc.6}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 COMMIT="${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || printf unknown)}"
 LDFLAGS="-s -w -X ciradar/internal/version.Version=$VERSION -X ciradar/internal/version.BuildDate=$BUILD_DATE -X ciradar/internal/version.Commit=$COMMIT"
