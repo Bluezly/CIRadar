@@ -198,7 +198,7 @@ func TestDashboardRequiresTokenByDefault(t *testing.T) {
 func TestRepositoryProfileValidatesConfiguredChannels(t *testing.T) {
 	s, store, cfg := testServer(t)
 	cfg.Notifications.Channels[0].Name = "slack-ops"
-	// testServer already constructed the server with the same default channel name.
+
 	_, token, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "admin", model.RoleAdmin)
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func TestWebhookRequiresTenantBinding(t *testing.T) {
 	if err := store.BindInstallation(context.Background(), "acme", 987); err != nil {
 		t.Fatal(err)
 	}
-	// A new GitHub delivery ID is required because duplicate webhook deliveries are intentionally ignored.
+
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
 	req.Header.Set("X-Hub-Signature-256", sig)
 	req.Header.Set("X-GitHub-Delivery", "delivery-bound")
