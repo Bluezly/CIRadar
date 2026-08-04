@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -12,17 +13,21 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"ciradar/internal/analyzer"
 	"ciradar/internal/config"
+	"ciradar/internal/connectors"
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
+	mcpserver "ciradar/internal/mcp"
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
+	"ciradar/internal/testintelligence"
 	"ciradar/internal/version"
 )
 
@@ -57,6 +62,15 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /api/v1/analyses", s.require(model.RoleViewer, s.analyses))
 	mux.HandleFunc("GET /api/v1/analyses/{id}", s.require(model.RoleViewer, s.analysis))
 	mux.HandleFunc("POST /api/v1/analyze", s.require(model.RoleOperator, s.analyze))
+	mux.HandleFunc("POST /api/v1/analyses/{id}/feedback", s.require(model.RoleViewer, s.analysisFeedback))
+	mux.HandleFunc("GET /api/v1/feedback", s.require(model.RoleViewer, s.feedbackList))
+	mux.HandleFunc("POST /api/v1/tests/junit", s.require(model.RoleOperator, s.ingestJUnit))
+	mux.HandleFunc("GET /api/v1/tests", s.require(model.RoleViewer, s.testCases))
+	mux.HandleFunc("GET /api/v1/tests/quarantines", s.require(model.RoleViewer, s.testQuarantines))
+	mux.HandleFunc("GET /api/v1/tests/quarantine-manifest", s.require(model.RoleViewer, s.testQuarantineManifest))
+	mux.HandleFunc("POST /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.quarantineTest))
+	mux.HandleFunc("DELETE /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.unquarantineTest))
+
 	mux.HandleFunc("POST /api/v1/baselines", s.require(model.RoleOperator, s.baseline))
 	mux.HandleFunc("GET /api/v1/notifications/deliveries", s.require(model.RoleViewer, s.notificationDeliveries))
 	mux.HandleFunc("GET /api/v1/audit", s.require(model.RoleAdmin, s.auditEvents))
@@ -72,7 +86,13 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /api/v1/github/installations/{id}/bind", s.requireRoot(s.bindInstallation))
 	mux.HandleFunc("DELETE /api/v1/github/installations/{id}", s.requireRoot(s.unbindInstallation))
 	mux.HandleFunc("GET /metrics", s.require(model.RoleViewer, s.metrics))
+	mux.HandleFunc("POST /mcp", s.require(model.RoleViewer, s.mcp))
+	mux.HandleFunc("GET /mcp", s.mcpGet)
 	mux.HandleFunc("POST /webhooks/github", s.githubWebhook)
+	mux.HandleFunc("POST /webhooks/gitlab", s.ciWebhook("gitlab"))
+	mux.HandleFunc("POST /webhooks/buildkite", s.ciWebhook("buildkite"))
+	mux.HandleFunc("POST /webhooks/circleci", s.ciWebhook("circleci"))
+	mux.HandleFunc("POST /webhooks/jenkins", s.ciWebhook("jenkins"))
 	h := requestID(securityHeaders(logging(log, rateLimit(newRateLimiter(600, time.Minute), mux))))
 	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 	return s
@@ -126,7 +146,24 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	providerList, _ := s.store.ListProviderStatuses(r.Context())
-	writeJSON(w, 200, map[string]any{"version": version.Version, "commit": version.Commit, "tenant_id": p.TenantID, "role": p.Role, "github_configured": s.cfg.GitHubConfigured(), "automatic_retry_enabled": s.cfg.AutomaticRetryEnabled, "cross_tenant_correlation": s.cfg.CrossTenantCorrelation, "store_raw_logs": s.cfg.StoreRawLogs, "notifications_enabled": s.cfg.Notifications.Enabled, "notification_channels": len(s.cfg.Notifications.Channels), "stats": st, "providers": providerList})
+	feedback, _ := s.store.FeedbackMetrics(r.Context(), p.TenantID)
+	tests, _ := s.store.ListTestCaseStats(r.Context(), p.TenantID, "", "", 5000)
+	flaky, quarantined := 0, 0
+	for _, tc := range tests {
+		if tc.Classification == "flaky" {
+			flaky++
+		}
+		if tc.Quarantined {
+			quarantined++
+		}
+	}
+	connectorsEnabled := []string{}
+	for _, co := range s.cfg.Connectors {
+		if co.Enabled {
+			connectorsEnabled = append(connectorsEnabled, co.Provider)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"version": version.Version, "commit": version.Commit, "tenant_id": p.TenantID, "role": p.Role, "database_driver": s.cfg.DatabaseDriver, "github_configured": s.cfg.GitHubConfigured(), "connectors_enabled": connectorsEnabled, "mcp_enabled": true, "test_intelligence_enabled": s.cfg.TestIntelligence.Enabled, "automatic_retry_enabled": s.cfg.AutomaticRetryEnabled, "cross_tenant_correlation": s.cfg.CrossTenantCorrelation, "store_raw_logs": s.cfg.StoreRawLogs, "notifications_enabled": s.cfg.Notifications.Enabled, "notification_channels": len(s.cfg.Notifications.Channels), "stats": st, "feedback": feedback, "tests": map[string]int{"tracked": len(tests), "flaky": flaky, "quarantined": quarantined}, "providers": providerList})
 }
 
 func (s *Server) dashboardData(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +218,151 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, item)
 }
+func (s *Server) analysisFeedback(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	var body struct {
+		Verdict     string            `json:"verdict"`
+		ActualCause model.Attribution `json:"actual_cause"`
+		Comment     string            `json:"comment"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+		writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	actor := p.Name
+	if actor == "" {
+		actor = p.APIKeyID
+	}
+	if actor == "" {
+		actor = "root"
+	}
+	f, err := s.store.UpsertDiagnosisFeedback(r.Context(), model.DiagnosisFeedback{TenantID: p.TenantID, AnalysisID: r.PathValue("id"), Verdict: body.Verdict, ActualCause: body.ActualCause, Comment: body.Comment, Actor: actor})
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	s.audit(r, "analysis.feedback", "analysis", r.PathValue("id"), map[string]string{"verdict": f.Verdict, "actual_cause": string(f.ActualCause)})
+	writeJSON(w, 200, f)
+}
+func (s *Server) feedbackList(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.store.ListDiagnosisFeedback(r.Context(), principal(r).TenantID, limit)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	metrics, _ := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
+	writeJSON(w, 200, map[string]any{"feedback": items, "metrics": metrics})
+}
+func (s *Server) ingestJUnit(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	q := r.URL.Query()
+	runID, _ := strconv.ParseInt(q.Get("run_id"), 10, 64)
+	obs, err := testintelligence.ParseJUnit(http.MaxBytesReader(w, r.Body, 128<<20), testintelligence.Metadata{TenantID: p.TenantID, Repository: q.Get("repository"), Workflow: q.Get("workflow"), Job: q.Get("job"), RunID: runID, CommitSHA: q.Get("commit_sha"), Branch: q.Get("branch"), Framework: firstNonEmpty(q.Get("framework"), "junit"), OccurredAt: time.Now().UTC()})
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	stats, err := s.store.RecordTestObservations(r.Context(), p.TenantID, obs)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	auto := []model.TestQuarantine{}
+	if s.cfg.TestIntelligence.Enabled && s.cfg.TestIntelligence.AutoQuarantine {
+		owner := "ci-radar"
+		if profile, _ := s.store.GetRepositoryProfile(r.Context(), p.TenantID, q.Get("repository")); profile != nil {
+			if profile.Owner != "" {
+				owner = profile.Owner
+			} else if profile.Team != "" {
+				owner = profile.Team
+			}
+		}
+		for _, st := range stats {
+			if st.Classification != "flaky" || st.TotalRuns < s.cfg.TestIntelligence.AutoQuarantineMinRuns || st.FlakeScore < s.cfg.TestIntelligence.AutoQuarantineMinScore || st.Quarantined {
+				continue
+			}
+			qu, e := s.store.SetTestQuarantine(r.Context(), model.TestQuarantine{TenantID: p.TenantID, TestKey: st.TestKey, Reason: "Automatic quarantine: repeated pass/fail transitions", Owner: owner, CreatedBy: "system", ExpiresAt: time.Now().UTC().Add(s.cfg.TestIntelligence.AutoQuarantineDuration)})
+			if e == nil {
+				auto = append(auto, qu)
+				_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: "system", Role: model.RoleOperator, Action: "test.auto_quarantine", Resource: "test", ResourceID: st.TestKey, Metadata: map[string]string{"repository": st.Repository, "score": fmt.Sprintf("%.1f", st.FlakeScore)}})
+			}
+		}
+	}
+	s.audit(r, "tests.ingest", "repository", q.Get("repository"), map[string]string{"tests": strconv.Itoa(len(obs)), "auto_quarantined": strconv.Itoa(len(auto))})
+	writeJSON(w, 200, map[string]any{"ingested": len(obs), "updated": stats, "auto_quarantined": auto})
+}
+func (s *Server) testCases(w http.ResponseWriter, r *http.Request) {
+	l, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.store.ListTestCaseStats(r.Context(), principal(r).TenantID, r.URL.Query().Get("repository"), r.URL.Query().Get("classification"), l)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"tests": items})
+}
+func (s *Server) testQuarantines(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListTestQuarantines(r.Context(), principal(r).TenantID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"quarantines": items})
+}
+func (s *Server) testQuarantineManifest(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListTestQuarantines(r.Context(), principal(r).TenantID)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	keys := make([]string, 0, len(items))
+	for _, q := range items {
+		if q.Active {
+			keys = append(keys, q.TestKey)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"version": 1, "generated_at": time.Now().UTC(), "test_keys": keys, "quarantines": items})
+}
+
+func (s *Server) quarantineTest(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	var b struct {
+		Reason    string    `json:"reason"`
+		Owner     string    `json:"owner"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&b); err != nil {
+		writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	actor := p.Name
+	if actor == "" {
+		actor = p.APIKeyID
+	}
+	q, err := s.store.SetTestQuarantine(r.Context(), model.TestQuarantine{TenantID: p.TenantID, TestKey: r.PathValue("key"), Reason: b.Reason, Owner: b.Owner, CreatedBy: actor, ExpiresAt: b.ExpiresAt})
+	if err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	s.audit(r, "test.quarantine", "test", q.TestKey, map[string]string{"owner": q.Owner, "reason": q.Reason})
+	writeJSON(w, 200, q)
+}
+func (s *Server) unquarantineTest(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	if err := s.store.RemoveTestQuarantine(r.Context(), p.TenantID, r.PathValue("key")); err != nil {
+		writeError(w, 400, err.Error())
+		return
+	}
+	s.audit(r, "test.unquarantine", "test", r.PathValue("key"), nil)
+	w.WriteHeader(204)
+}
+func firstNonEmpty(v, d string) string {
+	if strings.TrimSpace(v) != "" {
+		return v
+	}
+	return d
+}
+
 func (s *Server) notificationDeliveries(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListNotificationDeliveriesForTenant(r.Context(), principal(r).TenantID, limit)
@@ -464,8 +646,135 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	feedback, _ := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
+	tests, _ := s.store.ListTestCaseStats(r.Context(), principal(r).TenantID, "", "", 5000)
+	flaky, quarantined := 0, 0
+	for _, tc := range tests {
+		if tc.Classification == "flaky" {
+			flaky++
+		}
+		if tc.Quarantined {
+			quarantined++
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintf(w, "ciradar_analyses_total %d\nciradar_incidents_open %d\nciradar_jobs_queued %d\nciradar_repositories %d\nciradar_notification_failures_total %d\n", st.Analyses, st.OpenIncidents, st.QueuedJobs, st.Repositories, st.NotificationFailures)
+	fmt.Fprintf(w, "ciradar_analyses_total %d\nciradar_incidents_open %d\nciradar_jobs_queued %d\nciradar_repositories %d\nciradar_notification_failures_total %d\nciradar_feedback_total %d\nciradar_feedback_precision_percent %.2f\nciradar_tests_tracked %d\nciradar_tests_flaky %d\nciradar_tests_quarantined %d\n", st.Analyses, st.OpenIncidents, st.QueuedJobs, st.Repositories, st.NotificationFailures, feedback.Total, feedback.PrecisionPercent, len(tests), flaky, quarantined)
+}
+
+func (s *Server) mcpGet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Allow", "POST")
+	w.WriteHeader(http.StatusMethodNotAllowed)
+}
+
+func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
+	if !s.validMCPOrigin(r) {
+		writeError(w, http.StatusForbidden, "invalid MCP Origin")
+		return
+	}
+	if pv := strings.TrimSpace(r.Header.Get("MCP-Protocol-Version")); pv != "" && pv != "2025-03-26" && pv != "2025-06-18" && pv != "2025-11-25" {
+		writeError(w, http.StatusBadRequest, "unsupported MCP protocol version")
+		return
+	}
+	var req mcpserver.Request
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.UseNumber()
+	if err := dec.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, mcpserver.Response{JSONRPC: "2.0", Error: &mcpserver.RPCError{Code: -32700, Message: "parse error"}})
+		return
+	}
+	p := principal(r)
+	resp := (&mcpserver.Server{Store: s.store}).Handle(r.Context(), p.TenantID, req)
+	if req.ID == nil {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) validMCPOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	if strings.TrimSpace(s.cfg.PublicBaseURL) != "" {
+		p, err := url.Parse(s.cfg.PublicBaseURL)
+		return err == nil && strings.EqualFold(p.Scheme, u.Scheme) && strings.EqualFold(p.Host, u.Host)
+	}
+	return false
+}
+
+func (s *Server) ciWebhook(provider string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		co := s.cfg.Connector(provider)
+		if co == nil {
+			writeError(w, http.StatusServiceUnavailable, provider+" connector is not enabled")
+			return
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10<<20))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "could not read webhook")
+			return
+		}
+		if !connectors.VerifyWebhook(provider, co.WebhookSecret, r.Header, body, time.Now().UTC()) {
+			writeError(w, http.StatusUnauthorized, "invalid webhook signature")
+			return
+		}
+		delivery := r.Header.Get("X-Gitlab-Webhook-UUID")
+		if delivery == "" {
+			delivery = r.Header.Get("webhook-id")
+		}
+		if delivery == "" {
+			delivery = r.Header.Get("X-Request-ID")
+		}
+		if delivery == "" {
+			delivery = r.Header.Get("X-Buildkite-Event") + ":" + shortBodyHash(body)
+		}
+		delivery = provider + ":" + delivery
+		fresh, err := s.store.RecordDelivery(r.Context(), delivery, provider)
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+		if !fresh {
+			writeJSON(w, http.StatusAccepted, map[string]any{"status": "duplicate_ignored"})
+			return
+		}
+		ev, err := connectors.ParseWebhook(provider, co.TenantID, delivery, body)
+		if err != nil {
+			_ = s.store.UpdateDelivery(r.Context(), delivery, "invalid", err.Error())
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if ev.Conclusion == "" || (ev.Conclusion != "success" && !failedCIConclusion(ev.Conclusion)) {
+			_ = s.store.UpdateDelivery(r.Context(), delivery, "ignored", "not terminal")
+			writeJSON(w, http.StatusAccepted, map[string]any{"status": "ignored"})
+			return
+		}
+		if err := s.store.EnqueueForTenant(r.Context(), ev.TenantID, "ci.event", ev, time.Now().UTC()); err != nil {
+			_ = s.store.UpdateDelivery(r.Context(), delivery, "error", err.Error())
+			writeError(w, 500, err.Error())
+			return
+		}
+		_ = s.store.UpdateDelivery(r.Context(), delivery, "queued", "")
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "provider": provider, "repository": ev.Repository, "job": ev.Job})
+	}
+}
+
+func shortBodyHash(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:12]) }
+func failedCIConclusion(v string) bool {
+	switch strings.ToLower(v) {
+	case "failure", "failed", "error", "cancelled", "canceled", "timed_out", "timeout":
+		return true
+	}
+	return false
 }
 
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
