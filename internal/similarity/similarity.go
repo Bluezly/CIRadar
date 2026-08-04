@@ -40,7 +40,7 @@ func Find(ctx context.Context, store db.Backend, tenant, analysisID string, limi
 		if score < 0.08 {
 			continue
 		}
-		out = append(out, model.SimilarAnalysis{AnalysisID: x.ID, Repository: x.Repository, Summary: x.Summary, Category: x.Category, Attribution: x.Attribution, Score: score, CreatedAt: x.CreatedAt})
+		out = append(out, model.SimilarAnalysis{AnalysisID: x.ID, Repository: x.Repository, Summary: x.Summary, Category: x.Category, Attribution: x.Attribution, Score: score, Engine: "lexical-hash", CreatedAt: x.CreatedAt})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	if len(out) > limit {
