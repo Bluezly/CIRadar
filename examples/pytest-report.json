@@ -1,0 +1,1 @@
+{"tests":[{"nodeid":"tests/test_api.py::TestPayments::test_create","outcome":"failed","duration":0.42,"call":{"longrepr":"TimeoutError: service did not respond","crash":{"message":"service timeout","path":"tests/test_api.py","lineno":42}}}]}

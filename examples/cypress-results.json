@@ -1,0 +1,1 @@
+{"results":[{"spec":{"relative":"cypress/e2e/payments.cy.ts"},"tests":[{"title":["payments","creates invoice"],"state":"failed","attempts":[{"state":"failed","error":{"message":"element not found","stack":"AssertionError: element not found"},"timings":{"duration":560}}]}]}]}
