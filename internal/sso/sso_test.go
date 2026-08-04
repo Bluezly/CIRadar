@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,9 @@ func TestOIDCAuthorizationCodePKCEFlow(t *testing.T) {
 	if len(cookies) == 0 {
 		t.Fatal("missing flow cookie")
 	}
+	if !strings.HasPrefix(cookies[0].Value, "v1.") || strings.Contains(cookies[0].Value, state) {
+		t.Fatalf("OIDC flow cookie is not encrypted: %q", cookies[0].Value)
+	}
 	flowRequest := httptest.NewRequest(http.MethodGet, "http://ciradar.example/auth/callback", nil)
 	flowRequest.AddCookie(cookies[0])
 	flow, err := m.readFlow(flowRequest)
@@ -125,6 +129,9 @@ func TestOIDCAuthorizationCodePKCEFlow(t *testing.T) {
 	}
 	if session == nil {
 		t.Fatal("missing session cookie")
+	}
+	if !strings.HasPrefix(session.Value, "v1.") || strings.Contains(session.Value, "alice@example.com") || strings.Contains(session.Value, "acme") {
+		t.Fatalf("SSO session cookie is not encrypted: %q", session.Value)
 	}
 	authRequest := httptest.NewRequest(http.MethodGet, "http://ciradar.example/", nil)
 	authRequest.AddCookie(session)
