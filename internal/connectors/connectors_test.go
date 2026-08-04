@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -60,6 +61,38 @@ func TestParseProviderPayloads(t *testing.T) {
 		t.Fatalf("jenkins %#v %v", ev, err)
 	}
 }
+
+func TestParseAdditionalProviderPayloads(t *testing.T) {
+	cases := []struct {
+		provider string
+		body     string
+		repo     string
+		status   string
+	}{
+		{"bitbucket", `{"repository":{"full_name":"acme/api","workspace":{"slug":"acme"}},"pipeline":{"uuid":"{p1}","build_number":7,"state":{"result":{"name":"FAILED"}},"target":{"ref_name":"main","commit":{"hash":"abc"}}},"step":{"uuid":"{s1}","name":"test","state":{"result":{"name":"FAILED"}}}}`, "acme/api", "failure"},
+		{"drone", `{"repository":{"slug":"acme/api"},"build":{"id":9,"number":3,"status":"failure","after":"abc","source":"main"},"stage":{"number":1,"name":"default"},"step":{"number":2,"name":"test","status":"failure"}}`, "acme/api", "failure"},
+		{"semaphore", `{"organization_name":"acme","project_name":"api","pipeline_id":"p1","result":"failed","commit_sha":"abc"}`, "acme/api", "failure"},
+		{"appveyor", `{"eventData":{"accountName":"acme","projectName":"api","buildId":5,"status":"failed","commitId":"abc","jobs":[{"jobId":"j1","name":"test","status":"failed"}]}}`, "acme/api", "failure"},
+		{"cloudbuild", `{"id":"b1","projectId":"acme","status":"FAILURE","substitutions":{"REPO_NAME":"api","COMMIT_SHA":"abc"},"steps":[{"name":"test","status":"FAILURE"}]}`, "api", "failure"},
+	}
+	for _, tc := range cases {
+		ev, err := ParseWebhook(tc.provider, "t", "d", []byte(tc.body))
+		if err != nil || ev.Repository != tc.repo || ev.Conclusion != tc.status {
+			t.Fatalf("%s ev=%#v err=%v", tc.provider, ev, err)
+		}
+	}
+}
+
+func TestBitbucketWebhookSignature(t *testing.T) {
+	body := []byte(`{"pipeline":{"uuid":"p"}}`)
+	mac := hmac.New(sha256.New, []byte("secret"))
+	_, _ = mac.Write(body)
+	h := http.Header{"X-Hub-Signature": []string{"sha256=" + hex.EncodeToString(mac.Sum(nil))}}
+	if !VerifyWebhook("bitbucket", "secret", h, body, time.Now().UTC()) {
+		t.Fatal("bitbucket signature")
+	}
+}
+
 func TestFetchLogs(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -157,5 +190,112 @@ func TestUpsertGitLabMRCommentCreatesThenUpdates(t *testing.T) {
 	}
 	if created != 1 || updated != 1 || !strings.Contains(noteBody, "updated") {
 		t.Fatalf("created=%d updated=%d body=%q", created, updated, noteBody)
+	}
+}
+
+func TestRetryKnownProviders(t *testing.T) {
+	tests := []struct {
+		provider string
+		ev       model.CIEvent
+		co       config.CIConnector
+		method   string
+		path     string
+		query    string
+		auth     string
+		body     string
+	}{
+		{"gitlab", model.CIEvent{ProjectID: "7", JobID: "42"}, config.CIConnector{}, http.MethodPost, "/api/v4/projects/7/jobs/42/retry", "", "gitlab", `{}`},
+		{"circleci", model.CIEvent{Metadata: map[string]string{"workflow_id": "wf1"}}, config.CIConnector{}, http.MethodPost, "/api/v2/workflow/wf1/rerun", "", "circle", `{"from_failed":true}`},
+		{"buildkite", model.CIEvent{Metadata: map[string]string{"organization": "acme", "pipeline_slug": "api", "build_number": "9"}}, config.CIConnector{}, http.MethodPost, "/v2/organizations/acme/pipelines/api/builds/9/rebuild", "", "bearer", `{}`},
+		{"travis", model.CIEvent{Metadata: map[string]string{"build_id": "11"}}, config.CIConnector{}, http.MethodPost, "/build/11/restart", "", "travis", `{}`},
+		{"cloudbuild", model.CIEvent{Metadata: map[string]string{"build_name": "projects/acme/locations/us/builds/b1"}}, config.CIConnector{}, http.MethodPost, "/v1/projects/acme/locations/us/builds/b1:retry", "", "bearer", `{}`},
+		{"azuredevops", model.CIEvent{Metadata: map[string]string{"project_id": "p1", "build_id": "88"}}, config.CIConnector{Organization: "acme"}, http.MethodPatch, "/acme/p1/_apis/build/builds/88", "retry=true&api-version=7.1", "azure", `{}`},
+		{"bitbucket", model.CIEvent{Repository: "acme/api", Branch: "main", Metadata: map[string]string{"workspace": "acme", "repo_slug": "api"}}, config.CIConnector{}, http.MethodPost, "/2.0/repositories/acme/api/pipelines/", "", "bearer", `{"target":{"ref_name":"main","ref_type":"branch","type":"pipeline_ref_target"}}`},
+		{"drone", model.CIEvent{Repository: "acme/api", RunID: 14, Metadata: map[string]string{"build_number": "14"}}, config.CIConnector{}, http.MethodPost, "/api/repos/acme/api/builds/14", "", "bearer", `{}`},
+		{"semaphore", model.CIEvent{Metadata: map[string]string{"workflow_id": "wf-2"}}, config.CIConnector{}, http.MethodPost, "/api/v1alpha/plumber-workflows/wf-2/reschedule", "request_token=", "semaphore", `{}`},
+		{"appveyor", model.CIEvent{RunID: 17}, config.CIConnector{}, http.MethodPut, "/api/builds", "", "bearer", `{"buildId":17,"reRunIncomplete":true}`},
+		{"bitrise", model.CIEvent{Metadata: map[string]string{"app_slug": "app", "pipeline_id": "pipe"}}, config.CIConnector{}, http.MethodPost, "/v0.1/apps/app/pipelines/pipe/rebuild", "", "bitrise", `{}`},
+		{"teamcity", model.CIEvent{PipelineID: "Build_Config", Branch: "main"}, config.CIConnector{}, http.MethodPost, "/app/rest/buildQueue", "", "bearer", `{"branchName":"main","buildType":{"id":"Build_Config"},"comment":{"text":"Safe rerun requested by CI Radar"}}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.provider, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tc.method || r.URL.Path != tc.path {
+					t.Fatalf("method=%s path=%s", r.Method, r.URL.Path)
+				}
+				if tc.query != "" {
+					if tc.provider == "semaphore" {
+						if !strings.HasPrefix(r.URL.RawQuery, tc.query) || len(r.URL.Query().Get("request_token")) < 16 {
+							t.Fatalf("query=%s", r.URL.RawQuery)
+						}
+					} else if r.URL.RawQuery != tc.query {
+						t.Fatalf("query=%s", r.URL.RawQuery)
+					}
+				}
+				switch tc.auth {
+				case "gitlab":
+					if r.Header.Get("PRIVATE-TOKEN") != "tok" {
+						t.Fatal("missing GitLab token")
+					}
+				case "circle":
+					if r.Header.Get("Circle-Token") != "tok" {
+						t.Fatal("missing CircleCI token")
+					}
+				case "travis":
+					if r.Header.Get("Authorization") != "token tok" {
+						t.Fatal("missing Travis token")
+					}
+				case "azure":
+					if r.Header.Get("Authorization") != "Basic OnRvaw==" {
+						t.Fatalf("azure auth=%q", r.Header.Get("Authorization"))
+					}
+				case "semaphore":
+					if r.Header.Get("Authorization") != "Token tok" {
+						t.Fatal("missing Semaphore token")
+					}
+				case "bitrise":
+					if r.Header.Get("Authorization") != "tok" {
+						t.Fatal("missing Bitrise token")
+					}
+				default:
+					if r.Header.Get("Authorization") != "Bearer tok" {
+						t.Fatal("missing bearer token")
+					}
+				}
+				b, _ := io.ReadAll(r.Body)
+				if string(b) != tc.body {
+					t.Fatalf("body=%q", string(b))
+				}
+				w.Header().Set("X-Request-Id", "r1")
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer srv.Close()
+			co := tc.co
+			co.Provider = tc.provider
+			co.BaseURL = srv.URL
+			co.Token = "tok"
+			result, err := Retry(context.Background(), co, tc.ev)
+			if err != nil || result.HTTPStatus != http.StatusAccepted || result.RequestID != "r1" {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestRetryCustomEndpointStaysOnConfiguredBase(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	co := config.CIConnector{Provider: "jenkins", BaseURL: srv.URL, Token: "tok", Username: "ci", RetryURL: srv.URL + "/job/${job_id}/rebuild", RetryBody: `{"run":"${run_id}"}`}
+	_, err := Retry(context.Background(), co, model.CIEvent{JobID: "22", RunID: 9})
+	if err != nil || got != "/job/22/rebuild" {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+	co.RetryURL = "https://attacker.invalid/retry"
+	if _, err := Retry(context.Background(), co, model.CIEvent{}); err == nil {
+		t.Fatal("expected off-base retry endpoint rejection")
 	}
 }
