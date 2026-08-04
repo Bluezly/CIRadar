@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -291,5 +292,155 @@ func TestRootCanDisableTenantButNotLastEnabled(t *testing.T) {
 	rr = doReq(t, s, http.MethodPatch, "/api/v1/tenants/default", "root-secret", model.DefaultTenantID, map[string]any{"enabled": false})
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("disable last=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGitLabWebhookQueuesTenantScopedCIEvent(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.Notifications.Enabled = false
+	cfg.Connectors = []config.CIConnector{{Name: "gitlab", Provider: "gitlab", Enabled: true, TenantID: "alpha", BaseURL: "https://gitlab.example", Token: "api", WebhookSecret: "hook"}}
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTenant(context.Background(), "alpha", "Alpha"); err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{"object_kind":"build","build_id":42,"build_name":"test","build_status":"failed","pipeline_id":9,"project":{"id":7,"path_with_namespace":"acme/api"},"commit":{"sha":"abc"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", bytes.NewReader(body))
+	req.Header.Set("X-Gitlab-Token", "hook")
+	req.Header.Set("X-Gitlab-Webhook-UUID", "gl-1")
+	rr := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	job, err := store.ClaimJob(context.Background(), "test")
+	if err != nil || job == nil || job.Type != "ci.event" || job.TenantID != "alpha" {
+		t.Fatalf("job=%#v err=%v", job, err)
+	}
+}
+
+func TestMCPHTTPIsAuthenticatedAndReadOnly(t *testing.T) {
+	s, store, _ := testServer(t)
+	_, token, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "view", model.RoleViewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+	rr := doReq(t, s, http.MethodPost, "/mcp", "", "", body)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth=%d", rr.Code)
+	}
+	rr = doReq(t, s, http.MethodPost, "/mcp", token, "", body)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "list_active_incidents") {
+		t.Fatalf("mcp=%d %s", rr.Code, rr.Body.String())
+	}
+	write := map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": map[string]any{"name": "retry_job", "arguments": map[string]any{}}}
+	rr = doReq(t, s, http.MethodPost, "/mcp", token, "", write)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "unknown read-only tool") {
+		t.Fatalf("write=%d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestJUnitAutoQuarantineAndManifest(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.Notifications.Enabled = false
+	cfg.ProviderPolling = false
+	cfg.TestIntelligence.Enabled = true
+	cfg.TestIntelligence.AutoQuarantine = true
+	cfg.TestIntelligence.AutoQuarantineMinRuns = 3
+	cfg.TestIntelligence.AutoQuarantineMinScore = 35
+	cfg.TestIntelligence.AutoQuarantineDuration = 48 * time.Hour
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, token, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "operator", model.RoleOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	reports := []string{
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"/></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"><failure message="boom">stack</failure></testcase></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"/></testsuite>`,
+	}
+	for i, xmlBody := range reports {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tests/junit?repository=acme/api&workflow=ci&job=test&run_id="+strconv.Itoa(i+1), strings.NewReader(xmlBody))
+		req.RemoteAddr = "203.0.113.20:1234"
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		s.http.Handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("ingest %d status=%d body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+
+	rr := doReq(t, s, http.MethodGet, "/api/v1/tests/quarantine-manifest", token, "", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("manifest=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"test_keys":[`) || strings.Contains(rr.Body.String(), `"test_keys":[]`) {
+		t.Fatalf("manifest missing active test: %s", rr.Body.String())
+	}
+	items, err := store.ListTestQuarantines(context.Background(), model.DefaultTenantID)
+	if err != nil || len(items) != 1 || !items[0].Active {
+		t.Fatalf("quarantines=%+v err=%v", items, err)
+	}
+}
+
+func TestMCPStreamableHTTPGuards(t *testing.T) {
+	s, store, _ := testServer(t)
+	_, token, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "viewer", model.RoleViewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	get.RemoteAddr = "203.0.113.9:1"
+	w := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, get)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET=%d", w.Code)
+	}
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req.RemoteAddr = "203.0.113.9:1"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Origin", "https://evil.example")
+	w = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("origin=%d %s", w.Code, w.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req.RemoteAddr = "203.0.113.9:1"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("MCP-Protocol-Version", "1900-01-01")
+	w = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("protocol=%d %s", w.Code, w.Body.String())
+	}
+
+	note := []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(note))
+	req.RemoteAddr = "203.0.113.9:1"
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusAccepted || w.Body.Len() != 0 {
+		t.Fatalf("notification=%d body=%q", w.Code, w.Body.String())
 	}
 }
