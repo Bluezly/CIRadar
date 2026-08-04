@@ -559,12 +559,14 @@ func (s *Store) LastSuccessfulEnvironmentForTenant(ctx context.Context, tenantID
 	return nil, nil
 }
 func (s *Store) Correlation(ctx context.Context, fingerprint string, since time.Time) (CorrelationStats, error) {
-	return s.CorrelationForTenant(ctx, model.DefaultTenantID, fingerprint, since, false)
+	return s.CorrelationForTenant(ctx, model.DefaultTenantID, fingerprint, "", "", since, false)
 }
 
-func (s *Store) CorrelationForTenant(ctx context.Context, tenantID, fingerprint string, since time.Time, crossTenant bool) (CorrelationStats, error) {
+func (s *Store) CorrelationForTenant(ctx context.Context, tenantID, fingerprint, repository, organization string, since time.Time, crossTenant bool) (CorrelationStats, error) {
 	_ = ctx
 	tenantID = normalizeTenant(tenantID)
+	repository = strings.TrimSpace(repository)
+	organization = strings.TrimSpace(organization)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	repos := map[string]struct{}{}
@@ -579,14 +581,23 @@ func (s *Store) CorrelationForTenant(ctx context.Context, tenantID, fingerprint 
 			continue
 		}
 		c.Occurrences++
-		repoKey := normalizeTenant(a.TenantID) + "|" + a.Input.Repository
-		orgKey := normalizeTenant(a.TenantID) + "|" + a.Input.Organization
-		if a.Input.Repository != "" {
+		repoKey := normalizeTenant(a.TenantID) + "|" + strings.TrimSpace(a.Input.Repository)
+		orgKey := normalizeTenant(a.TenantID) + "|" + strings.TrimSpace(a.Input.Organization)
+		if strings.TrimSpace(a.Input.Repository) != "" {
 			repos[repoKey] = struct{}{}
 		}
-		if a.Input.Organization != "" {
+		if strings.TrimSpace(a.Input.Organization) != "" {
 			orgs[orgKey] = struct{}{}
 		}
+	}
+	if repository != "" || organization != "" {
+		c.Occurrences++
+	}
+	if repository != "" {
+		repos[tenantID+"|"+repository] = struct{}{}
+	}
+	if organization != "" {
+		orgs[tenantID+"|"+organization] = struct{}{}
 	}
 	c.Repositories = len(repos)
 	c.Organizations = len(orgs)

@@ -225,27 +225,42 @@ func (p *PostgresBackend) ListAnalysesForTenant(ctx context.Context, tenantID st
 	})
 }
 
-func (p *PostgresBackend) CorrelationForTenant(ctx context.Context, tenantID, fingerprint string, since time.Time, crossTenant bool) (CorrelationStats, error) {
+func (p *PostgresBackend) CorrelationForTenant(ctx context.Context, tenantID, fingerprint, repository, organization string, since time.Time, crossTenant bool) (CorrelationStats, error) {
+	tenantID = normalizeTenant(tenantID)
+	repository = strings.TrimSpace(repository)
+	organization = strings.TrimSpace(organization)
 	where := `kind=` + sqlLiteral(pgKindAnalysis) + ` AND fingerprint=` + sqlLiteral(strings.TrimSpace(fingerprint)) + ` AND event_time>=` + sqlTime(since)
 	if !crossTenant {
-		where += ` AND tenant_id=` + sqlLiteral(normalizeTenant(tenantID))
+		where += ` AND tenant_id=` + sqlLiteral(tenantID)
 	}
 	c, err := pgwire.Connect(ctx, p.dsn)
 	if err != nil {
 		return CorrelationStats{}, err
 	}
 	defer c.Close()
-	rows, err := c.Query(ctx, `SELECT count(*)::text,count(DISTINCT NULLIF(repository,''))::text,count(DISTINCT NULLIF(organization,''))::text FROM ciradar_objects WHERE `+where)
+	query := `SELECT count(*)::text,count(DISTINCT CASE WHEN repository<>'' THEN tenant_id||'|'||repository END)::text,count(DISTINCT CASE WHEN organization<>'' THEN tenant_id||'|'||organization END)::text,count(*) FILTER (WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND repository=` + sqlLiteral(repository) + `)::text,count(*) FILTER (WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND organization=` + sqlLiteral(organization) + `)::text FROM ciradar_objects WHERE ` + where
+	rows, err := c.Query(ctx, query)
 	if err != nil {
 		return CorrelationStats{}, err
 	}
-	row, err := requireRow(rows, 3)
+	row, err := requireRow(rows, 5)
 	if err != nil {
 		return CorrelationStats{}, err
 	}
 	occurrences, _ := strconv.Atoi(valueOf(row[0]))
 	repositories, _ := strconv.Atoi(valueOf(row[1]))
 	organizations, _ := strconv.Atoi(valueOf(row[2]))
+	repositorySeen, _ := strconv.Atoi(valueOf(row[3]))
+	organizationSeen, _ := strconv.Atoi(valueOf(row[4]))
+	if repository != "" || organization != "" {
+		occurrences++
+	}
+	if repository != "" && repositorySeen == 0 {
+		repositories++
+	}
+	if organization != "" && organizationSeen == 0 {
+		organizations++
+	}
 	return CorrelationStats{Repositories: repositories, Organizations: organizations, Occurrences: occurrences}, nil
 }
 

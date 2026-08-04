@@ -23,7 +23,7 @@ type Backend interface {
 	RecordAnalysisForTenant(context.Context, string, model.AnalysisInput, model.AnalysisResult, bool, bool) error
 	GetAnalysisForTenant(context.Context, string, string) (*model.AnalysisResult, error)
 	ListAnalysesForTenant(context.Context, string, int) ([]model.AnalysisResult, error)
-	CorrelationForTenant(context.Context, string, string, time.Time, bool) (CorrelationStats, error)
+	CorrelationForTenant(context.Context, string, string, string, string, time.Time, bool) (CorrelationStats, error)
 
 	RecordSuccessfulEnvironmentForTenant(context.Context, string, string, string, string, string, model.Environment, time.Time) error
 	LastSuccessfulEnvironmentForTenant(context.Context, string, string, string, string) (*model.Environment, error)
