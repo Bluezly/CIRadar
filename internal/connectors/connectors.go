@@ -66,7 +66,7 @@ func VerifyWebhook(provider, secret string, h http.Header, body []byte, now time
 		mac := hmac.New(sha256.New, []byte(secret))
 		_, _ = mac.Write(body)
 		return got != "" && hmac.Equal([]byte(got), []byte(hex.EncodeToString(mac.Sum(nil))))
-	case "jenkins":
+	case "jenkins", "azuredevops", "bitrise", "teamcity", "travis", "codebuild":
 		if constant(secret, h.Get("X-CI-Radar-Token")) {
 			return true
 		}
@@ -108,6 +108,16 @@ func ParseWebhook(provider, tenant, delivery string, body []byte) (model.CIEvent
 		return parseCircleCI(tenant, delivery, body)
 	case "jenkins":
 		return parseJenkins(tenant, delivery, body)
+	case "azuredevops":
+		return parseAzureDevOps(tenant, delivery, body)
+	case "bitrise":
+		return parseBitrise(tenant, delivery, body)
+	case "teamcity":
+		return parseTeamCity(tenant, delivery, body)
+	case "travis":
+		return parseTravis(tenant, delivery, body)
+	case "codebuild":
+		return parseCodeBuild(tenant, delivery, body)
 	default:
 		return model.CIEvent{}, fmt.Errorf("unsupported provider %q", provider)
 	}
@@ -274,6 +284,270 @@ func parseJenkins(tenant, delivery string, b []byte) (model.CIEvent, error) {
 	return ev, nil
 }
 
+func parseAzureDevOps(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		EventType string `json:"eventType"`
+		Resource  struct {
+			ID            int64     `json:"id"`
+			BuildNumber   string    `json:"buildNumber"`
+			Status        string    `json:"status"`
+			Result        string    `json:"result"`
+			SourceVersion string    `json:"sourceVersion"`
+			SourceBranch  string    `json:"sourceBranch"`
+			StartTime     time.Time `json:"startTime"`
+			FinishTime    time.Time `json:"finishTime"`
+			Definition    struct {
+				ID   int64  `json:"id"`
+				Name string `json:"name"`
+			} `json:"definition"`
+			Project struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+				URL  string `json:"url"`
+			} `json:"project"`
+			Repository struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+				URL  string `json:"url"`
+			} `json:"repository"`
+			Links struct {
+				Web struct {
+					Href string `json:"href"`
+				} `json:"web"`
+			} `json:"_links"`
+		} `json:"resource"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	if p.Resource.ID == 0 {
+		return model.CIEvent{}, errors.New("Azure DevOps webhook missing build id")
+	}
+	repo := p.Resource.Project.Name + "/" + p.Resource.Repository.Name
+	if p.Resource.Repository.Name == "" {
+		repo = p.Resource.Project.Name + "/" + p.Resource.Definition.Name
+	}
+	dur := int64(0)
+	if !p.Resource.StartTime.IsZero() && !p.Resource.FinishTime.IsZero() {
+		dur = int64(p.Resource.FinishTime.Sub(p.Resource.StartTime).Seconds())
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "azuredevops", DeliveryID: delivery, Repository: strings.Trim(repo, "/"), Organization: p.Resource.Project.Name, Workflow: p.Resource.Definition.Name, Job: p.Resource.Definition.Name, RunID: p.Resource.ID, JobID: strconv.FormatInt(p.Resource.ID, 10), CommitSHA: p.Resource.SourceVersion, Branch: strings.TrimPrefix(p.Resource.SourceBranch, "refs/heads/"), Conclusion: normalizeConclusion(p.Resource.Result), Status: p.Resource.Status, RunURL: p.Resource.Links.Web.Href, ProjectID: p.Resource.Project.ID, PipelineID: strconv.FormatInt(p.Resource.Definition.ID, 10), StartedAt: p.Resource.StartTime, CompletedAt: p.Resource.FinishTime, DurationSeconds: dur, OccurredAt: firstTime(p.Resource.FinishTime, time.Now().UTC()), Metadata: map[string]string{"build_id": strconv.FormatInt(p.Resource.ID, 10), "project": p.Resource.Project.Name, "project_id": p.Resource.Project.ID, "repository_id": p.Resource.Repository.ID}}, nil
+}
+
+func parseBitrise(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		BuildSlug   string `json:"build_slug"`
+		AppSlug     string `json:"app_slug"`
+		BuildStatus int    `json:"build_status"`
+		BuildNumber int64  `json:"build_number"`
+		CommitHash  string `json:"commit_hash"`
+		Branch      string `json:"branch"`
+		BuildURL    string `json:"build_url"`
+		WorkflowID  string `json:"workflow_id"`
+		Repository  struct {
+			Slug string `json:"slug"`
+			URL  string `json:"repository_url"`
+		} `json:"repository"`
+		TriggeredAt time.Time `json:"triggered_at"`
+		FinishedAt  time.Time `json:"finished_at"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	if p.BuildSlug == "" {
+		return model.CIEvent{}, errors.New("Bitrise webhook missing build_slug")
+	}
+	state := "failure"
+	if p.BuildStatus == 1 {
+		state = "success"
+	} else if p.BuildStatus == 0 {
+		state = "running"
+	} else if p.BuildStatus == 2 {
+		state = "cancelled"
+	}
+	repo := firstNonEmpty(p.Repository.Slug, p.AppSlug)
+	dur := int64(0)
+	if !p.TriggeredAt.IsZero() && !p.FinishedAt.IsZero() {
+		dur = int64(p.FinishedAt.Sub(p.TriggeredAt).Seconds())
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "bitrise", DeliveryID: delivery, Repository: repo, Organization: firstPath(repo), Workflow: p.WorkflowID, Job: p.WorkflowID, RunID: p.BuildNumber, JobID: p.BuildSlug, CommitSHA: p.CommitHash, Branch: p.Branch, Conclusion: state, Status: state, RunURL: p.BuildURL, PipelineID: p.BuildSlug, StartedAt: p.TriggeredAt, CompletedAt: p.FinishedAt, DurationSeconds: dur, OccurredAt: firstTime(p.FinishedAt, time.Now().UTC()), Metadata: map[string]string{"app_slug": p.AppSlug, "build_slug": p.BuildSlug}}, nil
+}
+
+func parseTeamCity(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		Build struct {
+			ID          int64  `json:"id"`
+			BuildTypeID string `json:"buildTypeId"`
+			Number      string `json:"number"`
+			Status      string `json:"status"`
+			State       string `json:"state"`
+			BranchName  string `json:"branchName"`
+			WebURL      string `json:"webUrl"`
+			StartDate   string `json:"startDate"`
+			FinishDate  string `json:"finishDate"`
+		} `json:"build"`
+		BuildType struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			ProjectID   string `json:"projectId"`
+			ProjectName string `json:"projectName"`
+		} `json:"buildType"`
+		Project struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"project"`
+		VCSRoot struct {
+			Name string `json:"name"`
+			URL  string `json:"url"`
+		} `json:"vcsRoot"`
+		Commit   string `json:"commit"`
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	if p.Build.ID == 0 {
+		return model.CIEvent{}, errors.New("TeamCity webhook missing build id")
+	}
+	project := firstNonEmpty(p.Project.Name, p.BuildType.ProjectName)
+	workflow := firstNonEmpty(p.BuildType.Name, p.Build.BuildTypeID)
+	repo := strings.Trim(project+"/"+workflow, "/")
+	start := parseTeamCityTime(p.Build.StartDate)
+	finish := parseTeamCityTime(p.Build.FinishDate)
+	dur := int64(0)
+	if !start.IsZero() && !finish.IsZero() {
+		dur = int64(finish.Sub(start).Seconds())
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "teamcity", DeliveryID: delivery, Repository: repo, Organization: project, Workflow: workflow, Job: workflow, RunID: p.Build.ID, JobID: strconv.FormatInt(p.Build.ID, 10), CommitSHA: firstNonEmpty(p.Commit, p.Revision), Branch: p.Build.BranchName, Conclusion: normalizeConclusion(p.Build.Status), Status: p.Build.State, RunURL: p.Build.WebURL, ProjectID: firstNonEmpty(p.Project.ID, p.BuildType.ProjectID), PipelineID: firstNonEmpty(p.BuildType.ID, p.Build.BuildTypeID), StartedAt: start, CompletedAt: finish, DurationSeconds: dur, OccurredAt: firstTime(finish, time.Now().UTC()), Metadata: map[string]string{"build_id": strconv.FormatInt(p.Build.ID, 10)}}, nil
+}
+
+func parseTravis(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		ID         int64     `json:"id"`
+		Number     string    `json:"number"`
+		State      string    `json:"state"`
+		StartedAt  time.Time `json:"started_at"`
+		FinishedAt time.Time `json:"finished_at"`
+		BuildURL   string    `json:"build_url"`
+		Commit     struct {
+			SHA    string `json:"sha"`
+			Branch string `json:"branch"`
+		} `json:"commit"`
+		Branch struct {
+			Name string `json:"name"`
+		} `json:"branch"`
+		Repository struct {
+			Slug  string `json:"slug"`
+			Name  string `json:"name"`
+			Owner struct {
+				Login string `json:"login"`
+			} `json:"owner"`
+		} `json:"repository"`
+		Job struct {
+			ID     int64  `json:"id"`
+			Number string `json:"number"`
+			State  string `json:"state"`
+			Name   string `json:"name"`
+			WebURL string `json:"web_url"`
+		} `json:"job"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	if p.ID == 0 && p.Job.ID == 0 {
+		return model.CIEvent{}, errors.New("Travis webhook missing build id")
+	}
+	state := firstNonEmpty(p.Job.State, p.State)
+	repo := p.Repository.Slug
+	if repo == "" {
+		repo = strings.Trim(p.Repository.Owner.Login+"/"+p.Repository.Name, "/")
+	}
+	dur := int64(0)
+	if !p.StartedAt.IsZero() && !p.FinishedAt.IsZero() {
+		dur = int64(p.FinishedAt.Sub(p.StartedAt).Seconds())
+	}
+	jobID := p.Job.ID
+	if jobID == 0 {
+		jobID = p.ID
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "travis", DeliveryID: delivery, Repository: repo, Organization: firstPath(repo), Workflow: "Travis CI", Job: firstNonEmpty(p.Job.Name, p.Job.Number), RunID: p.ID, JobID: strconv.FormatInt(jobID, 10), CommitSHA: p.Commit.SHA, Branch: firstNonEmpty(p.Branch.Name, p.Commit.Branch), Conclusion: normalizeConclusion(state), Status: state, RunURL: firstNonEmpty(p.Job.WebURL, p.BuildURL), PipelineID: strconv.FormatInt(p.ID, 10), StartedAt: p.StartedAt, CompletedAt: p.FinishedAt, DurationSeconds: dur, OccurredAt: firstTime(p.FinishedAt, time.Now().UTC()), Metadata: map[string]string{"job_id": strconv.FormatInt(jobID, 10)}}, nil
+}
+
+func parseCodeBuild(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		ID         string    `json:"id"`
+		DetailType string    `json:"detail-type"`
+		Time       time.Time `json:"time"`
+		Region     string    `json:"region"`
+		Account    string    `json:"account"`
+		Detail     struct {
+			BuildStatus         string `json:"build-status"`
+			ProjectName         string `json:"project-name"`
+			BuildID             string `json:"build-id"`
+			CurrentPhase        string `json:"current-phase"`
+			CurrentPhaseContext string `json:"current-phase-context"`
+			Version             string `json:"version"`
+			Additional          struct {
+				Source struct {
+					Location string `json:"location"`
+					Version  string `json:"version"`
+				} `json:"source"`
+				Logs struct {
+					DeepLink string `json:"deep-link"`
+				} `json:"logs"`
+				Phases []struct {
+					PhaseType    string    `json:"phase-type"`
+					PhaseStatus  string    `json:"phase-status"`
+					PhaseContext []string  `json:"phase-context"`
+					StartTime    time.Time `json:"start-time"`
+					EndTime      time.Time `json:"end-time"`
+				} `json:"phases"`
+			} `json:"additional-information"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	if p.Detail.BuildID == "" {
+		return model.CIEvent{}, errors.New("CodeBuild event missing build-id")
+	}
+	var log strings.Builder
+	var start, finish time.Time
+	for _, ph := range p.Detail.Additional.Phases {
+		if start.IsZero() || (!ph.StartTime.IsZero() && ph.StartTime.Before(start)) {
+			start = ph.StartTime
+		}
+		if ph.EndTime.After(finish) {
+			finish = ph.EndTime
+		}
+		for _, line := range ph.PhaseContext {
+			fmt.Fprintf(&log, "%s %s: %s\n", ph.PhaseType, ph.PhaseStatus, line)
+		}
+	}
+	dur := int64(0)
+	if !start.IsZero() && !finish.IsZero() {
+		dur = int64(finish.Sub(start).Seconds())
+	}
+	repo := firstNonEmpty(p.Detail.Additional.Source.Location, p.Detail.ProjectName)
+	return model.CIEvent{TenantID: tenant, Provider: "codebuild", DeliveryID: firstNonEmpty(delivery, p.ID), Repository: repo, Organization: p.Account, Workflow: p.Detail.ProjectName, Job: p.Detail.CurrentPhase, JobID: p.Detail.BuildID, CommitSHA: firstNonEmpty(p.Detail.Version, p.Detail.Additional.Source.Version), Conclusion: normalizeConclusion(p.Detail.BuildStatus), Status: p.Detail.BuildStatus, RunURL: p.Detail.Additional.Logs.DeepLink, StartedAt: start, CompletedAt: finish, DurationSeconds: dur, RunnerClass: "aws-codebuild", RunnerLabels: []string{p.Region}, InlineLog: log.String(), OccurredAt: firstTime(p.Time, time.Now().UTC()), Metadata: map[string]string{"build_id": p.Detail.BuildID, "region": p.Region, "account": p.Account}}, nil
+}
+
+func parseTeamCityTime(v string) time.Time {
+	for _, f := range []string{"20060102T150405-0700", time.RFC3339, time.RFC3339Nano} {
+		if t, err := time.Parse(f, v); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func firstTime(a, b time.Time) time.Time {
+	if !a.IsZero() {
+		return a
+	}
+	return b
+}
+
 func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max int64) (string, error) {
 	if ev.InlineLog != "" {
 		if int64(len(ev.InlineLog)) > max {
@@ -302,6 +576,87 @@ func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max 
 		return string(raw), nil
 	case "circleci":
 		return fetchCircleCILog(ctx, client, co, ev, max)
+	case "azuredevops":
+		project := firstNonEmpty(co.Project, ev.Metadata["project"])
+		buildID := firstNonEmpty(ev.Metadata["build_id"], ev.JobID)
+		endpoint := strings.TrimRight(co.BaseURL, "/") + "/" + url.PathEscape(project) + "/_apis/build/builds/" + url.PathEscape(buildID) + "/logs?api-version=7.1"
+		headers := connectorHeaders(co)
+		if co.Token != "" {
+			headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(":"+co.Token))
+		}
+		raw, err := fetchBytes(ctx, client, endpoint, 4<<20, headers)
+		if err != nil {
+			return "", err
+		}
+		var list struct {
+			Value []struct {
+				ID int64 `json:"id"`
+			} `json:"value"`
+		}
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return "", err
+		}
+		var out strings.Builder
+		for _, item := range list.Value {
+			text, e := fetchText(ctx, client, strings.TrimSuffix(endpoint, "?api-version=7.1")+"/"+strconv.FormatInt(item.ID, 10)+"?api-version=7.1", max-int64(out.Len()), headers)
+			if e == nil {
+				out.WriteString(text)
+				out.WriteByte('\n')
+			}
+			if int64(out.Len()) >= max {
+				break
+			}
+		}
+		if out.Len() == 0 {
+			return "", errors.New("Azure DevOps returned no build logs")
+		}
+		return truncateText(out.String(), max), nil
+	case "bitrise":
+		endpoint := strings.TrimRight(co.BaseURL, "/") + "/v0.1/apps/" + url.PathEscape(ev.Metadata["app_slug"]) + "/builds/" + url.PathEscape(ev.Metadata["build_slug"]) + "/log"
+		headers := connectorHeaders(co)
+		if co.Token != "" {
+			headers["Authorization"] = "token " + co.Token
+		}
+		raw, err := fetchBytes(ctx, client, endpoint, max, headers)
+		if err != nil {
+			return "", err
+		}
+		var obj struct {
+			LogChunks []struct {
+				Chunk string `json:"chunk"`
+			} `json:"log_chunks"`
+			Log string `json:"log"`
+		}
+		if json.Unmarshal(raw, &obj) == nil {
+			if obj.Log != "" {
+				return truncateText(obj.Log, max), nil
+			}
+			var out strings.Builder
+			for _, c := range obj.LogChunks {
+				out.WriteString(c.Chunk)
+			}
+			if out.Len() > 0 {
+				return truncateText(out.String(), max), nil
+			}
+		}
+		return string(raw), nil
+	case "teamcity":
+		endpoint := strings.TrimRight(co.BaseURL, "/") + "/app/rest/builds/id:" + url.PathEscape(ev.JobID) + "/log"
+		headers := connectorHeaders(co)
+		if co.Token != "" {
+			headers["Authorization"] = "Bearer " + co.Token
+		}
+		return fetchText(ctx, client, endpoint, max, headers)
+	case "travis":
+		endpoint := strings.TrimRight(co.BaseURL, "/") + "/job/" + url.PathEscape(ev.Metadata["job_id"]) + "/log.txt"
+		headers := connectorHeaders(co)
+		headers["Travis-API-Version"] = "3"
+		if co.Token != "" {
+			headers["Authorization"] = "token " + co.Token
+		}
+		return fetchText(ctx, client, endpoint, max, headers)
+	case "codebuild":
+		return "", errors.New("CodeBuild event did not include phase context; configure EventBridge input transformation or a generic log webhook")
 	case "jenkins":
 		raw := ev.Metadata["build_url"]
 		if raw == "" {
@@ -320,6 +675,19 @@ func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max 
 	default:
 		return "", fmt.Errorf("unsupported connector %q", co.Provider)
 	}
+}
+func connectorHeaders(co config.CIConnector) map[string]string {
+	h := map[string]string{}
+	for k, v := range co.Headers {
+		h[k] = v
+	}
+	return h
+}
+func truncateText(v string, max int64) string {
+	if max > 0 && int64(len(v)) > max {
+		return v[:max]
+	}
+	return v
 }
 func fetchCircleCILog(ctx context.Context, c *http.Client, co config.CIConnector, ev model.CIEvent, max int64) (string, error) {
 	slug := ev.Metadata["project_slug"]
@@ -447,8 +815,6 @@ func stringParam(m map[string]any, k string) string {
 	return ""
 }
 
-// UpsertGitLabMRComment creates or updates one sticky CI Radar note on a GitLab merge request.
-// It deliberately uses a marker so repeated jobs do not spam the discussion.
 func UpsertGitLabMRComment(ctx context.Context, co config.CIConnector, ev model.CIEvent, marker, body string, update bool) error {
 	if co.Provider != "gitlab" || ev.ProjectID == "" || ev.MergeRequestIID < 1 {
 		return nil
