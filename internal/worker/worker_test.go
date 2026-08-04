@@ -381,7 +381,7 @@ func TestApprovalGatedRepairCreatesDraftPR(t *testing.T) {
 	if _, err := store.CreateTenant(context.Background(), "alpha", "Alpha"); err != nil {
 		t.Fatal(err)
 	}
-	analysis := model.AnalysisResult{ID: "analysis-repair", TenantID: "alpha", Attribution: model.AttributionCode, Score: 92, Summary: "retry count is too low"}
+	analysis := model.AnalysisResult{ID: "analysis-repair", TenantID: "alpha", Attribution: model.AttributionCode, Score: -92, ExternalityScore: -92, EvidenceStrength: 92, CodeEvidenceScore: 92, Summary: "retry count is too low"}
 	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", InstallationID: 77, CommitSHA: "abc", BaseBranch: "feature"}
 	if err := store.PutObject(context.Background(), "alpha", "analysis_source", analysis.ID, source); err != nil {
 		t.Fatal(err)
@@ -400,5 +400,28 @@ func TestApprovalGatedRepairCreatesDraftPR(t *testing.T) {
 	found, err := store.GetObject(context.Background(), "alpha", "repair_result", analysis.ID, &result)
 	if err != nil || !found || result.Status != "draft_pr_created" || result.PullRequestNumber != 13 {
 		t.Fatalf("result=%#v found=%v err=%v", result, found, err)
+	}
+}
+
+func TestSignedScoreDoesNotBlockCodeAutomation(t *testing.T) {
+	r := model.AnalysisResult{Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -62, ExternalityScore: -62, EvidenceStrength: 62, CodeEvidenceScore: 62}
+	llmCfg := config.LLMConfig{AutoEnhance: true, MinimumScore: 60}
+	if !autoEnhanceEligible(llmCfg, r) {
+		t.Fatal("code diagnosis should be eligible for automatic LLM enhancement")
+	}
+	repairCfg := config.RepairConfig{Enabled: true, AutoDraftPR: true, MinimumScore: 60}
+	if !automaticRepairEligible(repairCfg, r) {
+		t.Fatal("code diagnosis should be eligible for automatic repair")
+	}
+	commentCfg := config.PRCommentConfig{Enabled: true, Mode: "external_or_strong", MinimumScore: 60}
+	if !prCommentEligible(commentCfg, r) {
+		t.Fatal("strong code diagnosis should be eligible for a PR comment")
+	}
+}
+
+func TestExternalityThresholdStillProtectsAutomaticRetry(t *testing.T) {
+	r := model.AnalysisResult{Attribution: model.AttributionCode, Score: -100, ExternalityScore: -100, EvidenceStrength: 100, CodeEvidenceScore: 100}
+	if r.Score >= 85 {
+		t.Fatal("code evidence must not satisfy the positive external retry threshold")
 	}
 }
