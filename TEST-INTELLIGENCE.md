@@ -50,6 +50,8 @@ Select tests:
 ciradar tests select --repo acme/app --changed src/payments/card.ts,src/ledger/write.ts
 ```
 
+Coverage identities may use the test hash, test name, `suite::name`, `class::name`, or readable paths such as `payments/PaymentServiceTest/retries_transient_gateway_error`. Empty selections include diagnostics showing whether history, graph, coverage identity matching, or the score threshold prevented selection.
+
 The impact graph is a static import graph, not a whole-program dynamic call graph. Coverage data is the strongest available signal. Reflection, runtime code generation, framework routing, and native calls may require explicit coverage mappings or always-run suites.
 
 ## Flake classification
@@ -58,21 +60,17 @@ CI Radar can classify likely causes such as timing, selector, network, environme
 
 ## Quarantine and gate
 
-Quarantine requires an owner, reason, and expiry. The CI gate ignores only active quarantines and fails on other failing tests:
+Quarantine requires an owner, reason, and expiry. It accepts either the stable hash or a readable identity:
+
+```bash
+ciradar tests quarantine --repo acme/app --test payments/PaymentServiceTest/retries_transient_gateway_error --owner payments --reason "intermittent gateway fixture" --duration 72h
+ciradar tests unquarantine --repo acme/app --test payments/PaymentServiceTest/retries_transient_gateway_error
+```
+
+`ciradar tests list --repo acme/app` includes `display_name` and accepted aliases. The CI gate ignores only active quarantines and fails on other failing tests:
 
 ```bash
 ciradar tests gate --repo acme/app --format junit results.xml
 ```
 
 Automatic quarantine is optional and disabled by default.
-
-## Human-readable quarantine selectors
-
-`tests list` returns `display_name` and `aliases`. Quarantine and unquarantine accept either the stable hash through `--key` or a readable identity through `--test`:
-
-```bash
-ciradar tests quarantine --repo acme/api --test payments/PaymentServiceTest/retries_transient_gateway_error --owner payments --reason "known intermittent gateway fixture"
-ciradar tests unquarantine --repo acme/api --test payments/PaymentServiceTest/retries_transient_gateway_error
-```
-
-When no tests are selected, the response includes diagnostics such as missing test history, missing impact graph, or coverage identities that did not match ingested tests.

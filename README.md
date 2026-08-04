@@ -4,7 +4,9 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-## What RC.5 includes
+Current release notes: `RELEASE-NOTES-OSS-RC6.md`.
+
+## What RC.6 includes
 
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, and sticky GitLab Merge Request comments
@@ -20,22 +22,19 @@ License: AGPL-3.0-or-later.
 - safe automatic rerun for external failures, disabled by default
 - repair plan and confirmation-gated local patch application, plus optional GitHub draft repair Pull Requests
 - Windows, Linux, and macOS builds for amd64 and arm64
-- field-test fixes: stable local analysis scores by default, opt-in `--correlate`, readable test quarantine selectors, coverage identity aliases, selection diagnostics, built-in CLI samples, and standard Go test failure classification
 
 ## Quick start
 
 ```bash
 ciradar init
-ciradar analyze --sample npm-econnreset
-ciradar analyze --sample go-test-failure
+ciradar demo npm-econnreset
+ciradar demo go-test-failure
 ciradar serve
 ```
 
-Open `http://127.0.0.1:8787/` and exchange the generated root token through the secure login field. `ciradar.json` contains generated administrative and cryptographic secrets, is created with mode `0600` on Unix, and must not be committed or shared.
+`demo` is built into the binary, so the quick start does not depend on files from the source archive. `ciradar init` creates a configuration containing bootstrap secrets with owner-only permissions on POSIX systems. Restrict the file ACL on Windows and move production secrets to environment variables or a secret manager.
 
-## Local analysis behavior
-
-Local CLI analyses are deterministic by default and do not change score because the same file was analyzed earlier. Add `--correlate` only when you intentionally want stored cross-run correlation included.
+Open `http://127.0.0.1:8787/` and exchange the generated root token through the secure login field.
 
 ## PostgreSQL
 
@@ -71,7 +70,11 @@ Select impacted tests:
 ciradar tests select --repo acme/api --changed src/payments.go,src/ledger.go
 ```
 
-The selector reports its strategy, confidence, reasons, and impact path. Coverage matches outrank import-graph paths; history and flake signals are secondary. The built-in source index currently parses Go, JavaScript, TypeScript, and Python. Coverage maps work for any language.
+A repeated local `analyze` command is score-stable by default. Add `--correlate` only when you explicitly want stored cross-run correlation to affect the score.
+
+The signed `externality_score` is directional: negative means code evidence and positive means external evidence. Automation that should work for either direction uses `evidence_strength`; automatic repair uses `code_evidence_score`. A negative score is not low confidence.
+
+The selector reports its strategy, confidence, reasons, impact path, candidates evaluated, graph availability, coverage identity count, and diagnostics when no test is selected. Coverage matches outrank import-graph paths; history and flake signals are secondary. The built-in source index currently parses Go, JavaScript, TypeScript, and Python. Coverage maps work for any language.
 
 ## Similarity modes
 

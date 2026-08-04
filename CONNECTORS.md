@@ -55,7 +55,7 @@ Keep connector tokens in environment references or encrypted secret values. Assi
 Automatic rerun is disabled by default. It can run only when:
 
 - deterministic attribution is `EXTERNAL`
-- the score meets `automatic_retry_min_score`
+- the positive externality score meets `automatic_retry_min_score`
 - the category is on the safe-rerun allowlist
 - the run has not already been retried by CI Radar
 - no provider-wide incident suppresses individual reruns
