@@ -138,25 +138,35 @@ func (s *Store) AuthenticateAPIKey(ctx context.Context, token string) (*model.Pr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
+	matchedID := ""
+	matched := apiKeyRecord{}
+	matchCount := 0
 	for id, rec := range s.state.APIKeys {
+		active := 1
 		if !rec.Key.RevokedAt.IsZero() {
-			continue
+			active = 0
 		}
-		if subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(h)) != 1 {
-			continue
+		equal := subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(h))
+		selected := active & equal
+		matchCount |= selected
+		if selected == 1 {
+			matchedID = id
+			matched = rec
 		}
-		t, ok := s.state.Tenants[rec.Key.TenantID]
-		if !ok || !t.Enabled {
-			return nil, nil
-		}
-		if rec.Key.LastUsedAt.IsZero() || now.Sub(rec.Key.LastUsedAt) >= 5*time.Minute {
-			rec.Key.LastUsedAt = now
-			s.state.APIKeys[id] = rec
-			_ = s.persistLocked()
-		}
-		return &model.Principal{TenantID: rec.Key.TenantID, Name: rec.Key.Name, Role: rec.Key.Role, APIKeyID: id}, nil
 	}
-	return nil, nil
+	if matchCount != 1 {
+		return nil, nil
+	}
+	t, ok := s.state.Tenants[matched.Key.TenantID]
+	if !ok || !t.Enabled {
+		return nil, nil
+	}
+	if matched.Key.LastUsedAt.IsZero() || now.Sub(matched.Key.LastUsedAt) >= 5*time.Minute {
+		matched.Key.LastUsedAt = now
+		s.state.APIKeys[matchedID] = matched
+		_ = s.persistLocked()
+	}
+	return &model.Principal{TenantID: matched.Key.TenantID, Name: matched.Key.Name, Role: matched.Key.Role, APIKeyID: matchedID}, nil
 }
 
 func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]model.APIKey, error) {
