@@ -433,6 +433,36 @@ func (s *Store) Dashboard(ctx context.Context, tenantID string, since time.Time)
 			d.NotificationFailures++
 		}
 	}
+	for _, f := range s.state.DiagnosisFeedback {
+		if f.TenantID != tenantID {
+			continue
+		}
+		d.DiagnosisFeedback.Total++
+		switch f.Verdict {
+		case "correct":
+			d.DiagnosisFeedback.Correct++
+		case "partial":
+			d.DiagnosisFeedback.Partial++
+		case "incorrect":
+			d.DiagnosisFeedback.Incorrect++
+		}
+	}
+	if d.DiagnosisFeedback.Total > 0 {
+		d.DiagnosisFeedback.PrecisionPercent = (float64(d.DiagnosisFeedback.Correct) + 0.5*float64(d.DiagnosisFeedback.Partial)) * 100 / float64(d.DiagnosisFeedback.Total)
+	}
+	now := time.Now().UTC()
+	for _, st := range s.state.TestCaseStats {
+		if st.TenantID != tenantID {
+			continue
+		}
+		d.TestCasesTracked++
+		if st.Classification == "flaky" {
+			d.FlakyTests++
+		}
+		if q, ok := s.state.TestQuarantines[quarantineKey(tenantID, st.TestKey)]; ok && q.Active && q.ExpiresAt.After(now) {
+			d.QuarantinedTests++
+		}
+	}
 	sort.Slice(d.RecentIncidents, func(i, j int) bool { return d.RecentIncidents[i].LastSeenAt.After(d.RecentIncidents[j].LastSeenAt) })
 	if len(d.RecentIncidents) > 10 {
 		d.RecentIncidents = d.RecentIncidents[:10]

@@ -44,6 +44,11 @@ type state struct {
 	AuditOrder             []string                              `json:"audit_order"`
 	InstallationTenants    map[string]string                     `json:"installation_tenants"`
 	RepositoryProfiles     map[string]model.RepositoryProfile    `json:"repository_profiles"`
+	DiagnosisFeedback      map[string]model.DiagnosisFeedback    `json:"diagnosis_feedback"`
+	TestObservations       map[string]model.TestObservation      `json:"test_observations"`
+	TestObservationOrder   []string                              `json:"test_observation_order"`
+	TestCaseStats          map[string]model.TestCaseStats        `json:"test_case_stats"`
+	TestQuarantines        map[string]model.TestQuarantine       `json:"test_quarantines"`
 }
 
 type apiKeyRecord struct {
@@ -137,7 +142,7 @@ func Open(path string) (*Store, error) {
 
 func newState() state {
 	now := time.Now().UTC()
-	return state{Version: 3, NextJobID: 1, Deliveries: map[string]deliveryRecord{}, Analyses: map[string]analysisRecord{}, Incidents: map[string]model.Incident{}, ProviderStatuses: map[string]model.ProviderStatus{}, NotificationDeliveries: map[string]model.NotificationDelivery{}, Tenants: map[string]model.Tenant{model.DefaultTenantID: {ID: model.DefaultTenantID, Name: "Default", Enabled: true, CreatedAt: now, UpdatedAt: now}}, APIKeys: map[string]apiKeyRecord{}, AuditEvents: map[string]model.AuditEvent{}, InstallationTenants: map[string]string{}, RepositoryProfiles: map[string]model.RepositoryProfile{}}
+	return state{Version: 3, NextJobID: 1, Deliveries: map[string]deliveryRecord{}, Analyses: map[string]analysisRecord{}, Incidents: map[string]model.Incident{}, ProviderStatuses: map[string]model.ProviderStatus{}, NotificationDeliveries: map[string]model.NotificationDelivery{}, Tenants: map[string]model.Tenant{model.DefaultTenantID: {ID: model.DefaultTenantID, Name: "Default", Enabled: true, CreatedAt: now, UpdatedAt: now}}, APIKeys: map[string]apiKeyRecord{}, AuditEvents: map[string]model.AuditEvent{}, InstallationTenants: map[string]string{}, RepositoryProfiles: map[string]model.RepositoryProfile{}, DiagnosisFeedback: map[string]model.DiagnosisFeedback{}, TestObservations: map[string]model.TestObservation{}, TestCaseStats: map[string]model.TestCaseStats{}, TestQuarantines: map[string]model.TestQuarantine{}}
 }
 func (s *Store) normalize() {
 	if s.state.Version < 3 {
@@ -179,6 +184,18 @@ func (s *Store) normalize() {
 	}
 	if s.state.RepositoryProfiles == nil {
 		s.state.RepositoryProfiles = map[string]model.RepositoryProfile{}
+	}
+	if s.state.DiagnosisFeedback == nil {
+		s.state.DiagnosisFeedback = map[string]model.DiagnosisFeedback{}
+	}
+	if s.state.TestObservations == nil {
+		s.state.TestObservations = map[string]model.TestObservation{}
+	}
+	if s.state.TestCaseStats == nil {
+		s.state.TestCaseStats = map[string]model.TestCaseStats{}
+	}
+	if s.state.TestQuarantines == nil {
+		s.state.TestQuarantines = map[string]model.TestQuarantine{}
 	}
 	for id, rec := range s.state.Analyses {
 		t := normalizeTenant(rec.TenantID)
@@ -484,6 +501,16 @@ func (s *Store) RecordAnalysisForTenant(ctx context.Context, tenantID string, in
 	}
 	in.TenantID = tenantID
 	r.TenantID = tenantID
+	r.Repository = in.Repository
+	r.Organization = in.Organization
+	r.Workflow = in.Workflow
+	r.Job = in.Job
+	r.RunID = in.RunID
+	r.CommitSHA = in.CommitSHA
+	r.SourceProvider = in.SourceProvider
+	r.SourceRunURL = in.SourceRunURL
+	r.PullRequestNumber = in.PullRequestNumber
+	r.MergeRequestNumber = in.MergeRequestNumber
 	if !storeExcerpt {
 		r.RedactedExcerpt = ""
 	}

@@ -12,6 +12,8 @@ import (
 // implementation. A PostgreSQL backend can implement this contract without
 // changing the analysis or delivery layers.
 type Backend interface {
+	Close() error
+	Migrate(context.Context) error
 	ClaimJob(context.Context, string) (*Job, error)
 	CompleteJob(context.Context, int64) error
 	FailJob(context.Context, int64, int, string) error
@@ -67,6 +69,14 @@ type Backend interface {
 	Stats(context.Context) (Stats, error)
 	StatsForTenant(context.Context, string) (Stats, error)
 	Dashboard(context.Context, string, time.Time) (model.DashboardSummary, error)
+	UpsertDiagnosisFeedback(context.Context, model.DiagnosisFeedback) (model.DiagnosisFeedback, error)
+	ListDiagnosisFeedback(context.Context, string, int) ([]model.DiagnosisFeedback, error)
+	FeedbackMetrics(context.Context, string) (model.FeedbackMetrics, error)
+	RecordTestObservations(context.Context, string, []model.TestObservation) ([]model.TestCaseStats, error)
+	ListTestCaseStats(context.Context, string, string, string, int) ([]model.TestCaseStats, error)
+	SetTestQuarantine(context.Context, model.TestQuarantine) (model.TestQuarantine, error)
+	RemoveTestQuarantine(context.Context, string, string) error
+	ListTestQuarantines(context.Context, string) ([]model.TestQuarantine, error)
 	Cleanup(context.Context, int) error
 }
 
