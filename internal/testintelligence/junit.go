@@ -121,7 +121,7 @@ func toObservation(m Metadata, suite string, t testCaseXML) model.TestObservatio
 	}
 	secs, _ := strconv.ParseFloat(strings.TrimSpace(t.Time), 64)
 	name, params := splitParameters(t.Name)
-	return model.TestObservation{TenantID: m.TenantID, Repository: m.Repository, Workflow: m.Workflow, Job: m.Job, RunID: m.RunID, CommitSHA: m.CommitSHA, Branch: m.Branch, Framework: m.Framework, Suite: suite, ClassName: t.ClassName, Name: name, Parameters: params, Status: status, DurationMS: int64(secs * 1000), Message: truncate(message, 1000), Details: truncate(strings.TrimSpace(details), 8000), Environment: m.Environment, OccurredAt: m.OccurredAt}
+	return model.TestObservation{TenantID: m.TenantID, Repository: m.Repository, Workflow: m.Workflow, Job: m.Job, RunID: m.RunID, CommitSHA: m.CommitSHA, Branch: m.Branch, Framework: m.Framework, Suite: suite, ClassName: t.ClassName, File: t.File, Name: name, Parameters: params, Status: status, DurationMS: int64(secs * 1000), Message: truncate(message, 1000), Details: truncate(strings.TrimSpace(details), 8000), Environment: m.Environment, OccurredAt: m.OccurredAt}
 }
 func splitParameters(v string) (string, string) {
 	v = strings.TrimSpace(v)
