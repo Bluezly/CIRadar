@@ -3,6 +3,8 @@ package sso
 import (
 	"context"
 	"crypto"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
@@ -241,8 +243,11 @@ func (m *Manager) writeFlow(w http.ResponseWriter, flow flowState) error {
 	if err != nil {
 		return err
 	}
-	encoded := base64.RawURLEncoding.EncodeToString(b)
-	http.SetCookie(w, &http.Cookie{Name: m.cfg.CookieName + "_oidc", Value: encoded + "." + sign(m.cfg.SessionSecret, encoded), Path: "/auth", MaxAge: 600, HttpOnly: true, Secure: m.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
+	sealed, err := sealCookie(m.cfg.SessionSecret, "oidc-flow", b)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{Name: m.cfg.CookieName + "_oidc", Value: sealed, Path: "/auth", MaxAge: 600, HttpOnly: true, Secure: m.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
 	return nil
 }
 
@@ -251,16 +256,12 @@ func (m *Manager) readFlow(r *http.Request) (flowState, error) {
 	if err != nil {
 		return flowState{}, err
 	}
-	parts := strings.Split(cookie.Value, ".")
-	if len(parts) != 2 || subtle.ConstantTimeCompare([]byte(parts[1]), []byte(sign(m.cfg.SessionSecret, parts[0]))) != 1 {
+	b, err := openCookie(m.cfg.SessionSecret, "oidc-flow", cookie.Value)
+	if err != nil {
 		return flowState{}, errors.New("invalid OIDC state")
 	}
-	b, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return flowState{}, err
-	}
 	var flow flowState
-	if json.Unmarshal(b, &flow) != nil || flow.State == "" || flow.Verifier == "" || flow.Nonce == "" {
+	if json.Unmarshal(b, &flow) != nil || flow.State == "" || flow.Verifier == "" || flow.Nonce == "" || time.Now().After(flow.Expires) {
 		return flowState{}, errors.New("invalid OIDC state")
 	}
 	return flow, nil
@@ -455,20 +456,18 @@ func (m *Manager) writeSession(w http.ResponseWriter, identity model.SSOIdentity
 	if err != nil {
 		return err
 	}
-	encoded := base64.RawURLEncoding.EncodeToString(b)
-	sig := sign(m.cfg.SessionSecret, encoded)
-	http.SetCookie(w, &http.Cookie{Name: m.cfg.CookieName, Value: encoded + "." + sig, Path: "/", MaxAge: int(duration.Seconds()), HttpOnly: true, Secure: m.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
+	sealed, err := sealCookie(m.cfg.SessionSecret, "sso-session", b)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{Name: m.cfg.CookieName, Value: sealed, Path: "/", MaxAge: int(duration.Seconds()), HttpOnly: true, Secure: m.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
 	return nil
 }
 
 func (m *Manager) readSession(raw string) (model.SSOIdentity, error) {
-	parts := strings.Split(raw, ".")
-	if len(parts) != 2 || subtle.ConstantTimeCompare([]byte(parts[1]), []byte(sign(m.cfg.SessionSecret, parts[0]))) != 1 {
-		return model.SSOIdentity{}, errors.New("invalid session")
-	}
-	b, err := base64.RawURLEncoding.DecodeString(parts[0])
+	b, err := openCookie(m.cfg.SessionSecret, "sso-session", raw)
 	if err != nil {
-		return model.SSOIdentity{}, err
+		return model.SSOIdentity{}, errors.New("invalid session")
 	}
 	var payload struct {
 		Identity model.SSOIdentity `json:"identity"`
@@ -517,6 +516,47 @@ func parseJWK(j map[string]any) (crypto.PublicKey, error) {
 	default:
 		return nil, errors.New("unsupported JWK type")
 	}
+}
+
+func sealCookie(secret, purpose string, plain []byte) (string, error) {
+	key := sha256.Sum256([]byte(secret))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+	g, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, g.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	sealed := g.Seal(nil, nonce, plain, []byte("ci-radar:"+purpose))
+	return "v1." + base64.RawURLEncoding.EncodeToString(append(nonce, sealed...)), nil
+}
+
+func openCookie(secret, purpose, value string) ([]byte, error) {
+	if !strings.HasPrefix(value, "v1.") {
+		return nil, errors.New("unsupported cookie format")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(value, "v1."))
+	if err != nil {
+		return nil, err
+	}
+	key := sha256.Sum256([]byte(secret))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) < g.NonceSize() {
+		return nil, errors.New("truncated cookie")
+	}
+	return g.Open(nil, raw[:g.NonceSize()], raw[g.NonceSize():], []byte("ci-radar:"+purpose))
 }
 
 func sign(secret, value string) string {
