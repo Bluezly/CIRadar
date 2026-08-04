@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ciradar/internal/config"
 	"ciradar/internal/db"
@@ -202,7 +203,7 @@ func matches(ch config.NotificationChannel, ev model.NotificationEvent) bool {
 		return false
 	}
 	if ev.Type == "analysis" {
-		if ev.Score < ch.MinimumScore {
+		if model.NotificationEvidenceStrength(ev) < ch.MinimumScore {
 			return false
 		}
 		if ch.ExternalOnly && eventAttribution(ev) != model.AttributionExternal {
@@ -368,7 +369,7 @@ func slackBody(ch config.NotificationChannel, ev model.NotificationEvent) string
 		fmt.Fprintf(&b, "*Repository:* `%s`\n", escapeSlack(ev.Repository))
 	}
 	if ev.Category != "" {
-		fmt.Fprintf(&b, "*Category:* `%s` · *Attribution:* `%s` · *Confidence:* `%s` · *Score:* %d/100\n", ev.Category, ev.Attribution, ev.Confidence, ev.Score)
+		fmt.Fprintf(&b, "*Category:* `%s` · *Attribution:* `%s` · *Confidence:* `%s` · *Evidence:* %d/100 · *Externality:* %+d\n", ev.Category, ev.Attribution, ev.Confidence, model.NotificationEvidenceStrength(ev), model.NotificationExternalityScore(ev))
 	}
 	if ev.Provider != "" {
 		fmt.Fprintf(&b, "*Provider:* `%s` · *Operation:* `%s`\n", escapeSlack(ev.Provider), escapeSlack(ev.Operation))
@@ -401,9 +402,8 @@ func discordFields(ev model.NotificationEvent) []any {
 	add("Repository", ev.Repository, true)
 	add("Category", string(ev.Category), true)
 	add("Confidence", string(ev.Confidence), true)
-	if ev.Score > 0 {
-		add("Score", fmt.Sprintf("%d/100", ev.Score), true)
-	}
+	add("Evidence", fmt.Sprintf("%d/100", model.NotificationEvidenceStrength(ev)), true)
+	add("Externality", fmt.Sprintf("%+d", model.NotificationExternalityScore(ev)), true)
 	add("Provider", ev.Provider, true)
 	add("Recommendation", ev.Recommendation, false)
 	return out
@@ -416,7 +416,7 @@ func telegramText(ev model.NotificationEvent) string {
 		fmt.Fprintf(&b, "\n<b>Repository:</b> <code>%s</code>", html.EscapeString(ev.Repository))
 	}
 	if ev.Category != "" {
-		fmt.Fprintf(&b, "\n<b>Category:</b> <code>%s</code>\n<b>Confidence:</b> <code>%s</code>\n<b>Score:</b> %d/100", ev.Category, ev.Confidence, ev.Score)
+		fmt.Fprintf(&b, "\n<b>Category:</b> <code>%s</code>\n<b>Confidence:</b> <code>%s</code>\n<b>Evidence:</b> %d/100\n<b>Externality:</b> %+d", ev.Category, ev.Confidence, model.NotificationEvidenceStrength(ev), model.NotificationExternalityScore(ev))
 	}
 	if ev.Recommendation != "" {
 		fmt.Fprintf(&b, "\n\n<b>Action:</b> %s", html.EscapeString(ev.Recommendation))
@@ -432,7 +432,7 @@ func plainText(ev model.NotificationEvent) string {
 		parts = append(parts, "Repository: "+ev.Repository)
 	}
 	if ev.Category != "" {
-		parts = append(parts, fmt.Sprintf("Category: %s | Confidence: %s | Score: %d/100", ev.Category, ev.Confidence, ev.Score))
+		parts = append(parts, fmt.Sprintf("Category: %s | Confidence: %s | Evidence: %d/100 | Externality: %+d", ev.Category, ev.Confidence, model.NotificationEvidenceStrength(ev), model.NotificationExternalityScore(ev)))
 	}
 	if ev.Recommendation != "" {
 		parts = append(parts, "Action: "+ev.Recommendation)
@@ -527,10 +527,14 @@ func escapeSlack(s string) string {
 	return r.Replace(s)
 }
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return s[:n]
+	end := n
+	for end > 0 && !utf8.ValidString(s[:end]) {
+		end--
+	}
+	return s[:end]
 }
 func trim(s string, n int) string { return truncate(s, n) }
 func min(a, b int) int {
@@ -545,7 +549,7 @@ func AnalysisEvent(in model.AnalysisInput, r model.AnalysisResult, publicBaseURL
 	if publicBaseURL != "" {
 		details = strings.TrimRight(publicBaseURL, "/") + "/api/v1/analyses/" + r.ID
 	}
-	return model.NotificationEvent{ID: "evt_analysis_" + r.ID, TenantID: r.TenantID, Type: "analysis", DedupeKey: "analysis:" + in.Repository + ":" + r.Fingerprint, OccurredAt: r.CreatedAt, Severity: analysisSeverity(r), Title: "CI Radar: " + r.Summary, Summary: r.Summary, Repository: in.Repository, Organization: in.Organization, Workflow: in.Workflow, Job: in.Job, RunID: in.RunID, CommitSHA: in.CommitSHA, DetailsURL: details, Category: r.Category, Confidence: r.Confidence, Attribution: r.Attribution, Score: r.Score, Provider: r.Provider, Operation: r.Operation, Fingerprint: r.Fingerprint, Recommendation: r.Recommendation, Evidence: r.Evidence}
+	return model.NotificationEvent{ID: "evt_analysis_" + r.ID, TenantID: r.TenantID, Type: "analysis", DedupeKey: "analysis:" + in.Repository + ":" + r.Fingerprint, OccurredAt: r.CreatedAt, Severity: analysisSeverity(r), Title: "CI Radar: " + r.Summary, Summary: r.Summary, Repository: in.Repository, Organization: in.Organization, Workflow: in.Workflow, Job: in.Job, RunID: in.RunID, CommitSHA: in.CommitSHA, DetailsURL: details, Category: r.Category, Confidence: r.Confidence, Attribution: r.Attribution, Score: r.Score, ExternalityScore: model.ExternalityScoreOf(r), EvidenceStrength: model.EvidenceStrengthOf(r), ExternalEvidenceScore: model.ExternalEvidenceScoreOf(r), CodeEvidenceScore: model.CodeEvidenceScoreOf(r), Provider: r.Provider, Operation: r.Operation, Fingerprint: r.Fingerprint, Recommendation: r.Recommendation, Evidence: r.Evidence}
 }
 func IncidentEvent(kind string, i model.Incident, publicBaseURL string) model.NotificationEvent {
 	title := "CI incident opened: " + i.Title
@@ -567,7 +571,7 @@ func EnvironmentChangedEvent(tenantID, repository, organization, workflow, job, 
 		TenantID: tenantID, Type: "environment_changed", DedupeKey: "environment:" + repository + ":" + workflow + ":" + job + ":" + hex.EncodeToString(h[:8]),
 		OccurredAt: now, Severity: "minor", Title: "CI environment changed: " + repository, Summary: summary,
 		Repository: repository, Organization: organization, Workflow: workflow, Job: job, CommitSHA: commitSHA, DetailsURL: detailsURL,
-		Category: model.CategoryRunnerImageDrift, Attribution: model.AttributionExternal, Score: 70, Provider: "GitHub Actions", Operation: "runner-environment",
+		Category: model.CategoryRunnerImageDrift, Attribution: model.AttributionExternal, Score: 70, ExternalityScore: 70, EvidenceStrength: 70, ExternalEvidenceScore: 70, Provider: "GitHub Actions", Operation: "runner-environment",
 		Recommendation: "Review and pin tool versions before the environment change reaches critical workflows.",
 	}
 }
@@ -578,18 +582,19 @@ func FlakyTestEvent(st model.TestCaseStats, publicBaseURL string) model.Notifica
 	if publicBaseURL != "" {
 		details = strings.TrimRight(publicBaseURL, "/") + "/?test=" + st.TestKey
 	}
-	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_flaky_%s_%d", st.TestKey, now.Unix()), TenantID: st.TenantID, Type: "test_flaky", DedupeKey: "test_flaky:" + st.TestKey, OccurredAt: now, Severity: "minor", Title: "Flaky test detected: " + st.Name, Summary: fmt.Sprintf("%s has a %.1f flake score across %d runs. Likely cause: %s.", st.Name, st.FlakeScore, st.TotalRuns, st.PrimaryFlakeCause), Repository: st.Repository, DetailsURL: details, Category: model.CategoryTestFlake, Attribution: model.AttributionCode, Score: int(st.FlakeScore), Provider: st.Framework, Operation: "test", Fingerprint: st.TestKey, Recommendation: "Assign an owner, reproduce the failure, and quarantine only while the root cause is under investigation."}
+	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_flaky_%s_%d", st.TestKey, now.Unix()), TenantID: st.TenantID, Type: "test_flaky", DedupeKey: "test_flaky:" + st.TestKey, OccurredAt: now, Severity: "minor", Title: "Flaky test detected: " + st.Name, Summary: fmt.Sprintf("%s has a %.1f flake score across %d runs. Likely cause: %s.", st.Name, st.FlakeScore, st.TotalRuns, st.PrimaryFlakeCause), Repository: st.Repository, DetailsURL: details, Category: model.CategoryTestFlake, Attribution: model.AttributionCode, Score: -int(st.FlakeScore), ExternalityScore: -int(st.FlakeScore), EvidenceStrength: int(st.FlakeScore), CodeEvidenceScore: int(st.FlakeScore), Provider: st.Framework, Operation: "test", Fingerprint: st.TestKey, Recommendation: "Assign an owner, reproduce the failure, and quarantine only while the root cause is under investigation."}
 }
 
 func TestEvent() model.NotificationEvent {
 	now := time.Now().UTC()
-	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_%d", now.UnixNano()), TenantID: model.DefaultTenantID, Type: "test", DedupeKey: "", OccurredAt: now, Severity: "info", Title: "CI Radar notification test", Summary: "Your notification channel is configured correctly.", Repository: "example/repository", Category: model.CategoryNetworkFailure, Confidence: model.ConfidenceModerate, Score: 75, Provider: "example-provider", Operation: "connect", Recommendation: "No action is required."}
+	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_%d", now.UnixNano()), TenantID: model.DefaultTenantID, Type: "test", DedupeKey: "", OccurredAt: now, Severity: "info", Title: "CI Radar notification test", Summary: "Your notification channel is configured correctly.", Repository: "example/repository", Category: model.CategoryNetworkFailure, Confidence: model.ConfidenceModerate, Score: 75, ExternalityScore: 75, EvidenceStrength: 75, ExternalEvidenceScore: 75, Provider: "example-provider", Operation: "connect", Recommendation: "No action is required."}
 }
 func analysisSeverity(r model.AnalysisResult) string {
-	if r.Score >= 90 {
+	strength := model.EvidenceStrengthOf(r)
+	if r.ProviderIncident && strength >= 90 {
 		return "critical"
 	}
-	if r.Score >= 75 {
+	if strength >= 85 {
 		return "major"
 	}
 	return "minor"

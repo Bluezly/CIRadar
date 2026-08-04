@@ -21,7 +21,8 @@ func teamsPayload(ev model.NotificationEvent) map[string]any {
 		map[string]any{"title": "Category", "value": string(ev.Category)},
 		map[string]any{"title": "Attribution", "value": string(ev.Attribution)},
 		map[string]any{"title": "Confidence", "value": string(ev.Confidence)},
-		map[string]any{"title": "Score", "value": fmt.Sprintf("%d/100", ev.Score)},
+		map[string]any{"title": "Evidence", "value": fmt.Sprintf("%d/100", model.NotificationEvidenceStrength(ev))},
+		map[string]any{"title": "Externality", "value": fmt.Sprintf("%+d", model.NotificationExternalityScore(ev))},
 	}
 	body := []any{
 		map[string]any{"type": "TextBlock", "size": "Large", "weight": "Bolder", "text": truncate(ev.Title, 240), "wrap": true},
@@ -86,7 +87,7 @@ func opsgenieEndpointAndPayload(ch config.NotificationChannel, ev model.Notifica
 	payload := map[string]any{
 		"message": truncate(ev.Title, 130), "alias": alias, "description": truncate(plainText(ev), 15000),
 		"priority": opsgeniePriority(ev.Severity), "source": "CI Radar",
-		"details": map[string]string{"repository": ev.Repository, "category": string(ev.Category), "confidence": string(ev.Confidence), "score": strconv.Itoa(ev.Score), "provider": ev.Provider},
+		"details": map[string]string{"repository": ev.Repository, "category": string(ev.Category), "confidence": string(ev.Confidence), "evidence_strength": strconv.Itoa(model.NotificationEvidenceStrength(ev)), "externality_score": strconv.Itoa(model.NotificationExternalityScore(ev)), "provider": ev.Provider},
 	}
 	return base + "/v2/alerts", payload
 }
