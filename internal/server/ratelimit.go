@@ -20,8 +20,23 @@ type rateLimiter struct {
 	window  time.Duration
 }
 
+type clientIPResolver struct {
+	trusted []*net.IPNet
+}
+
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	return &rateLimiter{entries: map[string]rateEntry{}, limit: limit, window: window}
+}
+
+func newClientIPResolver(cidrs []string) *clientIPResolver {
+	r := &clientIPResolver{}
+	for _, raw := range cidrs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(raw))
+		if err == nil {
+			r.trusted = append(r.trusted, network)
+		}
+	}
+	return r
 }
 
 func (l *rateLimiter) allow(key string, now time.Time) bool {
@@ -40,18 +55,80 @@ func (l *rateLimiter) allow(key string, now time.Time) bool {
 			}
 		}
 	}
+	for len(l.entries) > 20000 {
+		oldestKey := ""
+		oldest := now
+		for key, value := range l.entries {
+			if oldestKey == "" || value.window.Before(oldest) {
+				oldestKey = key
+				oldest = value.window
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(l.entries, oldestKey)
+	}
 	return e.count <= l.limit
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+func remoteIP(remote string) net.IP {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(remote))
 	if err != nil {
-		host = r.RemoteAddr
+		host = strings.TrimSpace(remote)
 	}
-	return strings.Trim(host, "[]")
+	return net.ParseIP(strings.Trim(host, "[]"))
 }
 
-func rateLimit(l *rateLimiter, next http.Handler) http.Handler {
+func (r *clientIPResolver) trustedIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, network := range r.trusted {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseForwardedChain(raw string) []net.IP {
+	parts := strings.Split(raw, ",")
+	out := make([]net.IP, 0, len(parts))
+	for _, part := range parts {
+		ip := net.ParseIP(strings.Trim(strings.TrimSpace(part), "[]"))
+		if ip != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
+func (r *clientIPResolver) resolve(req *http.Request) string {
+	peer := remoteIP(req.RemoteAddr)
+	if peer == nil {
+		return strings.TrimSpace(req.RemoteAddr)
+	}
+	if !r.trustedIP(peer) {
+		return peer.String()
+	}
+	chain := parseForwardedChain(req.Header.Get("X-Forwarded-For"))
+	if len(chain) == 0 {
+		if candidate := net.ParseIP(strings.Trim(strings.TrimSpace(req.Header.Get("X-Real-IP")), "[]")); candidate != nil {
+			return candidate.String()
+		}
+		return peer.String()
+	}
+	chain = append(chain, peer)
+	for i := len(chain) - 1; i >= 0; i-- {
+		if !r.trustedIP(chain[i]) {
+			return chain[i].String()
+		}
+	}
+	return chain[0].String()
+}
+
+func rateLimit(l *rateLimiter, resolver *clientIPResolver, next http.Handler) http.Handler {
 	webhookLimit := l.limit * 10
 	if webhookLimit < 2000 {
 		webhookLimit = 2000
@@ -59,11 +136,10 @@ func rateLimit(l *rateLimiter, next http.Handler) http.Handler {
 	webhooks := newRateLimiter(webhookLimit, l.window)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limiter := l
-		if r.URL.Path == "/webhooks/github" {
-
+		if strings.HasPrefix(r.URL.Path, "/webhooks/") || strings.HasPrefix(r.URL.Path, "/chatops/") {
 			limiter = webhooks
 		}
-		if !limiter.allow(clientIP(r), time.Now().UTC()) {
+		if !limiter.allow(resolver.resolve(r), time.Now().UTC()) {
 			w.Header().Set("Retry-After", "60")
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return

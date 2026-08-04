@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +24,7 @@ import (
 	gh "ciradar/internal/github"
 	"ciradar/internal/insights"
 	"ciradar/internal/llm"
+	"ciradar/internal/marketplace"
 	mcpserver "ciradar/internal/mcp"
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
@@ -44,17 +44,19 @@ const (
 )
 
 type Server struct {
-	cfg      config.Config
-	store    db.Backend
-	analyzer *analyzer.Analyzer
-	log      *slog.Logger
-	http     *http.Server
-	sso      *sso.Manager
-	llm      *llm.Enhancer
+	cfg         config.Config
+	store       db.Backend
+	analyzer    *analyzer.Analyzer
+	log         *slog.Logger
+	http        *http.Server
+	sso         *sso.Manager
+	llm         *llm.Enhancer
+	marketplace *marketplace.Service
+	ipResolver  *clientIPResolver
 }
 
 func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store)}
+	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store), marketplace: marketplace.New(cfg.GitHubMarketplace, store), ipResolver: newClientIPResolver(cfg.TrustedProxyCIDRs)}
 	if cfg.SSO.Enabled {
 		mgr, err := sso.New(cfg.SSO)
 		if err != nil {
@@ -65,11 +67,14 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.dashboardPage)
+	mux.HandleFunc("GET /assets/dashboard.css", s.dashboardCSS)
+	mux.HandleFunc("GET /assets/dashboard.js", s.dashboardJS)
 	mux.HandleFunc("GET /source", s.sourcePage)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /auth/login", s.authLogin)
 	mux.HandleFunc("GET /auth/callback", s.authCallback)
 	mux.HandleFunc("GET /auth/logout", s.authLogout)
+	mux.HandleFunc("POST /auth/token", s.authToken)
 	mux.HandleFunc("GET /api/v1/auth/me", s.require(model.RoleViewer, s.authMe))
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/status", s.require(model.RoleViewer, s.status))
@@ -112,12 +117,15 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /api/v1/tenants", s.requireRoot(s.createTenant))
 	mux.HandleFunc("PATCH /api/v1/tenants/{id}", s.requireRoot(s.updateTenant))
 	mux.HandleFunc("GET /api/v1/github/installations", s.requireRoot(s.installationBindings))
+	mux.HandleFunc("GET /api/v1/marketplace/subscription", s.require(model.RoleAdmin, s.marketplaceSubscription))
+	mux.HandleFunc("GET /api/v1/marketplace/subscriptions", s.requireRoot(s.marketplaceSubscriptions))
 	mux.HandleFunc("POST /api/v1/github/installations/{id}/bind", s.requireRoot(s.bindInstallation))
 	mux.HandleFunc("DELETE /api/v1/github/installations/{id}", s.requireRoot(s.unbindInstallation))
 	mux.HandleFunc("GET /metrics", s.require(model.RoleViewer, s.metrics))
 	mux.HandleFunc("POST /mcp", s.require(model.RoleViewer, s.mcp))
 	mux.HandleFunc("GET /mcp", s.mcpGet)
 	mux.HandleFunc("POST /webhooks/github", s.githubWebhook)
+	mux.HandleFunc("POST /webhooks/github/marketplace", s.githubMarketplaceWebhook)
 	mux.HandleFunc("POST /webhooks/gitlab", s.ciWebhook("gitlab"))
 	mux.HandleFunc("POST /webhooks/buildkite", s.ciWebhook("buildkite"))
 	mux.HandleFunc("POST /webhooks/circleci", s.ciWebhook("circleci"))
@@ -129,7 +137,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /webhooks/codebuild", s.ciWebhook("codebuild"))
 	mux.HandleFunc("POST /chatops/slack", s.slackChatOps)
 	mux.HandleFunc("POST /chatops/teams", s.teamsChatOps)
-	h := requestID(securityHeaders(logging(log, rateLimit(newRateLimiter(600, time.Minute), mux))))
+	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, logging(log, rateLimit(newRateLimiter(600, time.Minute), s.ipResolver, mux)))))
 	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 	return s
 }
@@ -140,7 +148,7 @@ func (s *Server) sourcePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, "<!doctype html><meta charset=utf-8><title>CI Radar source</title><body style=font-family:system-ui;max-width:760px;margin:60px auto;padding:20px><h1>CI Radar source code</h1><p>This deployment runs free software licensed under AGPL-3.0-or-later.</p><p>The corresponding source archive is distributed beside the server binary. The administrator should set <code>source_url</code> to the exact public source revision for this deployment.</p><p>Version: "+version.Version+" · Commit: "+version.Commit+"</p></body>")
+	_, _ = io.WriteString(w, "<!doctype html><html><head><meta charset=utf-8><title>CI Radar source</title><link rel=stylesheet href=/assets/dashboard.css></head><body><main><section class=panel><h1>CI Radar source code</h1><p>This deployment runs free software licensed under AGPL-3.0-or-later.</p><p>The corresponding source archive is distributed beside the server binary. The administrator should set <code>source_url</code> to the exact public source revision for this deployment.</p><p>Version: "+version.Version+" · Commit: "+version.Commit+"</p></section></main></body></html>")
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -168,8 +176,27 @@ func (s *Server) dashboardPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'")
 	_, _ = io.WriteString(w, dashboardHTML)
+}
+
+func (s *Server) dashboardCSS(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.DashboardEnabled {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = io.WriteString(w, dashboardCSS)
+}
+
+func (s *Server) dashboardJS(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.DashboardEnabled {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = io.WriteString(w, dashboardJS)
 }
 
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +216,7 @@ func (s *Server) authCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
+	clearDashboardSession(w, s.cfg.DashboardCookieSecure)
 	if s.sso == nil {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
@@ -1003,7 +1031,75 @@ func failedCIConclusion(v string) bool {
 	return false
 }
 
+func (s *Server) marketplaceSubscription(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListObjects(r.Context(), principal(r).TenantID, "marketplace_subscription", 20)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": items, "feature_gates": false})
+}
+
+func (s *Server) marketplaceSubscriptions(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListObjects(r.Context(), model.DefaultTenantID, "marketplace_account_index", 1000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": items, "feature_gates": false})
+}
+
+func (s *Server) githubMarketplaceWebhook(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.GitHubMarketplace.Enabled {
+		http.NotFound(w, r)
+		return
+	}
+	if event := strings.TrimSpace(r.Header.Get("X-GitHub-Event")); event != "" && event != "marketplace_purchase" {
+		writeError(w, http.StatusBadRequest, "unexpected GitHub event")
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	secret := strings.TrimSpace(s.cfg.GitHubMarketplace.WebhookSecret)
+	if secret == "" {
+		secret = s.cfg.GitHubWebhookSecret
+	}
+	if !gh.VerifyWebhook(secret, body, r.Header.Get("X-Hub-Signature-256")) {
+		writeError(w, http.StatusUnauthorized, "invalid webhook signature")
+		return
+	}
+	delivery := strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
+	if delivery == "" {
+		hash := sha256.Sum256(body)
+		delivery = "marketplace-" + hex.EncodeToString(hash[:16])
+	}
+	fresh, err := s.store.RecordDelivery(r.Context(), delivery, "github.marketplace_purchase")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !fresh {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "duplicate"})
+		return
+	}
+	subscription, err := s.marketplace.Handle(r.Context(), body)
+	if err != nil {
+		_ = s.store.UpdateDelivery(r.Context(), delivery, "error", err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	_ = s.store.UpdateDelivery(r.Context(), delivery, "processed", "")
+	writeJSON(w, http.StatusOK, map[string]any{"status": "processed", "tenant_id": subscription.TenantID, "plan": subscription.PlanName, "subscription_status": subscription.Status})
+}
+
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-GitHub-Event")), "marketplace_purchase") && s.cfg.GitHubMarketplace.Enabled {
+		s.githubMarketplaceWebhook(w, r)
+		return
+	}
 	if !s.cfg.GitHubConfigured() {
 		writeError(w, 503, "GitHub App and webhook are not fully configured")
 		return
@@ -1160,15 +1256,13 @@ func (s *Server) authenticate(r *http.Request) (model.Principal, bool) {
 	if tenant == "" {
 		tenant = s.cfg.DefaultTenantID
 	}
-	if s.cfg.AdminToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) == 1 {
-		t, _ := s.store.GetTenant(r.Context(), tenant)
-		if t == nil || !t.Enabled {
-			return model.Principal{}, false
+	if token != "" {
+		if p, ok := s.authenticateToken(r.Context(), token, tenant); ok {
+			return p, true
 		}
-		return model.Principal{TenantID: t.ID, Name: "root", Role: model.RoleAdmin, Root: true}, true
 	}
-	if p, _ := s.store.AuthenticateAPIKey(r.Context(), token); p != nil {
-		return *p, true
+	if p, ok := s.authenticateDashboardSession(r); ok {
+		return p, true
 	}
 	if s.sso != nil {
 		if p, ok := s.sso.Authenticate(r); ok {
@@ -1178,7 +1272,7 @@ func (s *Server) authenticate(r *http.Request) (model.Principal, bool) {
 			}
 		}
 	}
-	if token == "" && s.cfg.AllowUnauthenticatedLocalhost && isLoopback(r.RemoteAddr) {
+	if token == "" && s.cfg.AllowUnauthenticatedLocalhost && isLoopback(s.ipResolver.resolve(r)) {
 		t, _ := s.store.GetTenant(r.Context(), s.cfg.DefaultTenantID)
 		if t == nil || !t.Enabled {
 			return model.Principal{}, false
@@ -1213,7 +1307,7 @@ func isLoopback(remote string) bool {
 }
 func (s *Server) audit(r *http.Request, action, resource, id string, metadata map[string]string) {
 	p := principal(r)
-	_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: p.Name, Role: p.Role, Action: action, Resource: resource, ResourceID: id, RemoteIP: r.RemoteAddr, RequestID: requestIDFrom(r), Metadata: metadata})
+	_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: p.Name, Role: p.Role, Action: action, Resource: resource, ResourceID: id, RemoteIP: s.ipResolver.resolve(r), RequestID: requestIDFrom(r), Metadata: metadata})
 }
 
 func logging(log *slog.Logger, next http.Handler) http.Handler {
@@ -1239,13 +1333,62 @@ func requestIDFrom(r *http.Request) string {
 	v, _ := r.Context().Value(requestIDKey).(string)
 	return v
 }
-func securityHeaders(next http.Handler) http.Handler {
+func securityHeaders(publicBaseURL string, resolver *clientIPResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+		if requestIsHTTPS(r, publicBaseURL, resolver) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func requestIsHTTPS(r *http.Request, publicBaseURL string, resolver *clientIPResolver) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if parsed, err := url.Parse(strings.TrimSpace(publicBaseURL)); err == nil && strings.EqualFold(parsed.Scheme, "https") {
+		return true
+	}
+	peer := remoteIP(r.RemoteAddr)
+	return resolver != nil && resolver.trustedIP(peer) && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
+}
+
+func csrfGuard(cfg config.Config, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions || strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Authorization"))), "bearer ") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		hasSession := false
+		if _, err := r.Cookie(dashboardSessionCookie); err == nil {
+			hasSession = true
+		}
+		if cfg.SSO.CookieName != "" {
+			if _, err := r.Cookie(cfg.SSO.CookieName); err == nil {
+				hasSession = true
+			}
+		}
+		if !hasSession {
+			next.ServeHTTP(w, r)
+			return
+		}
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" {
+			origin = strings.TrimSpace(r.Header.Get("Referer"))
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Host, r.Host) {
+			writeError(w, http.StatusForbidden, "cross-site request rejected")
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }
