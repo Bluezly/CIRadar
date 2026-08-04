@@ -800,13 +800,13 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 		in.Organization = strings.SplitN(in.Repository, "/", 2)[0]
 	}
 	initial := s.analyzer.Analyze(in, analyzer.Context{})
-	corr, err := s.store.CorrelationForTenant(r.Context(), p.TenantID, initial.Fingerprint, time.Now().UTC().Add(-s.cfg.IncidentWindow), s.cfg.CrossTenantCorrelation)
+	corr, err := s.store.CorrelationForTenant(r.Context(), p.TenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-s.cfg.IncidentWindow), s.cfg.CrossTenantCorrelation)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
 	prev, _ := s.store.LastSuccessfulEnvironmentForTenant(r.Context(), p.TenantID, in.Repository, in.Workflow, in.Job)
-	result := s.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: s.providerIncident(r.Context(), initial.Provider), PreviousEnvironment: prev})
+	result := s.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: s.providerIncident(r.Context(), initial.Provider), PreviousEnvironment: prev})
 	if err := s.store.RecordAnalysisForTenant(r.Context(), p.TenantID, in, result, s.cfg.StoreRedactedExcerpts, s.cfg.StoreRawLogs); err != nil {
 		writeError(w, 500, err.Error())
 		return
