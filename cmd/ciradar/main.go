@@ -59,6 +59,16 @@ func main() {
 		err = cmdRules(os.Args[2:])
 	case "notify":
 		err = cmdNotify(os.Args[2:])
+	case "tenant":
+		err = cmdTenant(os.Args[2:])
+	case "apikey":
+		err = cmdAPIKey(os.Args[2:])
+	case "github-installation":
+		err = cmdGitHubInstallation(os.Args[2:])
+	case "repository":
+		err = cmdRepository(os.Args[2:])
+	case "incident":
+		err = cmdIncidentAction(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Printf("CI Radar %s (%s, %s) %s/%s\n", version.Version, version.Commit, version.BuildDate, runtime.GOOS, runtime.GOARCH)
 		return
@@ -92,6 +102,11 @@ Usage:
   ciradar rules
   ciradar notify test [--config ciradar.json] [--channel NAME]
   ciradar notify list [--config ciradar.json]
+  ciradar tenant create|list [options]
+  ciradar apikey create|list|revoke [options]
+  ciradar github-installation bind|unbind|list [options]
+  ciradar repository set|list [options]
+  ciradar incident acknowledge|resolve|reopen [options]
   ciradar version
 
 Fast local test:
@@ -128,12 +143,23 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(cfg.AdminToken) == "" && !cfg.AllowUnauthenticatedLocalhost {
+		return errors.New("admin_token is empty; run `ciradar init` or set CIRADAR_ADMIN_TOKEN before serving")
+	}
 	log := newLogger(cfg.LogLevel)
 	store, err := db.Open(cfg.DatabasePath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	if tenant, err := store.GetTenant(context.Background(), cfg.DefaultTenantID); err != nil {
+		return err
+	} else if tenant == nil {
+		name := "Tenant " + cfg.DefaultTenantID
+		if _, err := store.CreateTenant(context.Background(), cfg.DefaultTenantID, name); err != nil {
+			return err
+		}
+	}
 	a, err := buildAnalyzer(cfg)
 	if err != nil {
 		return err
@@ -172,6 +198,7 @@ func cmdAnalyze(args []string) error {
 	workflowChanged := fs.Bool("workflow-changed", false, "mark workflow files changed")
 	dependencyChanged := fs.Bool("dependency-changed", false, "mark dependency files changed")
 	changeInfo := fs.Bool("change-info", false, "confirm that workflow/dependency change information is known")
+	tenant := fs.String("tenant", "", "tenant id")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -195,14 +222,15 @@ func cmdAnalyze(args []string) error {
 	if err != nil {
 		return err
 	}
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
 	org := strings.SplitN(*repo, "/", 2)[0]
-	in := model.AnalysisInput{Repository: *repo, Organization: org, Workflow: *workflow, Job: *job, PreviousSuccess: *previous, WorkflowChanged: *workflowChanged, DependencyChanged: *dependencyChanged, ChangeInfoAvailable: *changeInfo, Log: string(b), OccurredAt: time.Now().UTC()}
+	in := model.AnalysisInput{TenantID: tenantID, Repository: *repo, Organization: org, Workflow: *workflow, Job: *job, PreviousSuccess: *previous, WorkflowChanged: *workflowChanged, DependencyChanged: *dependencyChanged, ChangeInfoAvailable: *changeInfo, Log: string(b), OccurredAt: time.Now().UTC()}
 	initial := a.Analyze(in, analyzer.Context{})
-	corr, _ := store.Correlation(context.Background(), initial.Fingerprint, time.Now().UTC().Add(-cfg.IncidentWindow))
-	prev, _ := store.LastSuccessfulEnvironment(context.Background(), in.Repository, in.Workflow, in.Job)
+	corr, _ := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
+	prev, _ := store.LastSuccessfulEnvironmentForTenant(context.Background(), tenantID, in.Repository, in.Workflow, in.Job)
 	providerIncident := providerIncident(context.Background(), store, initial.Provider)
 	result := a.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1, ProviderIncident: providerIncident, PreviousEnvironment: prev})
-	if err := store.RecordAnalysis(context.Background(), in, result, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
+	if err := store.RecordAnalysisForTenant(context.Background(), tenantID, in, result, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
 		return err
 	}
 	if cfg.Notifications.Enabled {
@@ -227,6 +255,7 @@ func cmdBaseline(args []string) error {
 	workflow := fs.String("workflow", "CI", "workflow name")
 	job := fs.String("job", "test", "job name")
 	sha := fs.String("sha", "manual-baseline", "commit SHA or label")
+	tenant := fs.String("tenant", "", "tenant id")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -250,7 +279,7 @@ func cmdBaseline(args []string) error {
 		return err
 	}
 	defer store.Close()
-	if err := store.RecordSuccessfulEnvironment(context.Background(), *repo, *workflow, *job, *sha, env, time.Now().UTC()); err != nil {
+	if err := store.RecordSuccessfulEnvironmentForTenant(context.Background(), chooseTenant(*tenant, cfg.DefaultTenantID), *repo, *workflow, *job, *sha, env, time.Now().UTC()); err != nil {
 		return err
 	}
 	fmt.Printf("Saved successful baseline for %s / %s / %s\n", *repo, *workflow, *job)
@@ -265,6 +294,7 @@ func cmdIncidents(args []string) error {
 	jsonOut := fs.Bool("json", false, "print JSON")
 	stateFilter := fs.String("state", "", "filter by open or resolved")
 	limit := fs.Int("limit", 100, "maximum incidents")
+	tenant := fs.String("tenant", "", "tenant id")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -277,7 +307,7 @@ func cmdIncidents(args []string) error {
 		return err
 	}
 	defer store.Close()
-	items, err := store.ListIncidents(context.Background(), *limit, *stateFilter)
+	items, err := store.ListIncidentsForTenant(context.Background(), chooseTenant(*tenant, cfg.DefaultTenantID), *limit, *stateFilter)
 	if err != nil {
 		return err
 	}
@@ -300,6 +330,7 @@ func cmdStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	path := fs.String("config", "ciradar.json", "configuration file path")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	tenant := fs.String("tenant", "", "tenant id")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -312,7 +343,7 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	defer store.Close()
-	stats, err := store.Stats(context.Background())
+	stats, err := store.StatsForTenant(context.Background(), chooseTenant(*tenant, cfg.DefaultTenantID))
 	if err != nil {
 		return err
 	}
@@ -340,6 +371,7 @@ func cmdExport(args []string) error {
 	path := fs.String("config", "ciradar.json", "configuration file path")
 	output := fs.String("output", "ciradar-report.json", "output JSON file")
 	limit := fs.Int("limit", 500, "maximum analyses")
+	tenant := fs.String("tenant", "", "tenant id")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -352,15 +384,16 @@ func cmdExport(args []string) error {
 		return err
 	}
 	defer store.Close()
-	stats, err := store.Stats(context.Background())
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
+	stats, err := store.StatsForTenant(context.Background(), tenantID)
 	if err != nil {
 		return err
 	}
-	incidents, err := store.ListIncidents(context.Background(), 500, "")
+	incidents, err := store.ListIncidentsForTenant(context.Background(), tenantID, 500, "")
 	if err != nil {
 		return err
 	}
-	analyses, err := store.ListAnalyses(context.Background(), *limit)
+	analyses, err := store.ListAnalysesForTenant(context.Background(), tenantID, *limit)
 	if err != nil {
 		return err
 	}
@@ -368,7 +401,7 @@ func cmdExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	report := map[string]any{"generated_at": time.Now().UTC(), "version": version.Version, "stats": stats, "providers": providerList, "incidents": incidents, "analyses": analyses}
+	report := map[string]any{"generated_at": time.Now().UTC(), "version": version.Version, "tenant_id": tenantID, "stats": stats, "providers": providerList, "incidents": incidents, "analyses": analyses}
 	b, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return err
@@ -404,6 +437,7 @@ func cmdInspect(args []string) error {
 func cmdSimulate(args []string) error {
 	fs := flag.NewFlagSet("simulate", flag.ContinueOnError)
 	path := fs.String("config", "ciradar.json", "configuration file path")
+	tenant := fs.String("tenant", "", "tenant id")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -434,21 +468,22 @@ func cmdSimulate(args []string) error {
 	if err != nil {
 		return err
 	}
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
 	for i := 0; i < count; i++ {
 		repo := fmt.Sprintf("simulation-org-%d/repo-%d", i%3, i)
-		in := model.AnalysisInput{Repository: repo, Organization: strings.SplitN(repo, "/", 2)[0], Workflow: "ci", Job: "test", Log: string(b), OccurredAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond)}
+		in := model.AnalysisInput{TenantID: tenantID, Repository: repo, Organization: strings.SplitN(repo, "/", 2)[0], Workflow: "ci", Job: "test", Log: string(b), OccurredAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond)}
 		initial := a.Analyze(in, analyzer.Context{})
-		corr, _ := store.Correlation(context.Background(), initial.Fingerprint, time.Now().UTC().Add(-cfg.IncidentWindow))
+		corr, _ := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
 		r := a.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories + 1, CrossOrgCount: corr.Organizations + 1, RecentOccurrences: corr.Occurrences + 1})
-		if err := store.RecordAnalysis(context.Background(), in, r, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
+		if err := store.RecordAnalysisForTenant(context.Background(), tenantID, in, r, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
 			return err
 		}
 		if r.CrossRepoCount >= cfg.IncidentRepoThreshold || r.CrossOrgCount >= cfg.IncidentOrgThreshold {
 			now := time.Now().UTC()
-			_ = store.UpsertIncident(context.Background(), model.Incident{ID: "inc_" + r.Fingerprint, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: "major", RepositoryCount: r.CrossRepoCount, OrganizationCount: r.CrossOrgCount, OccurrenceCount: r.CrossRepoCount, FirstSeenAt: now, LastSeenAt: now, Title: r.Provider + ": " + r.Summary})
+			_ = store.UpsertIncidentForTenant(context.Background(), tenantID, model.Incident{ID: "inc_" + r.Fingerprint, TenantID: tenantID, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: "major", RepositoryCount: r.CrossRepoCount, OrganizationCount: r.CrossOrgCount, OccurrenceCount: r.CrossRepoCount, FirstSeenAt: now, LastSeenAt: now, Title: r.Provider + ": " + r.Summary})
 		}
 	}
-	st, _ := store.Stats(context.Background())
+	st, _ := store.StatsForTenant(context.Background(), tenantID)
 	fmt.Printf("Inserted %d simulated failures. Analyses=%d incidents=%d open=%d\n", count, st.Analyses, st.Incidents, st.OpenIncidents)
 	return nil
 }
@@ -476,7 +511,26 @@ func cmdDoctor(args []string) error {
 	defer store.Close()
 	fmt.Println("  Database check: OK")
 	fmt.Println("  Raw log storage:", cfg.StoreRawLogs, "(recommended: false)")
-	fmt.Println("  Cross-repository sharing:", cfg.CrossRepositorySharing)
+	if strings.TrimSpace(cfg.FingerprintHMACKey) == "" {
+		fmt.Println("  Fingerprint HMAC key: MISSING (fingerprints use unsalted SHA-256)")
+	} else {
+		fmt.Println("  Fingerprint HMAC key: PRESENT")
+	}
+	fmt.Println("  Cross-repository correlation within tenant: enabled")
+	fmt.Println("  Cross-tenant correlation:", cfg.CrossTenantCorrelation)
+	fmt.Println("  Require GitHub installation binding:", cfg.RequireInstallationBinding)
+	fmt.Println("  Local unauthenticated API:", cfg.AllowUnauthenticatedLocalhost)
+	if strings.TrimSpace(cfg.AdminToken) == "" {
+		fmt.Println("  Root admin token: MISSING")
+	} else {
+		fmt.Println("  Root admin token: PRESENT")
+	}
+	if info, err := os.Stat(cfg.DatabasePath); err == nil {
+		fmt.Printf("  State file size: %.2f MiB\n", float64(info.Size())/(1024*1024))
+		if info.Size() > 250<<20 {
+			fmt.Println("  State warning: embedded storage is large; archive old data or migrate to an external database adapter")
+		}
+	}
 	fmt.Println("  Automatic retry:", cfg.AutomaticRetryEnabled)
 	fmt.Println("  Notifications enabled:", cfg.Notifications.Enabled)
 	for _, ch := range cfg.Notifications.Channels {
@@ -535,7 +589,10 @@ func buildAnalyzer(cfg config.Config) (*analyzer.Analyzer, error) {
 func printHuman(r model.AnalysisResult) {
 	fmt.Println("\nCI Radar diagnosis")
 	fmt.Println(strings.Repeat("=", 60))
-	fmt.Printf("Confidence : %s\nCategory   : %s\nProvider   : %s\nOperation  : %s\nScore      : %d/100\nFingerprint: %s\n\n", r.Confidence, r.Category, r.Provider, r.Operation, r.Score, r.Fingerprint)
+	fmt.Printf("Attribution: %s\nConfidence : %s\nCategory   : %s\nProvider   : %s\nOperation  : %s\nScore      : %d/100 (raw %d, external +%d, code %d)\nFingerprint: %s\n\n", r.Attribution, r.Confidence, r.Category, r.Provider, r.Operation, r.Score, r.RawScore, r.PositiveScore, r.NegativeScore, r.Fingerprint)
+	if r.DecisionReason != "" {
+		fmt.Println("Decision:", r.DecisionReason)
+	}
 	fmt.Println("Summary:")
 	fmt.Println(" ", r.Summary)
 	fmt.Println("\nEvidence:")
@@ -686,6 +743,276 @@ func cmdNotify(args []string) error {
 	}
 }
 
+func chooseTenant(v, fallback string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		v = strings.ToLower(strings.TrimSpace(fallback))
+	}
+	if v == "" {
+		return model.DefaultTenantID
+	}
+	return v
+}
+
+func cmdTenant(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar tenant create|list|enable|disable")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("tenant "+sub, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	id := fs.String("id", "", "tenant id")
+	name := fs.String("name", "", "tenant name")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch sub {
+	case "create":
+		t, err := store.CreateTenant(context.Background(), *id, *name)
+		if err != nil {
+			return err
+		}
+		return printJSON(t)
+	case "list":
+		items, err := store.ListTenants(context.Background())
+		if err != nil {
+			return err
+		}
+		return printJSON(items)
+	case "enable", "disable":
+		if strings.TrimSpace(*id) == "" {
+			return errors.New("--id is required")
+		}
+		return store.SetTenantEnabled(context.Background(), *id, sub == "enable")
+	default:
+		return fmt.Errorf("unknown tenant command %q", sub)
+	}
+}
+func cmdAPIKey(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar apikey create|list|revoke")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("apikey "+sub, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	tenant := fs.String("tenant", "", "tenant id")
+	name := fs.String("name", "", "key name")
+	role := fs.String("role", "viewer", "viewer, operator, or admin")
+	id := fs.String("id", "", "api key id")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch sub {
+	case "create":
+		key, token, err := store.CreateAPIKey(context.Background(), tenantID, *name, model.Role(strings.ToLower(*role)))
+		if err != nil {
+			return err
+		}
+		fmt.Println("API key created. This token is shown once:")
+		fmt.Println(token)
+		return printJSON(key)
+	case "list":
+		items, err := store.ListAPIKeys(context.Background(), tenantID)
+		if err != nil {
+			return err
+		}
+		return printJSON(items)
+	case "revoke":
+		if *id == "" {
+			return errors.New("--id is required")
+		}
+		return store.RevokeAPIKey(context.Background(), tenantID, *id)
+	default:
+		return fmt.Errorf("unknown apikey command %q", sub)
+	}
+}
+func cmdGitHubInstallation(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar github-installation bind|unbind|list")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("github-installation "+sub, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	tenant := fs.String("tenant", "", "tenant id")
+	id := fs.Int64("id", 0, "GitHub installation id")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch sub {
+	case "bind":
+		if *id < 1 {
+			return errors.New("--id is required")
+		}
+		return store.BindInstallation(context.Background(), chooseTenant(*tenant, cfg.DefaultTenantID), *id)
+	case "unbind":
+		if *id < 1 {
+			return errors.New("--id is required")
+		}
+		return store.UnbindInstallation(context.Background(), *id)
+	case "list":
+		return printJSON(store.ListInstallationBindings(context.Background()))
+	default:
+		return fmt.Errorf("unknown github-installation command %q", sub)
+	}
+}
+func cmdRepository(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar repository set|list")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("repository "+sub, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	tenant := fs.String("tenant", "", "tenant id")
+	repo := fs.String("repo", "", "repository in owner/name form")
+	team := fs.String("team", "", "team name")
+	owner := fs.String("owner", "", "responsible owner")
+	criticality := fs.String("criticality", "normal", "low, normal, high, or critical")
+	channels := fs.String("channels", "", "comma-separated notification channel names")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch sub {
+	case "list":
+		items, err := store.ListRepositoryProfiles(context.Background(), tenantID)
+		if err != nil {
+			return err
+		}
+		return printJSON(items)
+	case "set":
+		if strings.TrimSpace(*repo) == "" {
+			return errors.New("--repo is required")
+		}
+		channelList := splitCSV(*channels)
+		known := map[string]struct{}{}
+		for _, channel := range cfg.Notifications.Channels {
+			known[strings.ToLower(channel.Name)] = struct{}{}
+		}
+		for _, channel := range channelList {
+			if _, ok := known[strings.ToLower(channel)]; !ok {
+				return fmt.Errorf("notification channel %q is not configured", channel)
+			}
+		}
+		profile, err := store.UpsertRepositoryProfile(context.Background(), model.RepositoryProfile{TenantID: tenantID, Repository: *repo, Team: *team, Owner: *owner, Criticality: *criticality, NotificationChannels: channelList})
+		if err != nil {
+			return err
+		}
+		return printJSON(profile)
+	default:
+		return fmt.Errorf("unknown repository command %q", sub)
+	}
+}
+
+func cmdIncidentAction(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar incident acknowledge|resolve|reopen")
+	}
+	sub := strings.ToLower(args[0])
+	fs := flag.NewFlagSet("incident "+sub, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	tenant := fs.String("tenant", "", "tenant id")
+	fingerprint := fs.String("fingerprint", "", "incident fingerprint")
+	actor := fs.String("actor", "cli", "actor name")
+	note := fs.String("note", "", "resolution or acknowledgement note")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	state := ""
+	switch sub {
+	case "acknowledge":
+		state = "acknowledged"
+	case "resolve":
+		state = "resolved"
+	case "reopen":
+		state = "open"
+	default:
+		return fmt.Errorf("unknown incident command %q", sub)
+	}
+	if strings.TrimSpace(*fingerprint) == "" {
+		return errors.New("--fingerprint is required")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	incident, err := store.UpdateIncidentState(context.Background(), tenantID, *fingerprint, state, *actor, *note)
+	if err != nil {
+		return err
+	}
+	if incident == nil {
+		return errors.New("incident not found")
+	}
+	_ = store.RecordAudit(context.Background(), model.AuditEvent{TenantID: tenantID, Actor: *actor, Role: model.RoleOperator, Action: "incident." + state, Resource: "incident", ResourceID: incident.ID, Metadata: map[string]string{"note": *note}})
+	return printJSON(incident)
+}
+
+func splitCSV(v string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, item := range strings.Split(v, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		key := strings.ToLower(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, item)
+	}
+	return out
+}
+
+func printJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
 func maintenanceLoop(ctx context.Context, store *db.Store, cfg config.Config, log *slog.Logger) {
 	incidentTicker := time.NewTicker(time.Minute)
 	cleanupTicker := time.NewTicker(12 * time.Hour)
@@ -696,18 +1023,15 @@ func maintenanceLoop(ctx context.Context, store *db.Store, cfg config.Config, lo
 		case <-ctx.Done():
 			return
 		case <-incidentTicker.C:
-			before, _ := store.ListIncidents(ctx, 500, "open")
-			resolved, err := store.ResolveStaleIncidents(ctx, time.Now().UTC().Add(-2*cfg.IncidentWindow))
+			resolvedItems, err := store.ResolveStaleIncidentsDetailed(ctx, time.Now().UTC().Add(-cfg.IncidentResolveAfter))
+			resolved := len(resolvedItems)
 			if err != nil {
 				log.Warn("incident maintenance failed", "error", err)
 			} else if resolved > 0 {
 				log.Info("stale incidents resolved", "count", resolved)
 				if cfg.Notifications.Enabled {
-					for _, i := range before {
-						if i.LastSeenAt.Before(time.Now().UTC().Add(-2 * cfg.IncidentWindow)) {
-							i.State = "resolved"
-							_ = store.Enqueue(ctx, "notify.event", notifications.IncidentEvent("incident_resolved", i, cfg.PublicBaseURL), time.Now().UTC())
-						}
+					for _, i := range resolvedItems {
+						_ = store.EnqueueForTenant(ctx, i.TenantID, "notify.event", notifications.IncidentEvent("incident_resolved", i, cfg.PublicBaseURL), time.Now().UTC())
 					}
 				}
 			}
