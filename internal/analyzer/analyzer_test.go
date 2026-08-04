@@ -379,3 +379,28 @@ func TestRedactorDoesNotEraseOrdinaryIdentifier(t *testing.T) {
 		t.Fatalf("ordinary text changed: %s", got)
 	}
 }
+
+func TestGoTestAssertionIsCodeFailure(t *testing.T) {
+	log := "--- FAIL: TestCalculateDiscount (0.00s)\n    discount_test.go:42: expected: 90, actual: 100\nFAIL\nFAIL\texample.com/shop\t0.013s"
+	r := New("").Analyze(model.AnalysisInput{Repository: "acme/shop", Log: log}, Context{})
+	if r.Category != model.CategoryCodeFailure || r.Attribution != model.AttributionCode {
+		t.Fatalf("category=%s attribution=%s score=%d rules=%v", r.Category, r.Attribution, r.Score, r.MatchedRules)
+	}
+	if len(r.MatchedRules) == 0 || r.MatchedRules[0] != "go-test-assertion" {
+		t.Fatalf("rules=%v", r.MatchedRules)
+	}
+}
+
+func TestGoTestCommonAssertionFormats(t *testing.T) {
+	cases := []string{
+		"--- FAIL: TestPrice (0.00s)\n    price_test.go:19: got 100, want 90\nFAIL",
+		"--- FAIL: TestPrice/coupon (0.00s)\n    price_test.go:19: want=90 got=100\nFAIL",
+		"--- FAIL: TestPrice (0.00s)\n    price_test.go:19: expected 90 but got 100\nFAIL",
+	}
+	for _, log := range cases {
+		r := New("").Analyze(model.AnalysisInput{Repository: "acme/shop", Log: log}, Context{})
+		if r.Category != model.CategoryCodeFailure || r.Attribution != model.AttributionCode {
+			t.Fatalf("log=%q category=%s attribution=%s rules=%v", log, r.Category, r.Attribution, r.MatchedRules)
+		}
+	}
+}
