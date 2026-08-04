@@ -28,6 +28,7 @@ func testServer(t *testing.T) (*Server, *db.Store, config.Config) {
 	cfg := config.Default()
 	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
 	cfg.AdminToken = "root-secret"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
 	cfg.AllowUnauthenticatedLocalhost = false
 	cfg.ProviderPolling = false
 	cfg.Notifications.Enabled = false
@@ -172,7 +173,7 @@ func TestIncidentWorkflowWritesAudit(t *testing.T) {
 
 func TestRateLimiterRejectsExcess(t *testing.T) {
 	l := newRateLimiter(2, time.Minute)
-	h := rateLimit(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	h := rateLimit(l, newClientIPResolver(nil), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	for i := 0; i < 3; i++ {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 		r.RemoteAddr = "198.51.100.4:1234"
@@ -256,7 +257,7 @@ func TestWebhookRequiresTenantBinding(t *testing.T) {
 
 func TestWebhookUsesSeparateBurstBucket(t *testing.T) {
 	l := newRateLimiter(1, time.Minute)
-	h := rateLimit(l, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	h := rateLimit(l, newClientIPResolver(nil), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	for i := 0; i < 2; i++ {
 		r := httptest.NewRequest(http.MethodPost, "/webhooks/github", nil)
 		r.RemoteAddr = "192.0.2.44:1234"
@@ -442,5 +443,165 @@ func TestMCPStreamableHTTPGuards(t *testing.T) {
 	s.http.Handler.ServeHTTP(w, req)
 	if w.Code != http.StatusAccepted || w.Body.Len() != 0 {
 		t.Fatalf("notification=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestDashboardUsesStrictCSPWithoutInlineCode(t *testing.T) {
+	s, _, _ := testServer(t)
+	rr := doReq(t, s, http.MethodGet, "/", "", "", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	csp := rr.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "unsafe-inline") {
+		t.Fatalf("csp=%q", csp)
+	}
+	body := rr.Body.String()
+	for _, forbidden := range []string{"onclick=", "style=", "<script>", "<style>"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("dashboard contains %q", forbidden)
+		}
+	}
+	if !strings.Contains(body, "/assets/dashboard.js") || !strings.Contains(body, "/assets/dashboard.css") {
+		t.Fatalf("dashboard assets missing")
+	}
+}
+
+func TestSecureDashboardLoginUsesEncryptedHttpOnlyCookie(t *testing.T) {
+	s, _, cfg := testServer(t)
+	rr := doReq(t, s, http.MethodPost, "/auth/token", "", "", map[string]string{"token": cfg.AdminToken, "tenant": model.DefaultTenantID})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	cookies := rr.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("session cookie missing")
+	}
+	cookie := cookies[0]
+	if cookie.Name != dashboardSessionCookie || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("cookie=%+v", cookie)
+	}
+	if strings.Contains(cookie.Value, cfg.AdminToken) || strings.Contains(cookie.Value, model.DefaultTenantID) || !strings.HasPrefix(cookie.Value, "v1.") {
+		t.Fatalf("cookie is not encrypted: %q", cookie.Value)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("cookie authentication=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestUnauthenticatedLocalhostUsesResolvedClientIP(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.AllowUnauthenticatedLocalhost = true
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	cfg.TrustedProxyCIDRs = []string{"127.0.0.0/8"}
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	req.RemoteAddr = "127.0.0.1:8080"
+	req.Header.Set("X-Forwarded-For", "198.51.100.20")
+	response := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(response, req)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("proxied remote client received localhost trust: %d", response.Code)
+	}
+}
+
+func TestCookieAuthenticatedWritesRequireSameOrigin(t *testing.T) {
+	s, _, cfg := testServer(t)
+	login := doReq(t, s, http.MethodPost, "/auth/token", "", "", map[string]string{"token": cfg.AdminToken, "tenant": model.DefaultTenantID})
+	cookie := login.Result().Cookies()[0]
+	payload := []byte(`{"repository":"acme/api","log":"npm ERR! code ECONNRESET"}`)
+	request := httptest.NewRequest(http.MethodPost, "http://ciradar.example/api/v1/analyze", bytes.NewReader(payload))
+	request.RemoteAddr = "203.0.113.10:1234"
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing origin status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "http://ciradar.example/api/v1/analyze", bytes.NewReader(payload))
+	request.RemoteAddr = "203.0.113.10:1234"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "http://ciradar.example")
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("same origin status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHSTSUsesTrustedForwardedProto(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	cfg.TrustedProxyCIDRs = []string{"10.0.0.0/8"}
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	request.RemoteAddr = "10.0.0.5:443"
+	request.Header.Set("X-Forwarded-Proto", "https")
+	response := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(response, request)
+	if response.Header().Get("Strict-Transport-Security") == "" {
+		t.Fatal("HSTS missing behind trusted HTTPS proxy")
+	}
+}
+
+func TestMarketplacePurchaseUsesPrimaryGitHubWebhook(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	cfg.GitHubMarketplace.Enabled = true
+	cfg.GitHubMarketplace.WebhookSecret = "market-secret"
+	cfg.GitHubMarketplace.AutoCreateTenant = true
+	cfg.GitHubMarketplace.CancellationPolicy = "retain_free"
+	cfg.GitHubMarketplace.FreePlanName = "free"
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{"action":"purchased","marketplace_purchase":{"account":{"id":42,"login":"Acme","type":"Organization"},"plan":{"id":1,"name":"community"}},"installation":{"id":99}}`)
+	mac := hmac.New(sha256.New, []byte(cfg.GitHubMarketplace.WebhookSecret))
+	_, _ = mac.Write(body)
+	request := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
+	request.RemoteAddr = "203.0.113.10:1234"
+	request.Header.Set("X-GitHub-Event", "marketplace_purchase")
+	request.Header.Set("X-GitHub-Delivery", "marketplace-1")
+	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	response := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"processed"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if tenant, ok := store.ResolveInstallationTenant(context.Background(), 99); !ok || tenant == "" {
+		t.Fatalf("installation binding=%q %v", tenant, ok)
 	}
 }
