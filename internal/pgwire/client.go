@@ -52,7 +52,7 @@ func ParseDSN(dsn string) (Config, error) {
 	if dsn == "" {
 		return Config{}, errors.New("postgres dsn is empty")
 	}
-	cfg := Config{Port: 5432, SSLMode: "prefer", ConnectTimeout: 10 * time.Second}
+	cfg := Config{Port: 5432, SSLMode: "verify-full", ConnectTimeout: 10 * time.Second}
 	if strings.Contains(dsn, "://") {
 		u, err := url.Parse(dsn)
 		if err != nil {
@@ -121,7 +121,7 @@ func ParseDSN(dsn string) (Config, error) {
 		cfg.Database = cfg.User
 	}
 	switch cfg.SSLMode {
-	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full", "insecure-require":
 	default:
 		return cfg, fmt.Errorf("unsupported sslmode %q", cfg.SSLMode)
 	}
@@ -230,7 +230,7 @@ func (c *Client) negotiateTLS() error {
 		return fmt.Errorf("unexpected TLS response %q", b[0])
 	}
 	tc := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: c.cfg.Host}
-	if c.cfg.SSLMode == "require" || c.cfg.SSLMode == "prefer" || c.cfg.SSLMode == "allow" {
+	if c.cfg.SSLMode == "insecure-require" {
 		tc.InsecureSkipVerify = true
 	}
 	if c.cfg.RootCert != "" {
