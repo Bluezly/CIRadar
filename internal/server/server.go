@@ -53,10 +53,14 @@ type Server struct {
 	llm         *llm.Enhancer
 	marketplace *marketplace.Service
 	ipResolver  *clientIPResolver
+	mcpRuntime  *mcpserver.Runtime
+	mcpServer   *mcpserver.Server
 }
 
 func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Logger) *Server {
-	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store), marketplace: marketplace.New(cfg.GitHubMarketplace, store), ipResolver: newClientIPResolver(cfg.TrustedProxyCIDRs)}
+	runtime := mcpserver.NewRuntime()
+	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store), marketplace: marketplace.New(cfg.GitHubMarketplace, store), ipResolver: newClientIPResolver(cfg.TrustedProxyCIDRs), mcpRuntime: runtime}
+	s.mcpServer = &mcpserver.Server{Store: store, Semantic: cfg.Semantic, LLM: cfg.LLM, Repair: cfg.Repair, Runtime: runtime}
 	if cfg.SSO.Enabled {
 		mgr, err := sso.New(cfg.SSO)
 		if err != nil {
@@ -72,7 +76,9 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /source", s.sourcePage)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /auth/login", s.authLogin)
+	mux.HandleFunc("GET /auth/saml/metadata", s.authSAMLMetadata)
 	mux.HandleFunc("GET /auth/callback", s.authCallback)
+	mux.HandleFunc("POST /auth/callback", s.authCallback)
 	mux.HandleFunc("GET /auth/logout", s.authLogout)
 	mux.HandleFunc("POST /auth/token", s.authToken)
 	mux.HandleFunc("GET /api/v1/auth/me", s.require(model.RoleViewer, s.authMe))
@@ -90,6 +96,8 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /api/v1/analyses/{id}/feedback", s.require(model.RoleViewer, s.analysisFeedback))
 	mux.HandleFunc("GET /api/v1/analyses/{id}/llm", s.require(model.RoleViewer, s.getLLMEnhancement))
 	mux.HandleFunc("POST /api/v1/analyses/{id}/llm", s.require(model.RoleOperator, s.createLLMEnhancement))
+	mux.HandleFunc("GET /api/v1/analyses/{id}/repair", s.require(model.RoleViewer, s.getRepairResult))
+	mux.HandleFunc("POST /api/v1/analyses/{id}/repair/draft-pr", s.require(model.RoleOperator, s.requestDraftRepairPR))
 	mux.HandleFunc("GET /api/v1/analyses/{id}/similar", s.require(model.RoleViewer, s.similarAnalyses))
 	mux.HandleFunc("GET /api/v1/feedback", s.require(model.RoleViewer, s.feedbackList))
 	mux.HandleFunc("POST /api/v1/tests/junit", s.require(model.RoleOperator, s.ingestTestReport))
@@ -97,6 +105,9 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /api/v1/tests", s.require(model.RoleViewer, s.testCases))
 	mux.HandleFunc("GET /api/v1/tests/quarantines", s.require(model.RoleViewer, s.testQuarantines))
 	mux.HandleFunc("POST /api/v1/tests/select", s.require(model.RoleViewer, s.selectTests))
+	mux.HandleFunc("GET /api/v1/tests/impact", s.require(model.RoleViewer, s.getTestImpact))
+	mux.HandleFunc("PUT /api/v1/tests/impact", s.require(model.RoleOperator, s.putTestImpact))
+	mux.HandleFunc("POST /api/v1/tests/coverage", s.require(model.RoleOperator, s.putTestCoverage))
 	mux.HandleFunc("GET /api/v1/tests/quarantine-manifest", s.require(model.RoleViewer, s.testQuarantineManifest))
 	mux.HandleFunc("POST /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.quarantineTest))
 	mux.HandleFunc("DELETE /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.unquarantineTest))
@@ -124,6 +135,13 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /metrics", s.require(model.RoleViewer, s.metrics))
 	mux.HandleFunc("POST /mcp", s.require(model.RoleViewer, s.mcp))
 	mux.HandleFunc("GET /mcp", s.mcpGet)
+	mux.HandleFunc("DELETE /mcp", s.require(model.RoleViewer, s.mcpDelete))
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.mcpProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.oauthAuthorizationServer)
+	mux.HandleFunc("POST /oauth/register", s.oauthRegister)
+	mux.HandleFunc("GET /oauth/authorize", s.oauthAuthorize)
+	mux.HandleFunc("POST /oauth/token", s.oauthToken)
+	mux.HandleFunc("POST /oauth/revoke", s.oauthRevoke)
 	mux.HandleFunc("POST /webhooks/github", s.githubWebhook)
 	mux.HandleFunc("POST /webhooks/github/marketplace", s.githubMarketplaceWebhook)
 	mux.HandleFunc("POST /webhooks/gitlab", s.ciWebhook("gitlab"))
@@ -135,6 +153,11 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /webhooks/teamcity", s.ciWebhook("teamcity"))
 	mux.HandleFunc("POST /webhooks/travis", s.ciWebhook("travis"))
 	mux.HandleFunc("POST /webhooks/codebuild", s.ciWebhook("codebuild"))
+	mux.HandleFunc("POST /webhooks/bitbucket", s.ciWebhook("bitbucket"))
+	mux.HandleFunc("POST /webhooks/drone", s.ciWebhook("drone"))
+	mux.HandleFunc("POST /webhooks/semaphore", s.ciWebhook("semaphore"))
+	mux.HandleFunc("POST /webhooks/appveyor", s.ciWebhook("appveyor"))
+	mux.HandleFunc("POST /webhooks/cloudbuild", s.ciWebhook("cloudbuild"))
 	mux.HandleFunc("POST /chatops/slack", s.slackChatOps)
 	mux.HandleFunc("POST /chatops/teams", s.teamsChatOps)
 	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, logging(log, rateLimit(newRateLimiter(600, time.Minute), s.ipResolver, mux)))))
@@ -197,6 +220,14 @@ func (s *Server) dashboardJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = io.WriteString(w, dashboardJS)
+}
+
+func (s *Server) authSAMLMetadata(w http.ResponseWriter, r *http.Request) {
+	if s.sso == nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.sso.SAMLMetadata(w, r)
 }
 
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
@@ -394,6 +425,63 @@ func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, item)
 }
+func (s *Server) requestDraftRepairPR(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Repair.Enabled {
+		writeError(w, http.StatusServiceUnavailable, "repair is disabled")
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "analysis ID is required")
+		return
+	}
+	p := principal(r)
+	analysis, err := s.store.GetAnalysisForTenant(r.Context(), p.TenantID, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if analysis == nil {
+		writeError(w, http.StatusNotFound, "analysis not found")
+		return
+	}
+	var enhancement model.LLMEnhancement
+	found, err := s.store.GetObject(r.Context(), p.TenantID, "llm_enhancement", id, &enhancement)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found || strings.TrimSpace(enhancement.Patch) == "" {
+		writeError(w, http.StatusConflict, "analysis has no repair patch")
+		return
+	}
+	if err := s.store.EnqueueForTenant(r.Context(), p.TenantID, "repair.draft_pr", map[string]any{"tenant_id": p.TenantID, "analysis_id": id}, time.Now().UTC()); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, "repair.draft_pr_requested", "analysis", id, nil)
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "analysis_id": id})
+}
+
+func (s *Server) getRepairResult(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "analysis ID is required")
+		return
+	}
+	var result model.RepairResult
+	found, err := s.store.GetObject(r.Context(), principal(r).TenantID, "repair_result", id, &result)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "repair result not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) getLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 	if s.llm == nil || !s.llm.Enabled() {
 		writeError(w, http.StatusNotFound, "LLM enhancement is disabled")
@@ -615,6 +703,53 @@ func (s *Server) selectTests(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, out)
+}
+
+func (s *Server) getTestImpact(w http.ResponseWriter, r *http.Request) {
+	repository := strings.TrimSpace(r.URL.Query().Get("repository"))
+	if repository == "" {
+		writeError(w, http.StatusBadRequest, "repository is required")
+		return
+	}
+	graph, ok, err := testselection.LoadGraph(r.Context(), s.store, principal(r).TenantID, repository)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "impact graph not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, graph)
+}
+
+func (s *Server) putTestImpact(w http.ResponseWriter, r *http.Request) {
+	var graph model.ImpactGraph
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20)).Decode(&graph); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if err := testselection.SaveGraph(r.Context(), s.store, principal(r).TenantID, graph); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.audit(r, "test_impact.update", "repository", graph.Repository, map[string]string{"files": strconv.Itoa(len(graph.LanguageFiles)), "tests": strconv.Itoa(len(graph.TestFiles))})
+	writeJSON(w, http.StatusOK, graph)
+}
+
+func (s *Server) putTestCoverage(w http.ResponseWriter, r *http.Request) {
+	var input model.TestCoverageInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20)).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	graph, err := testselection.MergeCoverage(r.Context(), s.store, principal(r).TenantID, input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.audit(r, "test_coverage.update", "repository", input.Repository, map[string]string{"tests": strconv.Itoa(len(input.Coverage))})
+	writeJSON(w, http.StatusOK, graph)
 }
 
 func (s *Server) notificationDeliveries(w http.ResponseWriter, r *http.Request) {
@@ -916,8 +1051,80 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) mcpGet(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Allow", "POST")
-	w.WriteHeader(http.StatusMethodNotAllowed)
+	if strings.TrimSpace(r.Header.Get("MCP-Session-Id")) == "" {
+		w.Header().Set("Allow", "POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	p, authenticated := s.authenticate(r)
+	if !authenticated || roleRank(p.Role) < roleRank(model.RoleViewer) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	r = r.WithContext(context.WithValue(r.Context(), principalKey, p))
+	if !s.validMCPOrigin(r) {
+		writeError(w, http.StatusForbidden, "invalid MCP Origin")
+		return
+	}
+	sessionID := strings.TrimSpace(r.Header.Get("MCP-Session-Id"))
+	value, ok := s.mcpRuntime.Session(sessionID, p)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "valid MCP-Session-Id is required")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming is unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("MCP-Session-Id", sessionID)
+	_, _ = io.WriteString(w, "event: endpoint\ndata: /mcp\n\n")
+	flusher.Flush()
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case payload, open := <-value.Events:
+			if !open {
+				return
+			}
+			encoded, _ := json.Marshal(string(payload))
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", encoded)
+			flusher.Flush()
+		case <-ticker.C:
+			_, _ = io.WriteString(w, ": heartbeat\n\n")
+			flusher.Flush()
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *Server) mcpDelete(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	sessionID := strings.TrimSpace(r.Header.Get("MCP-Session-Id"))
+	if _, ok := s.mcpRuntime.Session(sessionID, p); !ok {
+		writeError(w, http.StatusBadRequest, "valid MCP-Session-Id is required")
+		return
+	}
+	s.mcpRuntime.CloseSession(sessionID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) mcpProtectedResource(w http.ResponseWriter, r *http.Request) {
+	resource := strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/mcp"
+	if strings.TrimSpace(s.cfg.PublicBaseURL) == "" {
+		scheme := "http"
+		if requestIsHTTPS(r, s.cfg.PublicBaseURL, s.ipResolver) {
+			scheme = "https"
+		}
+		resource = scheme + "://" + r.Host + "/mcp"
+	}
+	servers := []string{s.requestBaseURL(r)}
+	writeJSON(w, http.StatusOK, map[string]any{"resource": resource, "authorization_servers": servers, "bearer_methods_supported": []string{"header"}, "scopes_supported": []string{"ciradar.read", "ciradar.write"}})
 }
 
 func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
@@ -937,13 +1144,51 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := principal(r)
-	resp := (&mcpserver.Server{Store: s.store, Semantic: s.cfg.Semantic, LLM: s.cfg.LLM}).Handle(r.Context(), p.TenantID, req)
+	if mcpWriteRequest(req) && !principalHasScope(p, "ciradar.write") {
+		writeError(w, http.StatusForbidden, "OAuth token does not include ciradar.write")
+		return
+	}
+	sessionID := strings.TrimSpace(r.Header.Get("MCP-Session-Id"))
+	if req.Method == "initialize" && sessionID == "" {
+		sessionID = s.mcpRuntime.CreateSession(p)
+		w.Header().Set("MCP-Session-Id", sessionID)
+	} else if sessionID != "" {
+		if _, ok := s.mcpRuntime.Session(sessionID, p); !ok {
+			writeError(w, http.StatusBadRequest, "valid MCP-Session-Id is required")
+			return
+		}
+	} else if mcpWriteRequest(req) {
+		writeError(w, http.StatusBadRequest, "MCP write tools require an initialized session")
+		return
+	}
+	resp := s.mcpServer.HandlePrincipal(r.Context(), p, req)
 	if req.ID == nil {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("MCP-Session-Id", sessionID)
 	writeJSON(w, http.StatusOK, resp)
+	if req.Method == "tools/call" && resp.Error == nil {
+		payload, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": map[string]any{"tenant_id": p.TenantID}})
+		s.mcpRuntime.NotifyTenant(p.TenantID, payload)
+	}
+}
+
+func mcpWriteRequest(req mcpserver.Request) bool {
+	if req.Method != "tools/call" {
+		return false
+	}
+	var params mcpserver.CallParams
+	if json.Unmarshal(req.Params, &params) != nil {
+		return false
+	}
+	switch params.Name {
+	case "prepare_action", "acknowledge_incident", "resolve_incident", "quarantine_test", "unquarantine_test", "create_draft_repair_pr":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) validMCPOrigin(r *http.Request) bool {
@@ -1229,9 +1474,37 @@ func (s *Server) require(min model.Role, next http.HandlerFunc) http.HandlerFunc
 			writeError(w, 403, "forbidden")
 			return
 		}
+		if requestWrites(r) && !principalHasScope(p, "ciradar.write") {
+			writeError(w, 403, "OAuth token does not include ciradar.write")
+			return
+		}
 		next(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
 	}
 }
+func requestWrites(r *http.Request) bool {
+	if r.URL.Path == "/mcp" {
+		return false
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	default:
+		return true
+	}
+}
+
+func principalHasScope(p model.Principal, scope string) bool {
+	if len(p.Scopes) == 0 {
+		return true
+	}
+	for _, value := range p.Scopes {
+		if value == scope {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) requireRoot(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := s.authenticate(r)

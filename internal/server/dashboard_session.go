@@ -130,6 +130,9 @@ func (s *Server) authenticateDashboardSession(r *http.Request) (model.Principal,
 }
 
 func (s *Server) authenticateToken(ctx context.Context, token, tenant string) (model.Principal, bool) {
+	if strings.HasPrefix(token, "cir_oauth_") {
+		return s.authenticateOAuthToken(ctx, token)
+	}
 	if tenant == "" {
 		tenant = s.cfg.DefaultTenantID
 	}
