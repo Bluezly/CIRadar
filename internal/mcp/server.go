@@ -5,13 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"ciradar/internal/config"
 	"ciradar/internal/db"
+	"ciradar/internal/insights"
 	"ciradar/internal/model"
+	"ciradar/internal/similarity"
+	"ciradar/internal/testselection"
 	"ciradar/internal/version"
 )
 
-type Server struct{ Store db.Backend }
+type Server struct {
+	Store    db.Backend
+	Semantic config.SemanticConfig
+	LLM      config.LLMConfig
+}
 
 type Request struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -106,6 +115,10 @@ func toolDefinitions() []any {
 		tool("find_similar_failures", "Find recent failures by fingerprint, category, provider or repository", map[string]any{"type": "object", "properties": map[string]any{"fingerprint": map[string]any{"type": "string"}, "category": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "repository": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}}),
 		tool("repository_health", "Summarize CI health for one repository", map[string]any{"type": "object", "required": []string{"repository"}, "properties": map[string]any{"repository": map[string]any{"type": "string"}}}),
 		tool("list_flaky_tests", "List flaky tests", map[string]any{"type": "object", "properties": map[string]any{"repository": map[string]any{"type": "string"}, "minimum_score": map[string]any{"type": "number"}, "limit": map[string]any{"type": "integer"}}}),
+		tool("semantic_similar_failures", "Find semantically similar failures", map[string]any{"type": "object", "required": []string{"analysis_id"}, "properties": map[string]any{"analysis_id": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}}),
+		tool("select_impacted_tests", "Select tests likely impacted by changed files", map[string]any{"type": "object", "required": []string{"repository", "changed_files"}, "properties": map[string]any{"repository": map[string]any{"type": "string"}, "changed_files": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "framework": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}}),
+		tool("get_dora_metrics", "Get DORA metrics", map[string]any{"type": "object", "properties": map[string]any{"days": map[string]any{"type": "integer"}, "environment": map[string]any{"type": "string"}}}),
+		tool("get_ci_costs", "Get CI duration and estimated cost", map[string]any{"type": "object", "properties": map[string]any{"days": map[string]any{"type": "integer"}}}),
 	}
 }
 func tool(name, desc string, input map[string]any) map[string]any {
@@ -170,6 +183,36 @@ func (s *Server) callTool(ctx context.Context, tenant string, p CallParams) (any
 			}
 		}
 		return out, nil
+	case "semantic_similar_failures":
+		id := stringArg(p.Arguments, "analysis_id")
+		if id == "" {
+			return nil, fmt.Errorf("analysis_id is required")
+		}
+		return similarity.FindConfigured(ctx, s.Store, tenant, id, min(intArg(p.Arguments, "limit", 10), 100), s.Semantic, s.LLM)
+	case "select_impacted_tests":
+		repo := stringArg(p.Arguments, "repository")
+		if repo == "" {
+			return nil, fmt.Errorf("repository is required")
+		}
+		files := stringSliceArg(p.Arguments, "changed_files")
+		if len(files) == 0 {
+			return nil, fmt.Errorf("changed_files is required")
+		}
+		return testselection.Select(ctx, s.Store, tenant, model.TestSelectionRequest{Repository: repo, ChangedFiles: files, Framework: stringArg(p.Arguments, "framework"), Limit: intArg(p.Arguments, "limit", 100), IncludeFlaky: true})
+	case "get_dora_metrics":
+		days := intArg(p.Arguments, "days", 30)
+		if days > 365 {
+			days = 365
+		}
+		until := time.Now().UTC()
+		return insights.DORA(ctx, s.Store, tenant, stringArg(p.Arguments, "environment"), until.Add(-time.Duration(days)*24*time.Hour), until)
+	case "get_ci_costs":
+		days := intArg(p.Arguments, "days", 30)
+		if days > 365 {
+			days = 365
+		}
+		until := time.Now().UTC()
+		return insights.Usage(ctx, s.Store, tenant, until.Add(-time.Duration(days)*24*time.Hour), until)
 	default:
 		return nil, fmt.Errorf("unknown read-only tool %q", p.Name)
 	}
@@ -269,6 +312,22 @@ func intArg(m map[string]any, key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+func stringSliceArg(m map[string]any, key string) []string {
+	v, ok := m[key].([]any)
+	if !ok {
+		if x, ok := m[key].([]string); ok {
+			return x
+		}
+		return nil
+	}
+	out := []string{}
+	for _, x := range v {
+		if s, ok := x.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, strings.TrimSpace(s))
+		}
+	}
+	return out
 }
 func floatArg(m map[string]any, key string, fallback float64) float64 {
 	switch v := m[key].(type) {
