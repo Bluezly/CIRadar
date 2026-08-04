@@ -40,11 +40,12 @@ type discovery struct {
 }
 
 type flowState struct {
-	State    string    `json:"state"`
-	Nonce    string    `json:"nonce"`
-	Verifier string    `json:"verifier"`
-	ReturnTo string    `json:"return_to"`
-	Expires  time.Time `json:"expires"`
+	State     string    `json:"state"`
+	RequestID string    `json:"request_id,omitempty"`
+	Nonce     string    `json:"nonce"`
+	Verifier  string    `json:"verifier"`
+	ReturnTo  string    `json:"return_to"`
+	Expires   time.Time `json:"expires"`
 }
 
 type Manager struct {
@@ -75,7 +76,15 @@ func (m *Manager) Enabled() bool {
 }
 
 func (m *Manager) Login(w http.ResponseWriter, r *http.Request) {
-	if !m.Enabled() || m.cfg.Mode != "oidc" {
+	if !m.Enabled() {
+		http.NotFound(w, r)
+		return
+	}
+	if m.cfg.Mode == "saml" {
+		m.samlLogin(w, r)
+		return
+	}
+	if m.cfg.Mode != "oidc" {
 		http.Error(w, "OIDC is not enabled", http.StatusNotFound)
 		return
 	}
@@ -108,7 +117,15 @@ func (m *Manager) Login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
-	if !m.Enabled() || m.cfg.Mode != "oidc" {
+	if !m.Enabled() {
+		http.NotFound(w, r)
+		return
+	}
+	if m.cfg.Mode == "saml" {
+		m.samlCallback(w, r)
+		return
+	}
+	if m.cfg.Mode != "oidc" {
 		http.Error(w, "OIDC is not enabled", http.StatusNotFound)
 		return
 	}
@@ -261,7 +278,14 @@ func (m *Manager) readFlow(r *http.Request) (flowState, error) {
 		return flowState{}, errors.New("invalid OIDC state")
 	}
 	var flow flowState
-	if json.Unmarshal(b, &flow) != nil || flow.State == "" || flow.Verifier == "" || flow.Nonce == "" || time.Now().After(flow.Expires) {
+	if json.Unmarshal(b, &flow) != nil || flow.State == "" || time.Now().After(flow.Expires) {
+		return flowState{}, errors.New("invalid SSO state")
+	}
+	if m.cfg.Mode == "saml" {
+		if flow.RequestID == "" {
+			return flowState{}, errors.New("invalid SAML state")
+		}
+	} else if flow.Verifier == "" || flow.Nonce == "" {
 		return flowState{}, errors.New("invalid OIDC state")
 	}
 	return flow, nil
