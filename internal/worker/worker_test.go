@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -239,6 +240,60 @@ func TestGenericCIEventEndToEnd(t *testing.T) {
 	}
 }
 
+func TestGenericCIEventRequestsOneSafeRetry(t *testing.T) {
+	var retries int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v4/projects/7/jobs/42/trace":
+			_, _ = io.WriteString(w, "npm ERR! code ECONNRESET\nnpm ERR! network request to registry.npmjs.org failed")
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v4/projects/7/jobs/42/retry":
+			retries++
+			w.Header().Set("X-Request-Id", "retry-1")
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTenant(context.Background(), "alpha", "Alpha"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.ProviderPolling = false
+	cfg.AutomaticRetryEnabled = true
+	cfg.AutomaticRetryMinScore = 0
+	cfg.Connectors = []config.CIConnector{{Name: "gitlab", Provider: "gitlab", Enabled: true, TenantID: "alpha", BaseURL: api.URL, Token: "token", WebhookSecret: "secret"}}
+	wkr := New(cfg, store, analyzer.New("test-key"), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ev := model.CIEvent{TenantID: "alpha", Provider: "gitlab", Repository: "acme/api", Organization: "acme", Workflow: "pipeline", Job: "test", RunID: 9, JobID: "42", CommitSHA: "abc", Conclusion: "failure", ProjectID: "7", PipelineID: "9"}
+	if err := wkr.processCIEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := wkr.processCIEvent(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if retries != 1 {
+		t.Fatalf("retries=%d", retries)
+	}
+	audit, err := store.ListAudit(context.Background(), "alpha", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range audit {
+		if item.Action == "workflow.retry" && item.Metadata["request_id"] == "retry-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit=%#v", audit)
+	}
+}
+
 func TestPRCommentIsStickyAndIncludesActions(t *testing.T) {
 	var created, updated int
 	var latest string
@@ -294,5 +349,56 @@ func TestPRCommentIsStickyAndIncludesActions(t *testing.T) {
 	}
 	if created != 1 || updated != 1 || !strings.Contains(latest, "<!-- ci-radar:acme/api -->") || !strings.Contains(latest, "Retry once") {
 		t.Fatalf("created=%d updated=%d body=%s", created, updated, latest)
+	}
+}
+
+func TestApprovalGatedRepairCreatesDraftPR(t *testing.T) {
+	var pullCreated bool
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/77/access_tokens":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "install-token", "expires_at": time.Now().Add(time.Hour)})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/contents/src/app.js":
+			_ = json.NewEncoder(w).Encode(map[string]any{"path": "src/app.js", "sha": "sha-file", "encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("const retries = 1;\n"))})
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/git/refs":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/api/contents/src/app.js":
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/pulls":
+			pullCreated = true
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 13, "html_url": "https://github.example/pr/13"})
+		default:
+			http.Error(w, "not found "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	client, server := testGitHubClient(t, api)
+	defer server.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTenant(context.Background(), "alpha", "Alpha"); err != nil {
+		t.Fatal(err)
+	}
+	analysis := model.AnalysisResult{ID: "analysis-repair", TenantID: "alpha", Attribution: model.AttributionCode, Score: 92, Summary: "retry count is too low"}
+	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", InstallationID: 77, CommitSHA: "abc", BaseBranch: "feature"}
+	if err := store.PutObject(context.Background(), "alpha", "analysis_source", analysis.ID, source); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Repair.Enabled = true
+	cfg.Repair.AutoDraftPR = true
+	cfg.Repair.MinimumScore = 70
+	wkr := New(cfg, store, analyzer.New("test-key"), client, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	patch := "--- a/src/app.js\n+++ b/src/app.js\n@@ -1 +1 @@\n-const retries = 1;\n+const retries = 2;\n"
+	wkr.maybeCreateDraftRepair(context.Background(), analysis, model.LLMEnhancement{AnalysisID: analysis.ID, TenantID: "alpha", Patch: patch})
+	if !pullCreated {
+		t.Fatal("draft PR was not created")
+	}
+	var result model.RepairResult
+	found, err := store.GetObject(context.Background(), "alpha", "repair_result", analysis.ID, &result)
+	if err != nil || !found || result.Status != "draft_pr_created" || result.PullRequestNumber != 13 {
+		t.Fatalf("result=%#v found=%v err=%v", result, found, err)
 	}
 }
