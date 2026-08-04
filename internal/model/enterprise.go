@@ -124,6 +124,7 @@ type TestCoverageInput struct {
 
 type SelectedTest struct {
 	TestKey       string   `json:"test_key"`
+	DisplayName   string   `json:"display_name"`
 	Name          string   `json:"name"`
 	Suite         string   `json:"suite,omitempty"`
 	ClassName     string   `json:"class_name,omitempty"`
