@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  verify:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -18,17 +18,55 @@ jobs:
           cache: false
       - name: Format check
         run: test -z "$(gofmt -l .)"
-      - name: Test
+      - name: Test with race detector
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
-      - name: Build Windows
+      - name: Dashboard syntax
+        run: node --check internal/server/dashboard.js
+      - name: Configuration syntax
+        run: python3 -m json.tool ciradar.example.json >/dev/null
+      - name: Go comment policy
+        run: test "$(grep -R '^[[:space:]]*//' --include='*.go' cmd internal | wc -l)" -eq 0
+
+  build:
+    needs: verify
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            output: CIRadar-Windows-x64.exe
+          - goos: windows
+            goarch: arm64
+            output: CIRadar-Windows-arm64.exe
+          - goos: linux
+            goarch: amd64
+            output: ciradar-linux-x64
+          - goos: linux
+            goarch: arm64
+            output: ciradar-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            output: ciradar-darwin-x64
+          - goos: darwin
+            goarch: arm64
+            output: ciradar-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Build
         env:
           CGO_ENABLED: '0'
-          GOOS: windows
-          GOARCH: amd64
-        run: go build -buildvcs=false -trimpath -o CIRadar-Windows-x64.exe ./cmd/ciradar
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -buildvcs=false -trimpath -o "${{ matrix.output }}" ./cmd/ciradar
       - uses: actions/upload-artifact@v4
         with:
-          name: ciradar-windows-x64
-          path: CIRadar-Windows-x64.exe
+          name: ${{ matrix.output }}
+          path: ${{ matrix.output }}
