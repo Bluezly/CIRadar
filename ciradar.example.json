@@ -60,7 +60,7 @@
           "incident_resolved",
           "test_flaky"
         ],
-        "minimum_score": 65,
+        "minimum_score": 60,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5,
@@ -78,7 +78,7 @@
           "incident_resolved",
           "test_flaky"
         ],
-        "minimum_score": 65,
+        "minimum_score": 60,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5,
@@ -96,7 +96,7 @@
           "incident_resolved",
           "test_flaky"
         ],
-        "minimum_score": 65,
+        "minimum_score": 60,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5,
@@ -115,7 +115,7 @@
           "incident_resolved",
           "test_flaky"
         ],
-        "minimum_score": 65,
+        "minimum_score": 60,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5
@@ -194,7 +194,7 @@
   "pr_comments": {
     "enabled": true,
     "mode": "external_or_strong",
-    "minimum_score": 65,
+    "minimum_score": 60,
     "update_existing": true
   },
   "connectors": [
@@ -391,7 +391,7 @@
     "embeddings_endpoint": "https://api.example.com/v1/embeddings",
     "embedding_model": "YOUR_EMBEDDING_MODEL",
     "auto_enhance": false,
-    "minimum_score": 70,
+    "minimum_score": 60,
     "max_input_characters": 24000,
     "max_output_tokens": 1200,
     "timeout": "45s",
@@ -459,7 +459,7 @@
   "repair": {
     "enabled": false,
     "auto_draft_pr": false,
-    "minimum_score": 75,
+    "minimum_score": 60,
     "branch_prefix": "ciradar/repair-",
     "maximum_files": 10,
     "maximum_lines": 1000

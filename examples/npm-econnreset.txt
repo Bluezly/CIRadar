@@ -1,0 +1,2 @@
+npm ERR! code ECONNRESET
+npm ERR! network request to https://registry.npmjs.org/react failed, reason: socket hang up
