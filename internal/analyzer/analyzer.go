@@ -166,6 +166,12 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 		}
 	}
 	rawScore := score
+	externalEvidenceScore := clampEvidenceScore(positiveScore)
+	codeEvidenceScore := clampEvidenceScore(-negativeScore)
+	evidenceStrength := externalEvidenceScore
+	if codeEvidenceScore > evidenceStrength {
+		evidenceStrength = codeEvidenceScore
+	}
 	competingSignals := positiveScore >= 25 && negativeScore <= -25
 	if score > 100 {
 		score = 100
@@ -187,37 +193,51 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	excerpt := extractExcerpt(redacted, matched, a.maxExcerpt)
 
 	result := model.AnalysisResult{
-		ID:                 newID("analysis", now, fingerprint),
-		TenantID:           tenantID(in.TenantID),
-		Category:           primary.Category,
-		Attribution:        attribution,
-		Provider:           primary.Provider,
-		Operation:          primary.Operation,
-		ErrorFamily:        primary.ErrorFamily,
-		Confidence:         confidence,
-		Score:              score,
-		RawScore:           rawScore,
-		PositiveScore:      positiveScore,
-		NegativeScore:      negativeScore,
-		CompetingSignals:   competingSignals,
-		DecisionReason:     decisionReason,
-		Fingerprint:        fingerprint,
-		PrivateFingerprint: privateFP,
-		Summary:            primary.Summary,
-		Recommendation:     primary.Recommendation,
-		Evidence:           evidence,
-		RedactedExcerpt:    excerpt,
-		Environment:        env,
-		MatchedRules:       matchedIDs,
-		CreatedAt:          now,
-		CrossRepoCount:     ctx.CrossRepoCount,
-		CrossOrgCount:      ctx.CrossOrgCount,
-		ProviderIncident:   ctx.ProviderIncident,
-		EnvironmentDrift:   len(changes) > 0,
-		EnvironmentChanges: changes,
+		ID:                    newID("analysis", now, fingerprint),
+		TenantID:              tenantID(in.TenantID),
+		Category:              primary.Category,
+		Attribution:           attribution,
+		Provider:              primary.Provider,
+		Operation:             primary.Operation,
+		ErrorFamily:           primary.ErrorFamily,
+		Confidence:            confidence,
+		Score:                 score,
+		ExternalityScore:      score,
+		EvidenceStrength:      evidenceStrength,
+		ExternalEvidenceScore: externalEvidenceScore,
+		CodeEvidenceScore:     codeEvidenceScore,
+		RawScore:              rawScore,
+		PositiveScore:         positiveScore,
+		NegativeScore:         negativeScore,
+		CompetingSignals:      competingSignals,
+		DecisionReason:        decisionReason,
+		Fingerprint:           fingerprint,
+		PrivateFingerprint:    privateFP,
+		Summary:               primary.Summary,
+		Recommendation:        primary.Recommendation,
+		Evidence:              evidence,
+		RedactedExcerpt:       excerpt,
+		Environment:           env,
+		MatchedRules:          matchedIDs,
+		CreatedAt:             now,
+		CrossRepoCount:        ctx.CrossRepoCount,
+		CrossOrgCount:         ctx.CrossOrgCount,
+		ProviderIncident:      ctx.ProviderIncident,
+		EnvironmentDrift:      len(changes) > 0,
+		EnvironmentChanges:    changes,
 	}
 	result.SuggestedActions = SuggestedActions(result)
 	return result
+}
+
+func clampEvidenceScore(v int) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
 }
 
 func fingerprintValue(key, material []byte) string {
