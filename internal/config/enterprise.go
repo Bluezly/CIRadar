@@ -10,34 +10,44 @@ import (
 )
 
 type SSOConfig struct {
-	Enabled            bool     `json:"enabled"`
-	Mode               string   `json:"mode"`
-	IssuerURL          string   `json:"issuer_url,omitempty"`
-	ClientID           string   `json:"client_id,omitempty"`
-	ClientSecret       string   `json:"client_secret,omitempty"`
-	RedirectURL        string   `json:"redirect_url,omitempty"`
-	Scopes             []string `json:"scopes,omitempty"`
-	AllowedDomains     []string `json:"allowed_domains,omitempty"`
-	TenantClaim        string   `json:"tenant_claim,omitempty"`
-	RoleClaim          string   `json:"role_claim,omitempty"`
-	GroupsClaim        string   `json:"groups_claim,omitempty"`
-	AdminGroups        []string `json:"admin_groups,omitempty"`
-	OperatorGroups     []string `json:"operator_groups,omitempty"`
-	ViewerGroups       []string `json:"viewer_groups,omitempty"`
-	DefaultTenant      string   `json:"default_tenant,omitempty"`
-	DefaultRole        string   `json:"default_role,omitempty"`
-	SessionSecret      string   `json:"session_secret,omitempty"`
-	CookieName         string   `json:"cookie_name,omitempty"`
-	CookieSecure       bool     `json:"cookie_secure"`
-	TrustedProxyCIDRs  []string `json:"trusted_proxy_cidrs,omitempty"`
-	ProxySecretHeader  string   `json:"proxy_secret_header,omitempty"`
-	ProxySecret        string   `json:"proxy_secret,omitempty"`
-	ProxySubjectHeader string   `json:"proxy_subject_header,omitempty"`
-	ProxyEmailHeader   string   `json:"proxy_email_header,omitempty"`
-	ProxyNameHeader    string   `json:"proxy_name_header,omitempty"`
-	ProxyGroupsHeader  string   `json:"proxy_groups_header,omitempty"`
-	ProxyTenantHeader  string   `json:"proxy_tenant_header,omitempty"`
-	ProxyRoleHeader    string   `json:"proxy_role_header,omitempty"`
+	Enabled            bool          `json:"enabled"`
+	Mode               string        `json:"mode"`
+	IssuerURL          string        `json:"issuer_url,omitempty"`
+	ClientID           string        `json:"client_id,omitempty"`
+	ClientSecret       string        `json:"client_secret,omitempty"`
+	RedirectURL        string        `json:"redirect_url,omitempty"`
+	Scopes             []string      `json:"scopes,omitempty"`
+	AllowedDomains     []string      `json:"allowed_domains,omitempty"`
+	TenantClaim        string        `json:"tenant_claim,omitempty"`
+	RoleClaim          string        `json:"role_claim,omitempty"`
+	GroupsClaim        string        `json:"groups_claim,omitempty"`
+	AdminGroups        []string      `json:"admin_groups,omitempty"`
+	OperatorGroups     []string      `json:"operator_groups,omitempty"`
+	ViewerGroups       []string      `json:"viewer_groups,omitempty"`
+	DefaultTenant      string        `json:"default_tenant,omitempty"`
+	DefaultRole        string        `json:"default_role,omitempty"`
+	SessionSecret      string        `json:"session_secret,omitempty"`
+	CookieName         string        `json:"cookie_name,omitempty"`
+	CookieSecure       bool          `json:"cookie_secure"`
+	TrustedProxyCIDRs  []string      `json:"trusted_proxy_cidrs,omitempty"`
+	ProxySecretHeader  string        `json:"proxy_secret_header,omitempty"`
+	ProxySecret        string        `json:"proxy_secret,omitempty"`
+	ProxySubjectHeader string        `json:"proxy_subject_header,omitempty"`
+	ProxyEmailHeader   string        `json:"proxy_email_header,omitempty"`
+	ProxyNameHeader    string        `json:"proxy_name_header,omitempty"`
+	ProxyGroupsHeader  string        `json:"proxy_groups_header,omitempty"`
+	ProxyTenantHeader  string        `json:"proxy_tenant_header,omitempty"`
+	ProxyRoleHeader    string        `json:"proxy_role_header,omitempty"`
+	SAMLEntityID       string        `json:"saml_entity_id,omitempty"`
+	SAMLIdPSSOURL      string        `json:"saml_idp_sso_url,omitempty"`
+	SAMLIdPEntityID    string        `json:"saml_idp_entity_id,omitempty"`
+	SAMLIdPCertificate string        `json:"saml_idp_certificate,omitempty"`
+	SAMLACSURL         string        `json:"saml_acs_url,omitempty"`
+	SAMLXMLSecPath     string        `json:"saml_xmlsec_path,omitempty"`
+	SAMLNameAttribute  string        `json:"saml_name_attribute,omitempty"`
+	SAMLEmailAttribute string        `json:"saml_email_attribute,omitempty"`
+	SAMLClockSkewText  string        `json:"saml_clock_skew,omitempty"`
+	SAMLClockSkew      time.Duration `json:"-"`
 }
 
 type LLMConfig struct {
@@ -56,6 +66,15 @@ type LLMConfig struct {
 	Timeout             time.Duration `json:"-"`
 	SendRedactedExcerpt bool          `json:"send_redacted_excerpt"`
 	SendChangedFiles    bool          `json:"send_changed_files"`
+}
+
+type RepairConfig struct {
+	Enabled      bool   `json:"enabled"`
+	AutoDraftPR  bool   `json:"auto_draft_pr"`
+	MinimumScore int    `json:"minimum_score,omitempty"`
+	BranchPrefix string `json:"branch_prefix,omitempty"`
+	MaximumFiles int    `json:"maximum_files,omitempty"`
+	MaximumLines int    `json:"maximum_lines,omitempty"`
 }
 
 type ChatOpsConfig struct {
@@ -81,10 +100,15 @@ type CostConfig struct {
 }
 
 type SemanticConfig struct {
-	Enabled          bool `json:"enabled"`
-	RemoteEmbeddings bool `json:"remote_embeddings"`
-	VectorDimensions int  `json:"vector_dimensions,omitempty"`
-	CandidateLimit   int  `json:"candidate_limit,omitempty"`
+	Enabled          bool   `json:"enabled"`
+	Mode             string `json:"mode,omitempty"`
+	RemoteEmbeddings bool   `json:"remote_embeddings"`
+	VectorDimensions int    `json:"vector_dimensions,omitempty"`
+	CandidateLimit   int    `json:"candidate_limit,omitempty"`
+	LocalEndpoint    string `json:"local_endpoint,omitempty"`
+	LocalModel       string `json:"local_model,omitempty"`
+	LocalAPIKey      string `json:"local_api_key,omitempty"`
+	LocalVectorPath  string `json:"local_vector_path,omitempty"`
 }
 
 type PredictiveTestConfig struct {
@@ -163,6 +187,27 @@ func (c *Config) normalizeEnterprise() error {
 					return fmt.Errorf("invalid trusted proxy cidr %q", raw)
 				}
 			}
+		case "saml":
+			if c.SSO.SAMLEntityID == "" || c.SSO.SAMLIdPSSOURL == "" || c.SSO.SAMLIdPEntityID == "" || c.SSO.SAMLIdPCertificate == "" || c.SSO.SAMLACSURL == "" {
+				return errors.New("sso saml requires saml_entity_id, saml_idp_sso_url, saml_idp_entity_id, saml_idp_certificate, and saml_acs_url")
+			}
+			if c.SSO.SAMLXMLSecPath == "" {
+				c.SSO.SAMLXMLSecPath = "xmlsec1"
+			}
+			if c.SSO.SAMLEmailAttribute == "" {
+				c.SSO.SAMLEmailAttribute = "email"
+			}
+			if c.SSO.SAMLNameAttribute == "" {
+				c.SSO.SAMLNameAttribute = "name"
+			}
+			if c.SSO.SAMLClockSkewText == "" {
+				c.SSO.SAMLClockSkewText = "2m"
+			}
+			d, e := time.ParseDuration(c.SSO.SAMLClockSkewText)
+			if e != nil || d < 0 || d > 10*time.Minute {
+				return fmt.Errorf("invalid saml_clock_skew %q", c.SSO.SAMLClockSkewText)
+			}
+			c.SSO.SAMLClockSkew = d
 		default:
 			return fmt.Errorf("unsupported sso mode %q", c.SSO.Mode)
 		}
@@ -196,6 +241,24 @@ func (c *Config) normalizeEnterprise() error {
 	if c.LLM.Enabled && (c.LLM.Endpoint == "" || c.LLM.APIKey == "") {
 		return errors.New("llm requires endpoint and api_key")
 	}
+	if c.Repair.MinimumScore < 0 || c.Repair.MinimumScore > 100 {
+		c.Repair.MinimumScore = 75
+	}
+	if c.Repair.BranchPrefix == "" {
+		c.Repair.BranchPrefix = "ciradar/repair-"
+	}
+	if strings.Contains(c.Repair.BranchPrefix, "..") || strings.HasPrefix(c.Repair.BranchPrefix, "/") {
+		return errors.New("repair branch_prefix is invalid")
+	}
+	if c.Repair.MaximumFiles < 1 || c.Repair.MaximumFiles > 25 {
+		c.Repair.MaximumFiles = 10
+	}
+	if c.Repair.MaximumLines < 1 || c.Repair.MaximumLines > 5000 {
+		c.Repair.MaximumLines = 1000
+	}
+	if c.Repair.AutoDraftPR && (!c.Repair.Enabled || !c.LLM.Enabled) {
+		return errors.New("repair auto_draft_pr requires repair.enabled and llm.enabled")
+	}
 	if c.ChatOps.DefaultTenant == "" {
 		c.ChatOps.DefaultTenant = c.DefaultTenantID
 	}
@@ -216,6 +279,39 @@ func (c *Config) normalizeEnterprise() error {
 	}
 	if c.Costs.BillingRounds == nil {
 		c.Costs.BillingRounds = map[string]int{}
+	}
+	c.Semantic.Mode = strings.ToLower(strings.TrimSpace(c.Semantic.Mode))
+	if c.Semantic.Mode == "" {
+		if c.Semantic.RemoteEmbeddings {
+			c.Semantic.Mode = "remote"
+		} else if c.Semantic.LocalEndpoint != "" {
+			c.Semantic.Mode = "ollama"
+		} else if c.Semantic.LocalVectorPath != "" {
+			c.Semantic.Mode = "local-vectors"
+		} else if c.Semantic.Enabled {
+			c.Semantic.Mode = "ollama"
+		} else {
+			c.Semantic.Mode = "lexical"
+		}
+	}
+	if c.Semantic.Mode == "local-hash" {
+		c.Semantic.Mode = "lexical"
+	}
+	switch c.Semantic.Mode {
+	case "lexical", "local-vectors", "ollama", "remote":
+	default:
+		return fmt.Errorf("unsupported semantic mode %q", c.Semantic.Mode)
+	}
+	if c.Semantic.Mode == "local-vectors" && strings.TrimSpace(c.Semantic.LocalVectorPath) == "" {
+		return errors.New("semantic local-vectors mode requires local_vector_path")
+	}
+	if c.Semantic.Mode == "ollama" {
+		if c.Semantic.LocalEndpoint == "" {
+			c.Semantic.LocalEndpoint = "http://127.0.0.1:11434/api/embed"
+		}
+		if c.Semantic.LocalModel == "" {
+			c.Semantic.LocalModel = "embeddinggemma"
+		}
 	}
 	if c.Semantic.VectorDimensions < 32 {
 		c.Semantic.VectorDimensions = 128

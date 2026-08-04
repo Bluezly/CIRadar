@@ -68,6 +68,9 @@ type CIConnector struct {
 	Project       string            `json:"project,omitempty"`
 	Region        string            `json:"region,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
+	RetryURL      string            `json:"retry_url,omitempty"`
+	RetryMethod   string            `json:"retry_method,omitempty"`
+	RetryBody     string            `json:"retry_body,omitempty"`
 	CostPerMinute float64           `json:"cost_per_minute,omitempty"`
 	Currency      string            `json:"currency,omitempty"`
 }
@@ -142,6 +145,7 @@ type Config struct {
 	TestIntelligence              TestIntelligenceConfig `json:"test_intelligence"`
 	SSO                           SSOConfig              `json:"sso"`
 	LLM                           LLMConfig              `json:"llm"`
+	Repair                        RepairConfig           `json:"repair"`
 	ChatOps                       ChatOpsConfig          `json:"chatops"`
 	Costs                         CostConfig             `json:"costs"`
 	Semantic                      SemanticConfig         `json:"semantic_similarity"`
@@ -188,6 +192,7 @@ func Default() Config {
 		TestIntelligence:              TestIntelligenceConfig{Enabled: true, AutoQuarantine: false, AutoQuarantineMinRuns: 5, AutoQuarantineMinScore: 65, AutoQuarantineDurationText: "7d"},
 		SSO:                           SSOConfig{Enabled: false, Mode: "oidc", DefaultTenant: "default", DefaultRole: "viewer", CookieName: "ciradar_session", CookieSecure: true},
 		LLM:                           LLMConfig{Enabled: false, Provider: "openai-compatible", Model: "gpt-5-mini", MinimumScore: 60, MaxInputCharacters: 24000, MaxOutputTokens: 1200, TimeoutText: "45s", SendRedactedExcerpt: true},
+		Repair:                        RepairConfig{Enabled: false, AutoDraftPR: false, MinimumScore: 75, BranchPrefix: "ciradar/repair-", MaximumFiles: 10, MaximumLines: 1000},
 		ChatOps:                       ChatOpsConfig{Enabled: false, DefaultTenant: "default", AllowAcknowledge: true, AllowResolve: true, AllowQuarantine: true, QuarantineDuration: "7d"},
 		Costs:                         CostConfig{Enabled: true, Currency: "USD", DefaultRates: map[string]float64{}, RunnerRates: map[string]float64{}, BillingRounds: map[string]int{}},
 		Semantic:                      SemanticConfig{Enabled: true, RemoteEmbeddings: false, VectorDimensions: 128, CandidateLimit: 500},
@@ -212,6 +217,11 @@ func Default() Config {
 			{Name: "teamcity", Provider: "teamcity", Enabled: false, TenantID: "default"},
 			{Name: "travis", Provider: "travis", Enabled: false, TenantID: "default", BaseURL: "https://api.travis-ci.com"},
 			{Name: "codebuild", Provider: "codebuild", Enabled: false, TenantID: "default", BaseURL: "https://codebuild.amazonaws.com"},
+			{Name: "bitbucket", Provider: "bitbucket", Enabled: false, TenantID: "default", BaseURL: "https://api.bitbucket.org"},
+			{Name: "drone", Provider: "drone", Enabled: false, TenantID: "default", BaseURL: "https://cloud.drone.io"},
+			{Name: "semaphore", Provider: "semaphore", Enabled: false, TenantID: "default", BaseURL: "https://api.semaphoreci.com"},
+			{Name: "appveyor", Provider: "appveyor", Enabled: false, TenantID: "default", BaseURL: "https://ci.appveyor.com"},
+			{Name: "cloudbuild", Provider: "cloudbuild", Enabled: false, TenantID: "default", BaseURL: "https://cloudbuild.googleapis.com"},
 		},
 	}
 }
@@ -511,7 +521,7 @@ func (c *Config) normalize() error {
 		}
 		connectorNames[co.Name] = struct{}{}
 		switch co.Provider {
-		case "gitlab", "buildkite", "circleci", "jenkins", "azuredevops", "bitrise", "teamcity", "travis", "codebuild":
+		case "gitlab", "buildkite", "circleci", "jenkins", "azuredevops", "bitrise", "teamcity", "travis", "codebuild", "bitbucket", "drone", "semaphore", "appveyor", "cloudbuild":
 		default:
 			return fmt.Errorf("connector %q has unsupported provider %q", co.Name, co.Provider)
 		}
@@ -534,6 +544,16 @@ func (c *Config) normalize() error {
 				co.BaseURL = "https://api.travis-ci.com"
 			case "codebuild":
 				co.BaseURL = "https://codebuild.amazonaws.com"
+			case "bitbucket":
+				co.BaseURL = "https://api.bitbucket.org"
+			case "drone":
+				co.BaseURL = "https://cloud.drone.io"
+			case "semaphore":
+				co.BaseURL = "https://api.semaphoreci.com"
+			case "appveyor":
+				co.BaseURL = "https://ci.appveyor.com"
+			case "cloudbuild":
+				co.BaseURL = "https://cloudbuild.googleapis.com"
 			}
 		}
 	}
