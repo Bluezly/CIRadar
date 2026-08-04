@@ -238,11 +238,11 @@ func (c *Config) normalizeEnterprise() error {
 		return fmt.Errorf("invalid llm timeout %q", c.LLM.TimeoutText)
 	}
 	c.LLM.Timeout = d
-	if c.LLM.Enabled && (c.LLM.Endpoint == "" || c.LLM.APIKey == "") {
-		return errors.New("llm requires endpoint and api_key")
+	if c.LLM.Enabled && c.LLM.Endpoint == "" {
+		return errors.New("llm requires endpoint")
 	}
 	if c.Repair.MinimumScore < 0 || c.Repair.MinimumScore > 100 {
-		c.Repair.MinimumScore = 75
+		c.Repair.MinimumScore = 60
 	}
 	if c.Repair.BranchPrefix == "" {
 		c.Repair.BranchPrefix = "ciradar/repair-"
