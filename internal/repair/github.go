@@ -89,7 +89,7 @@ func CreateGitHubDraftPR(ctx context.Context, client *gh.Client, source model.Re
 func renderDraftPRBody(analysis model.AnalysisResult, plan Plan, source model.RepairSource) string {
 	var body strings.Builder
 	body.WriteString("## CI Radar repair proposal\n\n")
-	fmt.Fprintf(&body, "Diagnosis: **%s** · %s confidence · score %d/100\n\n", analysis.Attribution, analysis.Confidence, analysis.Score)
+	fmt.Fprintf(&body, "Diagnosis: **%s** · %s confidence · evidence %d/100 · externality %+d\n\n", analysis.Attribution, analysis.Confidence, model.EvidenceStrengthOf(analysis), model.ExternalityScoreOf(analysis))
 	fmt.Fprintf(&body, "%s\n\n", analysis.Summary)
 	body.WriteString("This draft PR was generated from an optional repair proposal. It has not been merged or approved automatically. Review every change and run the complete test suite.\n\n")
 	body.WriteString("### Changed files\n")
