@@ -1,15 +1,17 @@
 package main
 
 import (
-	"ciradar/internal/config"
-	"ciradar/internal/db"
-	"ciradar/internal/model"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"ciradar/internal/config"
+	"ciradar/internal/db"
+	"ciradar/internal/model"
 )
 
 func TestEvaluateTestGate(t *testing.T) {
@@ -26,43 +28,56 @@ func TestEvaluateTestGate(t *testing.T) {
 	}
 }
 
-func TestBuiltInAnalysisSamples(t *testing.T) {
-	for _, name := range []string{"npm-econnreset", "go-test-failure"} {
-		value, err := builtInAnalysisSample(name)
-		if err != nil || value == "" {
-			t.Fatalf("name=%s value=%q err=%v", name, value, err)
-		}
+func TestAnalyzeWithoutCorrelationIsScoreStable(t *testing.T) {
+	dir := t.TempDir()
+	configPath := writeTestConfig(t, dir)
+	logPath := filepath.Join(dir, "npm.txt")
+	if err := os.WriteFile(logPath, []byte("npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/react failed\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := builtInAnalysisSample("missing"); err == nil {
-		t.Fatal("unknown sample was accepted")
+	first := runAnalyzeJSON(t, []string{"--config", configPath, "--json", logPath})
+	second := runAnalyzeJSON(t, []string{"--config", configPath, "--json", logPath})
+	if first.Score != second.Score || first.Score != 52 {
+		t.Fatalf("first=%d second=%d", first.Score, second.Score)
+	}
+	if first.CrossRepoCount != 0 || second.CrossRepoCount != 0 || first.CrossOrgCount != 0 || second.CrossOrgCount != 0 {
+		t.Fatalf("first=%+v second=%+v", first, second)
 	}
 }
 
-func TestLocalAnalyzeDoesNotSelfCorrelateByDefault(t *testing.T) {
-	tmp := t.TempDir()
-	oldWD, err := os.Getwd()
+func TestAnalyzeCorrelationDoesNotInventRepositories(t *testing.T) {
+	dir := t.TempDir()
+	configPath := writeTestConfig(t, dir)
+	logPath := filepath.Join(dir, "npm.txt")
+	if err := os.WriteFile(logPath, []byte("npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/react failed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = runAnalyzeJSON(t, []string{"--config", configPath, "--json", logPath})
+	result := runAnalyzeJSON(t, []string{"--config", configPath, "--json", "--correlate", logPath})
+	if result.CrossRepoCount != 1 || result.CrossOrgCount != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func writeTestConfig(t *testing.T, dir string) string {
+	t.Helper()
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(dir, "state.json")
+	cfg.DataDirectory = filepath.Join(dir, "data")
+	cfg.RulesDirectory = filepath.Join(dir, "rules")
+	cfg.ProviderPolling = false
+	cfg.FingerprintHMACKey = "test-fingerprint-key"
+	cfg.AdminToken = "cir_root_test"
+	cfg.DashboardSessionSecret = "test-dashboard-session-secret-32-bytes"
+	path := filepath.Join(dir, "ciradar.json")
+	body, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(tmp); err != nil {
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(oldWD)
-	if err := config.SaveDefault("ciradar.json"); err != nil {
-		t.Fatal(err)
-	}
-	logPath := filepath.Join(tmp, "npm.log")
-	if err := os.WriteFile(logPath, []byte("npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/lodash failed\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	first := runAnalyzeJSON(t, []string{"--config", "ciradar.json", "--json", logPath})
-	second := runAnalyzeJSON(t, []string{"--config", "ciradar.json", "--json", logPath})
-	if first.Score != second.Score {
-		t.Fatalf("first=%d second=%d", first.Score, second.Score)
-	}
-	if second.CrossRepoCount != 0 || second.CrossOrgCount != 0 {
-		t.Fatalf("cross repo=%d org=%d", second.CrossRepoCount, second.CrossOrgCount)
-	}
+	return path
 }
 
 func runAnalyzeJSON(t *testing.T, args []string) model.AnalysisResult {
@@ -73,19 +88,40 @@ func runAnalyzeJSON(t *testing.T, args []string) model.AnalysisResult {
 		t.Fatal(err)
 	}
 	os.Stdout = w
-	err = cmdAnalyze(args)
+	runErr := cmdAnalyze(args)
 	_ = w.Close()
 	os.Stdout = old
-	if err != nil {
-		t.Fatal(err)
+	body, readErr := io.ReadAll(r)
+	_ = r.Close()
+	if runErr != nil {
+		t.Fatal(runErr)
 	}
-	b, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
+	if readErr != nil {
+		t.Fatal(readErr)
 	}
 	var result model.AnalysisResult
-	if err := json.Unmarshal(b, &result); err != nil {
-		t.Fatalf("output=%q err=%v", b, err)
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode %q: %v", string(body), err)
 	}
 	return result
+}
+
+func TestResolveTestKeyByReadableIdentity(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	obs := model.TestObservation{TenantID: "default", Repository: "acme/api", Framework: "junit", Suite: "payments", ClassName: "PaymentServiceTest", Name: "retries_transient_gateway_error", Status: "failed", OccurredAt: time.Now().UTC()}
+	stats, err := store.RecordTestObservations(context.Background(), "default", []model.TestObservation{obs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := resolveTestKey(context.Background(), store, "default", "acme/api", "", "payments/PaymentServiceTest/retries_transient_gateway_error")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != stats[0].TestKey {
+		t.Fatalf("key=%s want=%s", key, stats[0].TestKey)
+	}
 }
