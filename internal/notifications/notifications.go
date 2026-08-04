@@ -343,10 +343,20 @@ func buildRequest(ch config.NotificationChannel, ev model.NotificationEvent) ([]
 
 func slackPayload(ch config.NotificationChannel, ev model.NotificationEvent) map[string]any {
 	text := plainText(ev)
-	return map[string]any{"text": text, "blocks": []any{
+	blocks := []any{
 		map[string]any{"type": "header", "text": map[string]any{"type": "plain_text", "text": truncate(ev.Title, 140)}},
 		map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": slackBody(ch, ev)}},
-	}}
+	}
+	prefix := ev.TenantID + "|"
+	if ev.Incident != nil && ev.Fingerprint != "" {
+		blocks = append(blocks, map[string]any{"type": "actions", "elements": []any{
+			map[string]any{"type": "button", "text": map[string]any{"type": "plain_text", "text": "Acknowledge"}, "style": "primary", "action_id": "ciradar_ack", "value": prefix + "ack|" + ev.Fingerprint},
+			map[string]any{"type": "button", "text": map[string]any{"type": "plain_text", "text": "Resolve"}, "style": "danger", "action_id": "ciradar_resolve", "value": prefix + "resolve|" + ev.Fingerprint},
+		}})
+	} else if ev.Type == "test_flaky" && ev.Fingerprint != "" {
+		blocks = append(blocks, map[string]any{"type": "actions", "elements": []any{map[string]any{"type": "button", "text": map[string]any{"type": "plain_text", "text": "Quarantine 7 days"}, "style": "danger", "action_id": "ciradar_quarantine", "value": prefix + "quarantine|" + ev.Fingerprint}}})
+	}
+	return map[string]any{"text": text, "blocks": blocks}
 }
 func slackBody(ch config.NotificationChannel, ev model.NotificationEvent) string {
 	var b strings.Builder
@@ -560,6 +570,15 @@ func EnvironmentChangedEvent(tenantID, repository, organization, workflow, job, 
 		Category: model.CategoryRunnerImageDrift, Attribution: model.AttributionExternal, Score: 70, Provider: "GitHub Actions", Operation: "runner-environment",
 		Recommendation: "Review and pin tool versions before the environment change reaches critical workflows.",
 	}
+}
+
+func FlakyTestEvent(st model.TestCaseStats, publicBaseURL string) model.NotificationEvent {
+	now := time.Now().UTC()
+	details := ""
+	if publicBaseURL != "" {
+		details = strings.TrimRight(publicBaseURL, "/") + "/?test=" + st.TestKey
+	}
+	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_flaky_%s_%d", st.TestKey, now.Unix()), TenantID: st.TenantID, Type: "test_flaky", DedupeKey: "test_flaky:" + st.TestKey, OccurredAt: now, Severity: "minor", Title: "Flaky test detected: " + st.Name, Summary: fmt.Sprintf("%s has a %.1f flake score across %d runs. Likely cause: %s.", st.Name, st.FlakeScore, st.TotalRuns, st.PrimaryFlakeCause), Repository: st.Repository, DetailsURL: details, Category: model.CategoryTestFlake, Attribution: model.AttributionCode, Score: int(st.FlakeScore), Provider: st.Framework, Operation: "test", Fingerprint: st.TestKey, Recommendation: "Assign an owner, reproduce the failure, and quarantine only while the root cause is under investigation."}
 }
 
 func TestEvent() model.NotificationEvent {
