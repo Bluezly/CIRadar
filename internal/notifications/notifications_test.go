@@ -15,6 +15,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"ciradar/internal/config"
 	"ciradar/internal/db"
@@ -299,5 +300,26 @@ func TestRepositoryCriticalityElevatesSeverity(t *testing.T) {
 	}
 	if got := elevateSeverityForCriticality("critical", "normal"); got != "critical" {
 		t.Fatalf("severity downgraded=%s", got)
+	}
+}
+
+func TestNegativeCodeScorePassesEvidenceFilter(t *testing.T) {
+	count := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { count++; w.WriteHeader(http.StatusNoContent) }))
+	defer ts.Close()
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "code", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: time.Second, MaxAttempts: 1, Events: []string{"analysis"}, MinimumScore: 60}}}
+	ev := model.NotificationEvent{ID: "code-negative", Type: "analysis", DedupeKey: "code-negative", Title: "test failed", Summary: "expected 4, got 5", Category: model.CategoryCodeFailure, Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -62, ExternalityScore: -62, EvidenceStrength: 62, CodeEvidenceScore: 62}
+	if err := New(cfg, testStore(t), testLog()).Dispatch(context.Background(), ev); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("count=%d", count)
+	}
+}
+
+func TestNotificationTruncateKeepsUTF8Valid(t *testing.T) {
+	out := truncate("تنبيه عربي طويل", 7)
+	if !utf8.ValidString(out) {
+		t.Fatalf("invalid UTF-8: %q", out)
 	}
 }
