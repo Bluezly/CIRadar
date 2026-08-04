@@ -182,7 +182,7 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	}
 	excerpt := extractExcerpt(redacted, matched, a.maxExcerpt)
 
-	return model.AnalysisResult{
+	result := model.AnalysisResult{
 		ID:                 newID("analysis", now, fingerprint),
 		TenantID:           tenantID(in.TenantID),
 		Category:           primary.Category,
@@ -212,6 +212,8 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 		EnvironmentDrift:   len(changes) > 0,
 		EnvironmentChanges: changes,
 	}
+	result.SuggestedActions = SuggestedActions(result)
+	return result
 }
 
 func fingerprintValue(key, material []byte) string {
