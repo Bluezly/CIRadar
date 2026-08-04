@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,10 +21,13 @@ import (
 	"ciradar/internal/config"
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
+	mcpserver "ciradar/internal/mcp"
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
+	"ciradar/internal/secrets"
 	"ciradar/internal/server"
+	"ciradar/internal/testintelligence"
 	"ciradar/internal/version"
 	"ciradar/internal/worker"
 )
@@ -69,6 +73,14 @@ func main() {
 		err = cmdRepository(os.Args[2:])
 	case "incident":
 		err = cmdIncidentAction(os.Args[2:])
+	case "secret":
+		err = cmdSecret(os.Args[2:])
+	case "tests":
+		err = cmdTests(os.Args[2:])
+	case "mcp":
+		err = cmdMCP(os.Args[2:])
+	case "database":
+		err = cmdDatabase(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Printf("CI Radar %s (%s, %s) %s/%s\n", version.Version, version.Commit, version.BuildDate, runtime.GOOS, runtime.GOARCH)
 		return
@@ -86,7 +98,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`CI Radar - CI failure intelligence for GitHub Actions
+	fmt.Print(`CI Radar - multi-CI failure intelligence and test reliability
 
 Usage:
   ciradar init [--config ciradar.json]
@@ -107,6 +119,10 @@ Usage:
   ciradar github-installation bind|unbind|list [options]
   ciradar repository set|list [options]
   ciradar incident acknowledge|resolve|reopen [options]
+  ciradar secret key|encrypt [value]
+  ciradar tests ingest|list|gate|quarantine|unquarantine [options]
+  ciradar mcp [--config ciradar.json] [--tenant default]
+  ciradar database check|migrate [--config ciradar.json]
   ciradar version
 
 Fast local test:
@@ -114,6 +130,79 @@ Fast local test:
   ciradar analyze samples/npm-econnreset.log
   ciradar serve
 `)
+}
+
+func cmdDatabase(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar database check|migrate [--config ciradar.json]")
+	}
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+	fs := flag.NewFlagSet("database "+sub, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	store, err := openBackend(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "check", "migrate":
+		fmt.Printf("Database %s OK: driver=%s analyses=%d incidents=%d queued_jobs=%d\n", sub, cfg.DatabaseDriver, stats.Analyses, stats.Incidents, stats.QueuedJobs)
+		return nil
+	default:
+		return fmt.Errorf("unknown database command %q", sub)
+	}
+}
+
+func cmdSecret(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar secret key|encrypt [value]")
+	}
+	switch args[0] {
+	case "key":
+		k, err := secrets.GenerateMasterKey()
+		if err != nil {
+			return err
+		}
+		fmt.Println(k)
+		return nil
+	case "encrypt":
+		fs := flag.NewFlagSet("secret encrypt", flag.ContinueOnError)
+		key := fs.String("key", os.Getenv("CIRADAR_MASTER_KEY"), "master key (defaults to CIRADAR_MASTER_KEY)")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		var value string
+		if fs.NArg() > 0 {
+			value = strings.Join(fs.Args(), " ")
+		} else {
+			b, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
+			if err != nil {
+				return err
+			}
+			value = strings.TrimRight(string(b), "\r\n")
+		}
+		enc, err := secrets.Encrypt(*key, value)
+		if err != nil {
+			return err
+		}
+		fmt.Println(enc)
+		return nil
+	default:
+		return fmt.Errorf("unknown secret command %q", args[0])
+	}
 }
 
 func cmdInit(args []string) error {
@@ -147,7 +236,7 @@ func cmdServe(args []string) error {
 		return errors.New("admin_token is empty; run `ciradar init` or set CIRADAR_ADMIN_TOKEN before serving")
 	}
 	log := newLogger(cfg.LogLevel)
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -213,7 +302,7 @@ func cmdAnalyze(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -274,7 +363,7 @@ func cmdBaseline(args []string) error {
 	if env.RunnerOS == "" && env.RunnerImage == "" && len(env.ToolVersions) == 0 && len(env.ActionVersions) == 0 && len(env.ContainerRefs) == 0 {
 		return errors.New("no environment information could be extracted from the log")
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -302,7 +391,7 @@ func cmdIncidents(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -338,7 +427,7 @@ func cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -379,7 +468,7 @@ func cmdExport(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -459,7 +548,7 @@ func cmdSimulate(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -502,8 +591,12 @@ func cmdDoctor(args []string) error {
 	fmt.Println("  Version:", version.Version)
 	fmt.Println("  OS/Arch:", runtime.GOOS+"/"+runtime.GOARCH)
 	fmt.Println("  Config:", *path)
-	fmt.Println("  Database:", cfg.DatabasePath)
-	store, err := db.Open(cfg.DatabasePath)
+	if cfg.DatabaseDriver == "postgres" {
+		fmt.Println("  Database: PostgreSQL")
+	} else {
+		fmt.Println("  Database:", cfg.DatabasePath)
+	}
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		fmt.Println("  Database check: FAILED -", err)
 		return err
@@ -525,10 +618,12 @@ func cmdDoctor(args []string) error {
 	} else {
 		fmt.Println("  Root admin token: PRESENT")
 	}
-	if info, err := os.Stat(cfg.DatabasePath); err == nil {
-		fmt.Printf("  State file size: %.2f MiB\n", float64(info.Size())/(1024*1024))
-		if info.Size() > 250<<20 {
-			fmt.Println("  State warning: embedded storage is large; archive old data or migrate to an external database adapter")
+	if cfg.DatabaseDriver != "postgres" {
+		if info, err := os.Stat(cfg.DatabasePath); err == nil {
+			fmt.Printf("  State file size: %.2f MiB\n", float64(info.Size())/(1024*1024))
+			if info.Size() > 250<<20 {
+				fmt.Println("  State warning: embedded storage is large; archive old data or migrate to PostgreSQL")
+			}
 		}
 	}
 	fmt.Println("  Automatic retry:", cfg.AutomaticRetryEnabled)
@@ -635,6 +730,18 @@ func readInput(path string, max int64) ([]byte, error) {
 	}
 	return b, nil
 }
+
+func openBackend(ctx context.Context, cfg config.Config) (db.Backend, error) {
+	switch strings.ToLower(strings.TrimSpace(cfg.DatabaseDriver)) {
+	case "", "embedded":
+		return db.Open(cfg.DatabasePath)
+	case "postgres":
+		return db.OpenPostgres(ctx, cfg.DatabaseURL)
+	default:
+		return nil, fmt.Errorf("unsupported database driver %q", cfg.DatabaseDriver)
+	}
+}
+
 func newLogger(level string) *slog.Logger {
 	var l slog.Level
 	switch strings.ToLower(level) {
@@ -649,7 +756,7 @@ func newLogger(level string) *slog.Logger {
 	}
 	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
 }
-func providerIncident(ctx context.Context, store *db.Store, provider string) bool {
+func providerIncident(ctx context.Context, store db.Backend, provider string) bool {
 	statuses, _ := store.ListProviderStatuses(ctx)
 	for _, s := range statuses {
 		if s.Incident && providers.MatchesStatusProvider(provider, s.Provider) {
@@ -673,7 +780,7 @@ func cmdNotify(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -698,7 +805,7 @@ func cmdNotify(args []string) error {
 		if err := n.Dispatch(context.Background(), ev); err != nil {
 			return err
 		}
-		deliveries, err := store.ListNotificationDeliveries(context.Background(), 100)
+		deliveries, err := store.ListNotificationDeliveriesForTenant(context.Background(), cfg.DefaultTenantID, 100)
 		if err != nil {
 			return err
 		}
@@ -726,7 +833,7 @@ func cmdNotify(args []string) error {
 		fmt.Printf("Notification test sent successfully to %d channel(s).\n", sent)
 		return nil
 	case "list":
-		items, err := store.ListNotificationDeliveries(context.Background(), 100)
+		items, err := store.ListNotificationDeliveriesForTenant(context.Background(), cfg.DefaultTenantID, 100)
 		if err != nil {
 			return err
 		}
@@ -741,6 +848,180 @@ func cmdNotify(args []string) error {
 	default:
 		return fmt.Errorf("unknown notify command %q", sub)
 	}
+}
+
+type testGateResult struct {
+	TotalTests            int      `json:"total_tests"`
+	FailedTests           int      `json:"failed_tests"`
+	QuarantinedFailures   []string `json:"quarantined_failures"`
+	UnquarantinedFailures []string `json:"unquarantined_failures"`
+}
+
+func evaluateTestGate(observations []model.TestObservation, quarantines []model.TestQuarantine) testGateResult {
+	now := time.Now().UTC()
+	active := map[string]bool{}
+	for _, q := range quarantines {
+		if q.Active && q.ExpiresAt.After(now) {
+			active[q.TestKey] = true
+		}
+	}
+	r := testGateResult{TotalTests: len(observations)}
+	for _, o := range observations {
+		if o.Status != "failed" && o.Status != "error" {
+			continue
+		}
+		r.FailedTests++
+		label := strings.Trim(strings.Join([]string{o.Suite, o.ClassName, o.Name + o.Parameters}, "/"), "/")
+		if active[db.TestKey(o)] {
+			r.QuarantinedFailures = append(r.QuarantinedFailures, label)
+		} else {
+			r.UnquarantinedFailures = append(r.UnquarantinedFailures, label)
+		}
+	}
+	return r
+}
+
+func cmdTests(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: ciradar tests ingest|list|gate|quarantine|unquarantine")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("tests "+sub, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	tenant := fs.String("tenant", "", "tenant id")
+	repo := fs.String("repo", "", "repository")
+	workflow := fs.String("workflow", "", "workflow")
+	job := fs.String("job", "", "job")
+	framework := fs.String("framework", "junit", "test framework")
+	runID := fs.Int64("run-id", 0, "run id")
+	sha := fs.String("sha", "", "commit SHA")
+	branch := fs.String("branch", "", "branch")
+	classification := fs.String("classification", "", "classification filter")
+	key := fs.String("key", "", "test key")
+	owner := fs.String("owner", "", "test owner")
+	reason := fs.String("reason", "", "quarantine reason")
+	duration := fs.Duration("duration", 7*24*time.Hour, "quarantine duration")
+	limit := fs.Int("limit", 200, "result limit")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
+	store, err := openBackend(context.Background(), cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	switch sub {
+	case "ingest":
+		if fs.NArg() < 1 || strings.TrimSpace(*repo) == "" {
+			return errors.New("usage: ciradar tests ingest --repo OWNER/REPO <junit.xml|->")
+		}
+		b, err := readInput(fs.Arg(0), 128<<20)
+		if err != nil {
+			return err
+		}
+		obs, err := testintelligence.ParseJUnit(strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: *framework, OccurredAt: time.Now().UTC()})
+		if err != nil {
+			return err
+		}
+		stats, err := store.RecordTestObservations(context.Background(), tenantID, obs)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Ingested %d test observations; %d test cases updated.\n", len(obs), len(stats))
+		return printJSON(stats)
+	case "list":
+		items, err := store.ListTestCaseStats(context.Background(), tenantID, *repo, *classification, *limit)
+		if err != nil {
+			return err
+		}
+		return printJSON(items)
+	case "gate":
+		if fs.NArg() < 1 || strings.TrimSpace(*repo) == "" {
+			return errors.New("usage: ciradar tests gate --repo OWNER/REPO <junit.xml|->")
+		}
+		b, err := readInput(fs.Arg(0), 128<<20)
+		if err != nil {
+			return err
+		}
+		obs, err := testintelligence.ParseJUnit(strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: *framework, OccurredAt: time.Now().UTC()})
+		if err != nil {
+			return err
+		}
+		quarantines, err := store.ListTestQuarantines(context.Background(), tenantID)
+		if err != nil {
+			return err
+		}
+		result := evaluateTestGate(obs, quarantines)
+		if err := printJSON(result); err != nil {
+			return err
+		}
+		if len(result.UnquarantinedFailures) > 0 {
+			return fmt.Errorf("test gate failed: %d unquarantined failure(s)", len(result.UnquarantinedFailures))
+		}
+		fmt.Printf("Test gate passed: %d quarantined failure(s), no blocking failures.\n", len(result.QuarantinedFailures))
+		return nil
+	case "quarantine":
+		if *key == "" || *owner == "" || *reason == "" {
+			return errors.New("--key, --owner, and --reason are required")
+		}
+		q, err := store.SetTestQuarantine(context.Background(), model.TestQuarantine{TenantID: tenantID, TestKey: *key, Owner: *owner, Reason: *reason, CreatedBy: "cli", ExpiresAt: time.Now().UTC().Add(*duration)})
+		if err != nil {
+			return err
+		}
+		return printJSON(q)
+	case "unquarantine":
+		if *key == "" {
+			return errors.New("--key is required")
+		}
+		return store.RemoveTestQuarantine(context.Background(), tenantID, *key)
+	default:
+		return fmt.Errorf("unknown tests command %q", sub)
+	}
+}
+
+func cmdMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration file path")
+	tenant := fs.String("tenant", "", "tenant id")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	store, err := openBackend(context.Background(), cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	srv := &mcpserver.Server{Store: store}
+	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Buffer(make([]byte, 64<<10), 4<<20)
+	enc := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var req mcpserver.Request
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.UseNumber()
+		if err := dec.Decode(&req); err != nil {
+			_ = enc.Encode(mcpserver.Response{JSONRPC: "2.0", Error: &mcpserver.RPCError{Code: -32700, Message: "parse error"}})
+			continue
+		}
+		if err := enc.Encode(srv.Handle(context.Background(), tenantID, req)); err != nil {
+			return err
+		}
+	}
+	return scanner.Err()
 }
 
 func chooseTenant(v, fallback string) string {
@@ -770,7 +1051,7 @@ func cmdTenant(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -816,7 +1097,7 @@ func cmdAPIKey(args []string) error {
 		return err
 	}
 	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -861,7 +1142,7 @@ func cmdGitHubInstallation(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -904,7 +1185,7 @@ func cmdRepository(args []string) error {
 		return err
 	}
 	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -973,7 +1254,7 @@ func cmdIncidentAction(args []string) error {
 		return err
 	}
 	tenantID := chooseTenant(*tenant, cfg.DefaultTenantID)
-	store, err := db.Open(cfg.DatabasePath)
+	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
 		return err
 	}
@@ -1013,7 +1294,7 @@ func printJSON(v any) error {
 	return enc.Encode(v)
 }
 
-func maintenanceLoop(ctx context.Context, store *db.Store, cfg config.Config, log *slog.Logger) {
+func maintenanceLoop(ctx context.Context, store db.Backend, cfg config.Config, log *slog.Logger) {
 	incidentTicker := time.NewTicker(time.Minute)
 	cleanupTicker := time.NewTicker(12 * time.Hour)
 	defer incidentTicker.Stop()
