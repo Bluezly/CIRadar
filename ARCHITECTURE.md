@@ -1,4 +1,4 @@
-# CI Radar architecture — 1.1.0 OSS RC.2
+# CI Radar architecture — 1.2.0 OSS RC.3
 
 CI Radar is a free self-hosted CI failure intelligence service. The deterministic analyzer remains the decision core. Optional systems such as LLM enhancement and remote embeddings operate above the stored deterministic result and never replace it.
 
@@ -35,6 +35,7 @@ AnalysisResult, suggested actions and protected fingerprint
 - `internal/analyzer` contains deterministic rules, scoring, attribution, environment drift, fingerprints and suggested actions.
 - `internal/connectors` validates and normalizes GitLab, Buildkite, CircleCI, Jenkins, Azure DevOps, Bitrise, TeamCity, Travis CI and AWS CodeBuild events.
 - `internal/github` handles GitHub App authentication, Actions logs, Check Runs and sticky PR comments.
+- `internal/marketplace` records optional GitHub Marketplace installation metadata without product feature gates.
 - `internal/db` defines the storage contract and implements embedded and PostgreSQL backends.
 - `internal/pgwire` is the bundled PostgreSQL wire client with TLS and SCRAM-SHA-256.
 - `internal/testintelligence` parses JUnit, Playwright, Jest, pytest, Cypress and Mocha reports and infers probable flaky causes.
@@ -58,7 +59,7 @@ The embedded backend uses atomic replacement, fsync and backup recovery. It is s
 
 ### PostgreSQL backend
 
-The PostgreSQL backend supports TLS, SCRAM-SHA-256, migrations, transactions and row locking. RC.2 stores canonical state in a transactionally locked JSONB row. This preserves correctness across multiple processes, but serializes writes. It is suitable for moderate self-hosted installations and is not presented as a hyperscale event store.
+The PostgreSQL backend supports verified TLS, SCRAM-SHA-256, migrations, transactions, row locks, and advisory locks. RC.3 stores one row per tenant entity in `ciradar_objects`, jobs in a queue table, and webhook idempotency records in a delivery table. Locks are scoped to the affected tenant and entity kind. This removes the global JSONB bottleneck while preserving the existing backend contract. It is a scalable self-hosted entity store, not a distributed hyperscale analytics claim.
 
 ## Isolation and authorization
 

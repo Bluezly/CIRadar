@@ -10,8 +10,8 @@ License: AGPL-3.0-or-later.
 - GitHub Checks and sticky GitHub PR comments
 - Sticky GitLab merge request comments
 - deterministic diagnosis rules, evidence weights, suggested actions, and feedback metrics
-- PostgreSQL or portable embedded storage
-- tenant isolation, API keys, RBAC, audit events, retention, encrypted secrets, OIDC, and SAML through a trusted auth proxy
+- relational tenant-scoped PostgreSQL storage or portable embedded storage
+- tenant isolation, API keys, RBAC, audit events, retention, encrypted secrets, trusted-proxy controls, OIDC, and SAML through a trusted auth proxy
 - Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie, and signed generic webhooks
 - Slack buttons and Teams commands for acknowledge, resolve, and test quarantine
 - JUnit, Playwright JSON, Jest JSON, pytest-json-report, Cypress JSON, and Mocha JSON
@@ -101,4 +101,4 @@ Native OIDC uses Authorization Code with PKCE. SAML deployments use a trusted SA
 - test auto-quarantine disabled by default
 - automatic CI retry disabled by default
 
-Read `SECURITY.md`, `POSTGRESQL.md`, `CONNECTORS.md`, `TEST-INTELLIGENCE.md`, `MCP.md`, and `SELF-HOSTING.md` before production deployment.
+Read `SECURITY.md`, `POSTGRESQL.md`, `CONNECTORS.md`, `TEST-INTELLIGENCE.md`, `MCP.md`, `SELF-HOSTING.md`, `GITHUB-MARKETPLACE.md`, `COMPARISONS.md`, and `PROJECT-STATUS.md` before production deployment.

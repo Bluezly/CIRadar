@@ -1,4 +1,4 @@
-# Tested features — 1.1.0 OSS RC.2
+# Tested features — 1.2.0 OSS RC.3
 
 Automated tests cover:
 
@@ -22,3 +22,18 @@ Automated tests cover:
 - Windows and Linux static builds
 
 Live credentials for third-party providers are not part of the automated suite. Protocol-compatible local servers are used for integration tests. A real PostgreSQL server should be included in the operator's deployment acceptance test.
+
+## RC.3 hardening
+
+- relational PostgreSQL object rows and independent queue
+- legacy global-state migration
+- tenant-scoped advisory locks
+- indexed cross-repository correlation
+- direct API-key hash lookup
+- trusted-proxy rate limiting
+- strict CSP without inline dashboard code
+- encrypted dashboard and SSO cookies
+- CSRF protection for cookie writes
+- verified PostgreSQL TLS defaults
+- custom and entropy-based redaction
+- optional GitHub Marketplace metadata without feature gates
