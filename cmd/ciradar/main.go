@@ -26,6 +26,7 @@ import (
 	"ciradar/internal/model"
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
+	"ciradar/internal/repair"
 	"ciradar/internal/secrets"
 	"ciradar/internal/server"
 	"ciradar/internal/similarity"
@@ -90,6 +91,8 @@ func main() {
 		err = cmdMetrics(os.Args[2:])
 	case "similar":
 		err = cmdSimilar(os.Args[2:])
+	case "repair":
+		err = cmdRepair(os.Args[2:])
 	case "version", "--version", "-version":
 		fmt.Printf("CI Radar %s (%s, %s) %s/%s\n", version.Version, version.Commit, version.BuildDate, runtime.GOOS, runtime.GOARCH)
 		return
@@ -129,10 +132,11 @@ Usage:
   ciradar repository set|list [options]
   ciradar incident acknowledge|resolve|reopen [options]
   ciradar secret key|encrypt [value]
-  ciradar tests ingest|list|gate|select|quarantine|unquarantine [options]
+  ciradar tests ingest|list|gate|select|index|coverage|quarantine|unquarantine [options]
   ciradar deployment record [options]
   ciradar metrics dora|usage [options]
   ciradar similar --analysis ID [options]
+  ciradar repair plan|apply --analysis ID --repo-dir PATH [options]
   ciradar mcp [--config ciradar.json] [--tenant default]
   ciradar database check|migrate [--config ciradar.json]
   ciradar version
@@ -142,6 +146,78 @@ Fast local test:
   ciradar analyze samples/npm-econnreset.log
   ciradar serve
 `)
+}
+
+func cmdRepair(args []string) error {
+	if len(args) < 1 || (args[0] != "plan" && args[0] != "apply") {
+		return errors.New("usage: ciradar repair plan|apply --analysis ID --repo-dir PATH")
+	}
+	operation := args[0]
+	fs := flag.NewFlagSet("repair "+operation, flag.ContinueOnError)
+	path := fs.String("config", "ciradar.json", "configuration")
+	tenant := fs.String("tenant", "", "tenant")
+	analysisID := fs.String("analysis", "", "analysis ID")
+	repoDir := fs.String("repo-dir", ".", "repository working directory")
+	patchFile := fs.String("patch", "", "unified diff file override")
+	confirmation := fs.String("confirm", "", "repair confirmation token")
+	dryRun := fs.Bool("dry-run", false, "validate without writing")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*analysisID) == "" {
+		return errors.New("--analysis is required")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	store, err := openBackend(context.Background(), cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	tid := chooseTenant(*tenant, cfg.DefaultTenantID)
+	patch := ""
+	if strings.TrimSpace(*patchFile) != "" {
+		raw, err := os.ReadFile(*patchFile)
+		if err != nil {
+			return err
+		}
+		patch = string(raw)
+	} else {
+		var enhancement model.LLMEnhancement
+		found, err := store.GetObject(context.Background(), tid, "llm_enhancement", *analysisID, &enhancement)
+		if err != nil {
+			return err
+		}
+		if !found || strings.TrimSpace(enhancement.Patch) == "" {
+			return errors.New("analysis has no stored repair patch; run LLM enhancement or pass --patch")
+		}
+		patch = enhancement.Patch
+	}
+	plan, err := repair.BuildPlan(*analysisID, patch, *repoDir)
+	if err != nil {
+		return err
+	}
+	if operation == "plan" {
+		return printJSON(plan)
+	}
+	if strings.TrimSpace(*confirmation) == "" {
+		return fmt.Errorf("--confirm is required; run `ciradar repair plan` and use %s", plan.Confirmation)
+	}
+	if err := repair.Apply(plan, *repoDir, *confirmation, *dryRun); err != nil {
+		return err
+	}
+	status := "applied"
+	if *dryRun {
+		status = "validated"
+	}
+	files := make([]string, 0, len(plan.Files))
+	for _, file := range plan.Files {
+		files = append(files, file.Path)
+	}
+	_ = store.RecordAudit(context.Background(), model.AuditEvent{TenantID: tid, Actor: "cli", Role: model.RoleOperator, Action: "repair." + status, Resource: "analysis", ResourceID: *analysisID, Metadata: map[string]string{"plan_id": plan.ID, "files": strings.Join(files, ",")}})
+	return printJSON(map[string]any{"status": status, "plan_id": plan.ID, "analysis_id": *analysisID, "files": files})
 }
 
 func cmdDeployment(args []string) error {
@@ -1010,7 +1086,7 @@ func evaluateTestGate(observations []model.TestObservation, quarantines []model.
 
 func cmdTests(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: ciradar tests ingest|list|gate|select|quarantine|unquarantine")
+		return errors.New("usage: ciradar tests ingest|list|gate|select|index|coverage|quarantine|unquarantine")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("tests "+sub, flag.ContinueOnError)
@@ -1031,6 +1107,8 @@ func cmdTests(args []string) error {
 	duration := fs.Duration("duration", 7*24*time.Hour, "quarantine duration")
 	limit := fs.Int("limit", 200, "result limit")
 	changed := fs.String("changed", "", "comma-separated changed files")
+	root := fs.String("root", ".", "repository source root")
+	minimumScore := fs.Float64("minimum-score", 0, "minimum test selection score")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -1104,11 +1182,43 @@ func cmdTests(args []string) error {
 				files = append(files, strings.TrimSpace(x))
 			}
 		}
-		out, err := testselection.Select(context.Background(), store, tenantID, model.TestSelectionRequest{Repository: *repo, ChangedFiles: files, Framework: *framework, Limit: *limit, IncludeFlaky: cfg.PredictiveTests.AlwaysRunFlaky})
+		out, err := testselection.Select(context.Background(), store, tenantID, model.TestSelectionRequest{Repository: *repo, ChangedFiles: files, Framework: *framework, Limit: *limit, IncludeFlaky: cfg.PredictiveTests.AlwaysRunFlaky, MinimumScore: firstPositiveFloat(*minimumScore, cfg.PredictiveTests.MinimumScore)})
 		if err != nil {
 			return err
 		}
 		return printJSON(out)
+	case "index":
+		if strings.TrimSpace(*repo) == "" {
+			return errors.New("--repo is required")
+		}
+		graph, err := testselection.BuildGraph(*root, *repo)
+		if err != nil {
+			return err
+		}
+		if err := testselection.SaveGraph(context.Background(), store, tenantID, graph); err != nil {
+			return err
+		}
+		fmt.Printf("Indexed %d source files, %d dependency roots, and %d test files.\n", len(graph.LanguageFiles), len(graph.Dependencies), len(graph.TestFiles))
+		return printJSON(graph)
+	case "coverage":
+		if strings.TrimSpace(*repo) == "" || fs.NArg() < 1 {
+			return errors.New("usage: ciradar tests coverage --repo OWNER/REPO <coverage-map.json>")
+		}
+		b, err := readInput(fs.Arg(0), 128<<20)
+		if err != nil {
+			return err
+		}
+		input, err := testselection.ParseCoverageJSON(b)
+		if err != nil {
+			return err
+		}
+		input.Repository = *repo
+		graph, err := testselection.MergeCoverage(context.Background(), store, tenantID, input)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Stored coverage links for %d test identities.\n", len(graph.TestCoverage))
+		return printJSON(graph)
 	case "quarantine":
 		if *key == "" || *owner == "" || *reason == "" {
 			return errors.New("--key, --owner, and --reason are required")
@@ -1126,6 +1236,13 @@ func cmdTests(args []string) error {
 	default:
 		return fmt.Errorf("unknown tests command %q", sub)
 	}
+}
+
+func firstPositiveFloat(a, b float64) float64 {
+	if a > 0 {
+		return a
+	}
+	return b
 }
 
 func firstNonEmptyCLI(a, b string) string {
