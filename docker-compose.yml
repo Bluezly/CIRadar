@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:18.4
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ciradar
@@ -8,15 +8,17 @@ services:
       POSTGRES_DB: ciradar
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
     volumes:
-      - ciradar-postgres:/var/lib/postgresql
+      - ciradar-postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ciradar -d ciradar"]
       interval: 5s
       timeout: 5s
       retries: 20
-
   ciradar:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: 1.1.0-oss-rc.2
     restart: unless-stopped
     depends_on:
       postgres:
@@ -31,6 +33,5 @@ services:
       - ./ciradar.json:/app/ciradar.json:ro
       - ./rules:/app/rules:ro
     command: ["serve", "--config", "/app/ciradar.json"]
-
 volumes:
   ciradar-postgres:
