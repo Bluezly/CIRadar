@@ -66,7 +66,12 @@ func VerifyWebhook(provider, secret string, h http.Header, body []byte, now time
 		mac := hmac.New(sha256.New, []byte(secret))
 		_, _ = mac.Write(body)
 		return got != "" && hmac.Equal([]byte(got), []byte(hex.EncodeToString(mac.Sum(nil))))
-	case "jenkins", "azuredevops", "bitrise", "teamcity", "travis", "codebuild":
+	case "bitbucket":
+		got := strings.TrimPrefix(h.Get("X-Hub-Signature"), "sha256=")
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write(body)
+		return got != "" && hmac.Equal([]byte(got), []byte(hex.EncodeToString(mac.Sum(nil))))
+	case "jenkins", "azuredevops", "bitrise", "teamcity", "travis", "codebuild", "drone", "semaphore", "appveyor", "cloudbuild":
 		if constant(secret, h.Get("X-CI-Radar-Token")) {
 			return true
 		}
@@ -118,6 +123,16 @@ func ParseWebhook(provider, tenant, delivery string, body []byte) (model.CIEvent
 		return parseTravis(tenant, delivery, body)
 	case "codebuild":
 		return parseCodeBuild(tenant, delivery, body)
+	case "bitbucket":
+		return parseBitbucket(tenant, delivery, body)
+	case "drone":
+		return parseDrone(tenant, delivery, body)
+	case "semaphore":
+		return parseSemaphore(tenant, delivery, body)
+	case "appveyor":
+		return parseAppVeyor(tenant, delivery, body)
+	case "cloudbuild":
+		return parseCloudBuild(tenant, delivery, body)
 	default:
 		return model.CIEvent{}, fmt.Errorf("unsupported provider %q", provider)
 	}
@@ -470,7 +485,7 @@ func parseTravis(tenant, delivery string, b []byte) (model.CIEvent, error) {
 	if jobID == 0 {
 		jobID = p.ID
 	}
-	return model.CIEvent{TenantID: tenant, Provider: "travis", DeliveryID: delivery, Repository: repo, Organization: firstPath(repo), Workflow: "Travis CI", Job: firstNonEmpty(p.Job.Name, p.Job.Number), RunID: p.ID, JobID: strconv.FormatInt(jobID, 10), CommitSHA: p.Commit.SHA, Branch: firstNonEmpty(p.Branch.Name, p.Commit.Branch), Conclusion: normalizeConclusion(state), Status: state, RunURL: firstNonEmpty(p.Job.WebURL, p.BuildURL), PipelineID: strconv.FormatInt(p.ID, 10), StartedAt: p.StartedAt, CompletedAt: p.FinishedAt, DurationSeconds: dur, OccurredAt: firstTime(p.FinishedAt, time.Now().UTC()), Metadata: map[string]string{"job_id": strconv.FormatInt(jobID, 10)}}, nil
+	return model.CIEvent{TenantID: tenant, Provider: "travis", DeliveryID: delivery, Repository: repo, Organization: firstPath(repo), Workflow: "Travis CI", Job: firstNonEmpty(p.Job.Name, p.Job.Number), RunID: p.ID, JobID: strconv.FormatInt(jobID, 10), CommitSHA: p.Commit.SHA, Branch: firstNonEmpty(p.Branch.Name, p.Commit.Branch), Conclusion: normalizeConclusion(state), Status: state, RunURL: firstNonEmpty(p.Job.WebURL, p.BuildURL), PipelineID: strconv.FormatInt(p.ID, 10), StartedAt: p.StartedAt, CompletedAt: p.FinishedAt, DurationSeconds: dur, OccurredAt: firstTime(p.FinishedAt, time.Now().UTC()), Metadata: map[string]string{"job_id": strconv.FormatInt(jobID, 10), "build_id": strconv.FormatInt(p.ID, 10)}}, nil
 }
 
 func parseCodeBuild(tenant, delivery string, b []byte) (model.CIEvent, error) {
@@ -530,6 +545,336 @@ func parseCodeBuild(tenant, delivery string, b []byte) (model.CIEvent, error) {
 	}
 	repo := firstNonEmpty(p.Detail.Additional.Source.Location, p.Detail.ProjectName)
 	return model.CIEvent{TenantID: tenant, Provider: "codebuild", DeliveryID: firstNonEmpty(delivery, p.ID), Repository: repo, Organization: p.Account, Workflow: p.Detail.ProjectName, Job: p.Detail.CurrentPhase, JobID: p.Detail.BuildID, CommitSHA: firstNonEmpty(p.Detail.Version, p.Detail.Additional.Source.Version), Conclusion: normalizeConclusion(p.Detail.BuildStatus), Status: p.Detail.BuildStatus, RunURL: p.Detail.Additional.Logs.DeepLink, StartedAt: start, CompletedAt: finish, DurationSeconds: dur, RunnerClass: "aws-codebuild", RunnerLabels: []string{p.Region}, InlineLog: log.String(), OccurredAt: firstTime(p.Time, time.Now().UTC()), Metadata: map[string]string{"build_id": p.Detail.BuildID, "region": p.Region, "account": p.Account}}, nil
+}
+
+func parseBitbucket(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		Repository struct {
+			FullName  string `json:"full_name"`
+			Name      string `json:"name"`
+			Workspace struct {
+				Slug string `json:"slug"`
+			} `json:"workspace"`
+			Links struct {
+				HTML struct {
+					Href string `json:"href"`
+				} `json:"html"`
+			} `json:"links"`
+		} `json:"repository"`
+		Pipeline struct {
+			UUID        string `json:"uuid"`
+			BuildNumber int64  `json:"build_number"`
+			State       struct {
+				Name   string `json:"name"`
+				Result struct {
+					Name string `json:"name"`
+				} `json:"result"`
+			} `json:"state"`
+			Target struct {
+				RefName string `json:"ref_name"`
+				Commit  struct {
+					Hash string `json:"hash"`
+				} `json:"commit"`
+			} `json:"target"`
+			CreatedOn   time.Time `json:"created_on"`
+			CompletedOn time.Time `json:"completed_on"`
+			Links       struct {
+				HTML struct {
+					Href string `json:"href"`
+				} `json:"html"`
+			} `json:"links"`
+		} `json:"pipeline"`
+		Step struct {
+			UUID  string `json:"uuid"`
+			Name  string `json:"name"`
+			State struct {
+				Name   string `json:"name"`
+				Result struct {
+					Name string `json:"name"`
+				} `json:"result"`
+			} `json:"state"`
+			StartedOn   time.Time `json:"started_on"`
+			CompletedOn time.Time `json:"completed_on"`
+			Links       struct {
+				HTML struct {
+					Href string `json:"href"`
+				} `json:"html"`
+			} `json:"links"`
+		} `json:"step"`
+		CommitStatus struct {
+			State  string `json:"state"`
+			Name   string `json:"name"`
+			Key    string `json:"key"`
+			URL    string `json:"url"`
+			Commit struct {
+				Hash string `json:"hash"`
+			} `json:"commit"`
+		} `json:"commit_status"`
+		InlineLog string `json:"inline_log"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	repo := p.Repository.FullName
+	if repo == "" {
+		repo = p.Repository.Workspace.Slug + "/" + p.Repository.Name
+	}
+	state := firstNonEmpty(p.Step.State.Result.Name, p.Step.State.Name, p.Pipeline.State.Result.Name, p.Pipeline.State.Name, p.CommitStatus.State)
+	if repo == "" || state == "" {
+		return model.CIEvent{}, errors.New("Bitbucket event missing repository or state")
+	}
+	started := firstTime(p.Step.StartedOn, p.Pipeline.CreatedOn)
+	finished := firstTime(p.Step.CompletedOn, p.Pipeline.CompletedOn)
+	dur := int64(0)
+	if !started.IsZero() && !finished.IsZero() {
+		dur = int64(finished.Sub(started).Seconds())
+	}
+	workspace, slug := splitRepo(repo)
+	return model.CIEvent{TenantID: tenant, Provider: "bitbucket", DeliveryID: delivery, Repository: repo, Organization: workspace, Workflow: "Bitbucket pipeline", Job: firstNonEmpty(p.Step.Name, p.CommitStatus.Name), RunID: p.Pipeline.BuildNumber, JobID: firstNonEmpty(p.Step.UUID, p.CommitStatus.Key), CommitSHA: firstNonEmpty(p.Pipeline.Target.Commit.Hash, p.CommitStatus.Commit.Hash), Branch: p.Pipeline.Target.RefName, Conclusion: normalizeConclusion(state), Status: state, RunURL: firstNonEmpty(p.Step.Links.HTML.Href, p.Pipeline.Links.HTML.Href, p.CommitStatus.URL, p.Repository.Links.HTML.Href), PipelineID: p.Pipeline.UUID, StartedAt: started, CompletedAt: finished, DurationSeconds: dur, InlineLog: p.InlineLog, OccurredAt: firstTime(finished, time.Now().UTC()), Metadata: map[string]string{"workspace": workspace, "repo_slug": slug, "pipeline_uuid": p.Pipeline.UUID, "step_uuid": p.Step.UUID}}, nil
+}
+
+func parseDrone(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		Event string `json:"event"`
+		Repo  struct {
+			Slug      string `json:"slug"`
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+			Link      string `json:"link"`
+		} `json:"repo"`
+		Repository struct {
+			Slug      string `json:"slug"`
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+			Link      string `json:"link"`
+		} `json:"repository"`
+		Build struct {
+			ID       int64  `json:"id"`
+			Number   int64  `json:"number"`
+			Status   string `json:"status"`
+			After    string `json:"after"`
+			Ref      string `json:"ref"`
+			Source   string `json:"source"`
+			Link     string `json:"link"`
+			Started  int64  `json:"started"`
+			Finished int64  `json:"finished"`
+		} `json:"build"`
+		Stage struct {
+			Number int64  `json:"number"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"stage"`
+		Step struct {
+			Number int64  `json:"number"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		} `json:"step"`
+		InlineLog string `json:"inline_log"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	r := p.Repository
+	if r.Slug == "" {
+		r = p.Repo
+	}
+	repo := r.Slug
+	if repo == "" {
+		repo = strings.Trim(r.Namespace+"/"+r.Name, "/")
+	}
+	state := firstNonEmpty(p.Step.Status, p.Stage.Status, p.Build.Status)
+	if repo == "" || state == "" {
+		return model.CIEvent{}, errors.New("Drone event missing repository or status")
+	}
+	start, finish := unixTime(p.Build.Started), unixTime(p.Build.Finished)
+	dur := int64(0)
+	if !start.IsZero() && !finish.IsZero() {
+		dur = int64(finish.Sub(start).Seconds())
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "drone", DeliveryID: delivery, Repository: repo, Organization: firstPath(repo), Workflow: firstNonEmpty(p.Stage.Name, "Drone build"), Job: p.Step.Name, RunID: p.Build.Number, JobID: strconv.FormatInt(p.Step.Number, 10), CommitSHA: p.Build.After, Branch: firstNonEmpty(p.Build.Source, p.Build.Ref), Conclusion: normalizeConclusion(state), Status: state, RunURL: firstNonEmpty(p.Build.Link, r.Link), PipelineID: strconv.FormatInt(p.Build.ID, 10), StartedAt: start, CompletedAt: finish, DurationSeconds: dur, InlineLog: p.InlineLog, OccurredAt: firstTime(finish, time.Now().UTC()), Metadata: map[string]string{"repo_slug": repo, "build_number": strconv.FormatInt(p.Build.Number, 10), "stage_number": strconv.FormatInt(p.Stage.Number, 10), "step_number": strconv.FormatInt(p.Step.Number, 10)}}, nil
+}
+
+func parseSemaphore(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		OrganizationName string `json:"organization_name"`
+		ProjectName      string `json:"project_name"`
+		PipelineID       string `json:"pipeline_id"`
+		WorkflowID       string `json:"workflow_id"`
+		BranchName       string `json:"branch_name"`
+		CommitSHA        string `json:"commit_sha"`
+		Result           string `json:"result"`
+		State            string `json:"state"`
+		URL              string `json:"url"`
+		InlineLog        string `json:"inline_log"`
+		Pipeline         struct {
+			ID        string    `json:"id"`
+			Name      string    `json:"name"`
+			Result    string    `json:"result"`
+			State     string    `json:"state"`
+			CreatedAt time.Time `json:"created_at"`
+			DoneAt    time.Time `json:"done_at"`
+		} `json:"pipeline"`
+		Project struct {
+			Name string `json:"name"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	project := firstNonEmpty(p.ProjectName, p.Project.Name)
+	repo := strings.Trim(p.OrganizationName+"/"+project, "/")
+	state := firstNonEmpty(p.Result, p.Pipeline.Result, p.State, p.Pipeline.State)
+	if repo == "" || state == "" {
+		return model.CIEvent{}, errors.New("Semaphore event missing project or result")
+	}
+	start, finish := p.Pipeline.CreatedAt, p.Pipeline.DoneAt
+	dur := int64(0)
+	if !start.IsZero() && !finish.IsZero() {
+		dur = int64(finish.Sub(start).Seconds())
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "semaphore", DeliveryID: delivery, Repository: repo, Organization: p.OrganizationName, Workflow: firstNonEmpty(p.Pipeline.Name, "Semaphore pipeline"), Job: "pipeline", CommitSHA: p.CommitSHA, Branch: p.BranchName, Conclusion: normalizeConclusion(state), Status: state, RunURL: p.URL, PipelineID: firstNonEmpty(p.PipelineID, p.Pipeline.ID, p.WorkflowID), StartedAt: start, CompletedAt: finish, DurationSeconds: dur, InlineLog: p.InlineLog, OccurredAt: firstTime(finish, time.Now().UTC()), Metadata: map[string]string{"workflow_id": p.WorkflowID}}, nil
+}
+
+func parseAppVeyor(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var p struct {
+		EventName string `json:"eventName"`
+		EventData struct {
+			AccountName  string    `json:"accountName"`
+			ProjectName  string    `json:"projectName"`
+			BuildVersion string    `json:"buildVersion"`
+			BuildID      int64     `json:"buildId"`
+			Status       string    `json:"status"`
+			Branch       string    `json:"branch"`
+			CommitID     string    `json:"commitId"`
+			BuildURL     string    `json:"buildUrl"`
+			Started      time.Time `json:"started"`
+			Finished     time.Time `json:"finished"`
+			Jobs         []struct {
+				JobID  string `json:"jobId"`
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			} `json:"jobs"`
+		} `json:"eventData"`
+		InlineLog string `json:"inline_log"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	d := p.EventData
+	repo := strings.Trim(d.AccountName+"/"+d.ProjectName, "/")
+	state := d.Status
+	jobID, jobName := "", ""
+	if len(d.Jobs) > 0 {
+		jobID = d.Jobs[0].JobID
+		jobName = d.Jobs[0].Name
+		if d.Jobs[0].Status != "" {
+			state = d.Jobs[0].Status
+		}
+	}
+	if repo == "" || state == "" {
+		return model.CIEvent{}, errors.New("AppVeyor event missing project or status")
+	}
+	dur := int64(0)
+	if !d.Started.IsZero() && !d.Finished.IsZero() {
+		dur = int64(d.Finished.Sub(d.Started).Seconds())
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "appveyor", DeliveryID: delivery, Repository: repo, Organization: d.AccountName, Workflow: d.BuildVersion, Job: jobName, RunID: d.BuildID, JobID: jobID, CommitSHA: d.CommitID, Branch: d.Branch, Conclusion: normalizeConclusion(state), Status: state, RunURL: d.BuildURL, StartedAt: d.Started, CompletedAt: d.Finished, DurationSeconds: dur, InlineLog: p.InlineLog, OccurredAt: firstTime(d.Finished, time.Now().UTC()), Metadata: map[string]string{"job_id": jobID}}, nil
+}
+
+func parseCloudBuild(tenant, delivery string, b []byte) (model.CIEvent, error) {
+	var env struct {
+		ID      string `json:"id"`
+		Message struct {
+			Data        string    `json:"data"`
+			MessageID   string    `json:"messageId"`
+			PublishTime time.Time `json:"publishTime"`
+		} `json:"message"`
+	}
+	payload := b
+	if json.Unmarshal(b, &env) == nil && env.Message.Data != "" {
+		decoded, err := base64.StdEncoding.DecodeString(env.Message.Data)
+		if err != nil {
+			return model.CIEvent{}, err
+		}
+		payload = decoded
+		if delivery == "" {
+			delivery = firstNonEmpty(env.Message.MessageID, env.ID)
+		}
+	}
+	var p struct {
+		ID               string            `json:"id"`
+		ProjectID        string            `json:"projectId"`
+		Status           string            `json:"status"`
+		LogURL           string            `json:"logUrl"`
+		CreateTime       time.Time         `json:"createTime"`
+		StartTime        time.Time         `json:"startTime"`
+		FinishTime       time.Time         `json:"finishTime"`
+		Substitutions    map[string]string `json:"substitutions"`
+		SourceProvenance struct {
+			ResolvedRepoSource struct {
+				RepoName   string `json:"repoName"`
+				CommitSHA  string `json:"commitSha"`
+				BranchName string `json:"branchName"`
+			} `json:"resolvedRepoSource"`
+		} `json:"sourceProvenance"`
+		Results struct {
+			BuildStepImages []string `json:"buildStepImages"`
+		} `json:"results"`
+		Steps []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Timing struct {
+				StartTime time.Time `json:"startTime"`
+				EndTime   time.Time `json:"endTime"`
+			} `json:"timing"`
+		} `json:"steps"`
+		InlineLog string `json:"inline_log"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return model.CIEvent{}, err
+	}
+	if p.ID == "" || p.Status == "" {
+		return model.CIEvent{}, errors.New("Cloud Build event missing id or status")
+	}
+	repo := firstNonEmpty(p.Substitutions["REPO_NAME"], p.SourceProvenance.ResolvedRepoSource.RepoName, p.ProjectID)
+	org := p.ProjectID
+	job := ""
+	var logs strings.Builder
+	for _, st := range p.Steps {
+		if st.Status != "SUCCESS" && st.Status != "" {
+			job = st.Name
+		}
+		if st.Status != "" {
+			fmt.Fprintf(&logs, "%s: %s\n", st.Name, st.Status)
+		}
+	}
+	inline := p.InlineLog
+	if inline == "" {
+		inline = logs.String()
+	}
+	start := firstTime(p.StartTime, p.CreateTime)
+	dur := int64(0)
+	if !start.IsZero() && !p.FinishTime.IsZero() {
+		dur = int64(p.FinishTime.Sub(start).Seconds())
+	}
+	return model.CIEvent{TenantID: tenant, Provider: "cloudbuild", DeliveryID: delivery, Repository: repo, Organization: org, Workflow: "Google Cloud Build", Job: job, JobID: p.ID, CommitSHA: firstNonEmpty(p.Substitutions["COMMIT_SHA"], p.SourceProvenance.ResolvedRepoSource.CommitSHA), Branch: firstNonEmpty(p.Substitutions["BRANCH_NAME"], p.SourceProvenance.ResolvedRepoSource.BranchName), Conclusion: normalizeConclusion(p.Status), Status: p.Status, RunURL: p.LogURL, LogURL: p.LogURL, StartedAt: start, CompletedAt: p.FinishTime, DurationSeconds: dur, RunnerClass: "google-cloud-build", InlineLog: inline, OccurredAt: firstTime(p.FinishTime, time.Now().UTC()), Metadata: map[string]string{"project_id": p.ProjectID, "build_id": p.ID, "build_name": "projects/" + p.ProjectID + "/locations/global/builds/" + p.ID, "location": "global"}}, nil
+}
+
+func splitRepo(v string) (string, string) {
+	parts := strings.SplitN(strings.Trim(v, "/"), "/", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	if len(parts) == 1 {
+		return "", parts[0]
+	}
+	return "", ""
+}
+func unixTime(v int64) time.Time {
+	if v <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(v, 0).UTC()
 }
 
 func parseTeamCityTime(v string) time.Time {
@@ -655,8 +1000,38 @@ func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max 
 			headers["Authorization"] = "token " + co.Token
 		}
 		return fetchText(ctx, client, endpoint, max, headers)
-	case "codebuild":
-		return "", errors.New("CodeBuild event did not include phase context; configure EventBridge input transformation or a generic log webhook")
+	case "codebuild", "cloudbuild":
+		return "", errors.New("cloud build event did not include inline phase context")
+	case "bitbucket":
+		m := ev.Metadata
+		endpoint := strings.TrimRight(co.BaseURL, "/") + "/2.0/repositories/" + url.PathEscape(m["workspace"]) + "/" + url.PathEscape(m["repo_slug"]) + "/pipelines/" + url.PathEscape(m["pipeline_uuid"]) + "/steps/" + url.PathEscape(m["step_uuid"]) + "/log"
+		headers := connectorHeaders(co)
+		if co.Token != "" {
+			if co.Username != "" {
+				headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(co.Username+":"+co.Token))
+			} else {
+				headers["Authorization"] = "Bearer " + co.Token
+			}
+		}
+		return fetchText(ctx, client, endpoint, max, headers)
+	case "drone":
+		m := ev.Metadata
+		endpoint := strings.TrimRight(co.BaseURL, "/") + "/api/repos/" + strings.Trim(m["repo_slug"], "/") + "/builds/" + url.PathEscape(m["build_number"]) + "/logs/" + url.PathEscape(m["stage_number"]) + "/" + url.PathEscape(m["step_number"])
+		headers := connectorHeaders(co)
+		if co.Token != "" {
+			headers["Authorization"] = "Bearer " + co.Token
+		}
+		return fetchText(ctx, client, endpoint, max, headers)
+	case "appveyor":
+		jobID := firstNonEmpty(ev.Metadata["job_id"], ev.JobID)
+		endpoint := strings.TrimRight(co.BaseURL, "/") + "/api/buildjobs/" + url.PathEscape(jobID) + "/log"
+		headers := connectorHeaders(co)
+		if co.Token != "" {
+			headers["Authorization"] = "Bearer " + co.Token
+		}
+		return fetchText(ctx, client, endpoint, max, headers)
+	case "semaphore":
+		return "", errors.New("Semaphore webhook must include inline_log; external log URLs are not fetched")
 	case "jenkins":
 		raw := ev.Metadata["build_url"]
 		if raw == "" {
@@ -802,12 +1177,15 @@ func firstPath(s string) string {
 	}
 	return ""
 }
-func firstNonEmpty(a, b string) string {
-	if strings.TrimSpace(a) != "" {
-		return a
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
 	}
-	return b
+	return ""
 }
+
 func stringParam(m map[string]any, k string) string {
 	if v, ok := m[k].(string); ok {
 		return v
@@ -860,4 +1238,238 @@ func postForm(ctx context.Context, client *http.Client, method, endpoint string,
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+type RetryResult struct {
+	Provider   string `json:"provider"`
+	Endpoint   string `json:"endpoint"`
+	HTTPStatus int    `json:"http_status"`
+	RequestID  string `json:"request_id,omitempty"`
+}
+
+func Retry(ctx context.Context, co config.CIConnector, ev model.CIEvent) (RetryResult, error) {
+	endpoint, method, body, headers, err := retryRequest(co, ev)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	if !sameBase(co.BaseURL, endpoint) {
+		return RetryResult{}, errors.New("retry endpoint is outside configured base_url")
+	}
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return RetryResult{}, err
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	result := RetryResult{Provider: co.Provider, Endpoint: endpoint, HTTPStatus: resp.StatusCode, RequestID: firstNonEmpty(resp.Header.Get("X-Request-Id"), resp.Header.Get("X-Gitlab-Trace-Id"), resp.Header.Get("X-Circleci-Request-Id"))}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return result, fmt.Errorf("retry HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return result, nil
+}
+
+func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, string, map[string]string, error) {
+	method := strings.ToUpper(strings.TrimSpace(co.RetryMethod))
+	body := expandRetryTemplate(co.RetryBody, ev)
+	headers := connectorHeaders(co)
+	endpoint := expandRetryTemplate(co.RetryURL, ev)
+	if endpoint != "" {
+		if method == "" {
+			method = http.MethodPost
+		}
+		applyRetryAuthorization(co, headers)
+		return endpoint, method, body, headers, nil
+	}
+	base := strings.TrimRight(co.BaseURL, "/")
+	switch strings.ToLower(co.Provider) {
+	case "gitlab":
+		if ev.ProjectID == "" || ev.JobID == "" {
+			return "", "", "", nil, errors.New("GitLab retry requires project_id and job_id")
+		}
+		endpoint = base + "/api/v4/projects/" + url.PathEscape(ev.ProjectID) + "/jobs/" + url.PathEscape(ev.JobID) + "/retry"
+		headers["PRIVATE-TOKEN"] = co.Token
+	case "circleci":
+		workflowID := firstNonEmpty(ev.Metadata["workflow_id"], ev.PipelineID)
+		if workflowID == "" {
+			return "", "", "", nil, errors.New("CircleCI retry requires workflow_id")
+		}
+		endpoint = base + "/api/v2/workflow/" + url.PathEscape(workflowID) + "/rerun"
+		body = `{"from_failed":true}`
+		headers["Circle-Token"] = co.Token
+	case "buildkite":
+		m := ev.Metadata
+		if m["organization"] == "" || m["pipeline_slug"] == "" || m["build_number"] == "" {
+			return "", "", "", nil, errors.New("Buildkite retry requires organization, pipeline_slug, and build_number")
+		}
+		endpoint = base + "/v2/organizations/" + url.PathEscape(m["organization"]) + "/pipelines/" + url.PathEscape(m["pipeline_slug"]) + "/builds/" + url.PathEscape(m["build_number"]) + "/rebuild"
+		headers["Authorization"] = "Bearer " + co.Token
+	case "travis":
+		buildID := firstNonEmpty(ev.Metadata["build_id"], ev.PipelineID, strconv.FormatInt(ev.RunID, 10))
+		if buildID == "" || buildID == "0" {
+			return "", "", "", nil, errors.New("Travis retry requires build_id")
+		}
+		endpoint = base + "/build/" + url.PathEscape(buildID) + "/restart"
+		headers["Travis-API-Version"] = "3"
+		headers["Authorization"] = "token " + co.Token
+	case "cloudbuild":
+		name := ev.Metadata["build_name"]
+		if name == "" {
+			project := firstNonEmpty(ev.Metadata["project_id"], co.Project)
+			location := firstNonEmpty(ev.Metadata["location"], co.Region, "global")
+			buildID := firstNonEmpty(ev.Metadata["build_id"], ev.JobID, ev.PipelineID)
+			if project == "" || buildID == "" {
+				return "", "", "", nil, errors.New("Cloud Build retry requires project_id and build_id")
+			}
+			name = "projects/" + project + "/locations/" + location + "/builds/" + buildID
+		}
+		endpoint = base + "/v1/" + strings.TrimPrefix(name, "/") + ":retry"
+		headers["Authorization"] = "Bearer " + co.Token
+	case "azuredevops":
+		organization := firstNonEmpty(co.Organization, ev.Organization)
+		project := firstNonEmpty(ev.Metadata["project_id"], ev.Metadata["project"], co.Project, ev.ProjectID)
+		buildID := firstNonEmpty(ev.Metadata["build_id"], ev.JobID, strconv.FormatInt(ev.RunID, 10))
+		if organization == "" || project == "" || buildID == "" || buildID == "0" {
+			return "", "", "", nil, errors.New("Azure DevOps retry requires organization, project, and build_id")
+		}
+		endpoint = base + "/" + url.PathEscape(organization) + "/" + url.PathEscape(project) + "/_apis/build/builds/" + url.PathEscape(buildID) + "?retry=true&api-version=7.1"
+		method = http.MethodPatch
+		body = `{}`
+		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(":"+co.Token))
+	case "bitbucket":
+		workspace := firstNonEmpty(ev.Metadata["workspace"], co.Organization, ev.Organization)
+		repo := firstNonEmpty(ev.Metadata["repo_slug"], lastPath(ev.Repository))
+		branch := firstNonEmpty(ev.Branch, "main")
+		if workspace == "" || repo == "" {
+			return "", "", "", nil, errors.New("Bitbucket retry requires workspace and repo_slug")
+		}
+		endpoint = base + "/2.0/repositories/" + url.PathEscape(workspace) + "/" + url.PathEscape(repo) + "/pipelines/"
+		bodyBytes, _ := json.Marshal(map[string]any{"target": map[string]any{"type": "pipeline_ref_target", "ref_type": "branch", "ref_name": branch}})
+		body = string(bodyBytes)
+		headers["Authorization"] = "Bearer " + co.Token
+	case "drone":
+		repo := firstNonEmpty(ev.Metadata["repo_slug"], ev.Repository)
+		parts := strings.SplitN(strings.Trim(repo, "/"), "/", 2)
+		build := firstNonEmpty(ev.Metadata["build_number"], strconv.FormatInt(ev.RunID, 10))
+		if len(parts) != 2 || build == "" || build == "0" {
+			return "", "", "", nil, errors.New("Drone retry requires owner, repository, and build_number")
+		}
+		endpoint = base + "/api/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]) + "/builds/" + url.PathEscape(build)
+		headers["Authorization"] = "Bearer " + co.Token
+	case "semaphore":
+		workflowID := firstNonEmpty(ev.Metadata["workflow_id"], ev.PipelineID)
+		if workflowID == "" {
+			return "", "", "", nil, errors.New("Semaphore retry requires workflow_id")
+		}
+		endpoint = base + "/api/v1alpha/plumber-workflows/" + url.PathEscape(workflowID) + "/reschedule?request_token=" + url.QueryEscape(retryToken(ev))
+		headers["Authorization"] = "Token " + co.Token
+	case "appveyor":
+		buildID := firstNonEmpty(ev.Metadata["build_id"], strconv.FormatInt(ev.RunID, 10))
+		if buildID == "" || buildID == "0" {
+			return "", "", "", nil, errors.New("AppVeyor retry requires build_id")
+		}
+		endpoint = base + "/api/builds"
+		method = http.MethodPut
+		body = `{"buildId":` + buildID + `,"reRunIncomplete":true}`
+		headers["Authorization"] = "Bearer " + co.Token
+	case "bitrise":
+		app := firstNonEmpty(ev.Metadata["app_slug"], co.Project)
+		pipeline := firstNonEmpty(ev.Metadata["pipeline_id"], ev.Metadata["build_slug"], ev.PipelineID)
+		if app == "" || pipeline == "" {
+			return "", "", "", nil, errors.New("Bitrise retry requires app_slug and pipeline_id")
+		}
+		endpoint = base + "/v0.1/apps/" + url.PathEscape(app) + "/pipelines/" + url.PathEscape(pipeline) + "/rebuild"
+		headers["Authorization"] = co.Token
+	case "teamcity":
+		buildType := firstNonEmpty(ev.PipelineID, ev.Metadata["build_type_id"])
+		if buildType == "" {
+			return "", "", "", nil, errors.New("TeamCity retry requires build_type_id")
+		}
+		endpoint = base + "/app/rest/buildQueue"
+		bodyBytes, _ := json.Marshal(map[string]any{"buildType": map[string]string{"id": buildType}, "branchName": ev.Branch, "comment": map[string]string{"text": "Safe rerun requested by CI Radar"}})
+		body = string(bodyBytes)
+		headers["Authorization"] = "Bearer " + co.Token
+	default:
+		return "", "", "", nil, fmt.Errorf("%s automatic retry requires retry_url", co.Provider)
+	}
+	if method == "" {
+		method = http.MethodPost
+	}
+	if body == "" {
+		body = `{}`
+	}
+	return endpoint, method, body, headers, nil
+}
+
+func retryToken(ev model.CIEvent) string {
+	value := strings.Join([]string{ev.Provider, ev.Repository, ev.PipelineID, ev.JobID, strconv.FormatInt(ev.RunID, 10), ev.CommitSHA}, "|")
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:16])
+}
+
+func lastPath(value string) string {
+	value = strings.Trim(value, "/")
+	if index := strings.LastIndex(value, "/"); index >= 0 {
+		return value[index+1:]
+	}
+	return value
+}
+
+func applyRetryAuthorization(co config.CIConnector, headers map[string]string) {
+	if co.Token == "" || headers["Authorization"] != "" {
+		return
+	}
+	switch strings.ToLower(co.Provider) {
+	case "gitlab":
+		headers["PRIVATE-TOKEN"] = co.Token
+	case "circleci":
+		headers["Circle-Token"] = co.Token
+	case "travis":
+		headers["Travis-API-Version"] = "3"
+		headers["Authorization"] = "token " + co.Token
+	case "jenkins":
+		headers["Authorization"] = "Basic " + base64.StdEncoding.EncodeToString([]byte(co.Username+":"+co.Token))
+	default:
+		headers["Authorization"] = "Bearer " + co.Token
+	}
+}
+
+func expandRetryTemplate(raw string, ev model.CIEvent) string {
+	if raw == "" {
+		return ""
+	}
+	values := map[string]string{
+		"tenant_id":    ev.TenantID,
+		"provider":     ev.Provider,
+		"repository":   ev.Repository,
+		"organization": ev.Organization,
+		"workflow":     ev.Workflow,
+		"job":          ev.Job,
+		"run_id":       strconv.FormatInt(ev.RunID, 10),
+		"job_id":       ev.JobID,
+		"commit_sha":   ev.CommitSHA,
+		"branch":       ev.Branch,
+		"project_id":   ev.ProjectID,
+		"pipeline_id":  ev.PipelineID,
+	}
+	for k, v := range ev.Metadata {
+		values[k] = v
+	}
+	for k, v := range values {
+		raw = strings.ReplaceAll(raw, "${"+k+"}", v)
+	}
+	return raw
 }
