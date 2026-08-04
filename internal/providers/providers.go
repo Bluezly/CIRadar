@@ -22,13 +22,13 @@ type Endpoint struct {
 }
 
 type Poller struct {
-	store     *db.Store
+	store     db.Backend
 	http      *http.Client
 	log       *slog.Logger
 	endpoints []Endpoint
 }
 
-func NewPoller(store *db.Store, log *slog.Logger) *Poller {
+func NewPoller(store db.Backend, log *slog.Logger) *Poller {
 	return &Poller{
 		store: store,
 		log:   log,
