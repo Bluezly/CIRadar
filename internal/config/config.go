@@ -56,14 +56,20 @@ type NotificationChannel struct {
 }
 
 type CIConnector struct {
-	Name          string `json:"name"`
-	Provider      string `json:"provider"`
-	Enabled       bool   `json:"enabled"`
-	TenantID      string `json:"tenant_id"`
-	BaseURL       string `json:"base_url,omitempty"`
-	Token         string `json:"token,omitempty"`
-	WebhookSecret string `json:"webhook_secret,omitempty"`
-	Username      string `json:"username,omitempty"`
+	Name          string            `json:"name"`
+	Provider      string            `json:"provider"`
+	Enabled       bool              `json:"enabled"`
+	TenantID      string            `json:"tenant_id"`
+	BaseURL       string            `json:"base_url,omitempty"`
+	Token         string            `json:"token,omitempty"`
+	WebhookSecret string            `json:"webhook_secret,omitempty"`
+	Username      string            `json:"username,omitempty"`
+	Organization  string            `json:"organization,omitempty"`
+	Project       string            `json:"project,omitempty"`
+	Region        string            `json:"region,omitempty"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	CostPerMinute float64           `json:"cost_per_minute,omitempty"`
+	Currency      string            `json:"currency,omitempty"`
 }
 
 type TestIntelligenceConfig struct {
@@ -116,6 +122,7 @@ type Config struct {
 	GitHubAPIURL                  string                 `json:"github_api_url"`
 	RequireInstallationBinding    bool                   `json:"require_github_installation_binding"`
 	PublicBaseURL                 string                 `json:"public_base_url"`
+	SourceURL                     string                 `json:"source_url,omitempty"`
 	FingerprintHMACKey            string                 `json:"fingerprint_hmac_key"`
 	AdminToken                    string                 `json:"admin_token"`
 	DefaultTenantID               string                 `json:"default_tenant_id"`
@@ -127,6 +134,12 @@ type Config struct {
 	PRComments                    PRCommentConfig        `json:"pr_comments"`
 	Connectors                    []CIConnector          `json:"connectors,omitempty"`
 	TestIntelligence              TestIntelligenceConfig `json:"test_intelligence"`
+	SSO                           SSOConfig              `json:"sso"`
+	LLM                           LLMConfig              `json:"llm"`
+	ChatOps                       ChatOpsConfig          `json:"chatops"`
+	Costs                         CostConfig             `json:"costs"`
+	Semantic                      SemanticConfig         `json:"semantic_similarity"`
+	PredictiveTests               PredictiveTestConfig   `json:"predictive_tests"`
 	MasterKey                     string                 `json:"-"`
 }
 
@@ -163,21 +176,32 @@ func Default() Config {
 		IncidentResolveAfter:          30 * time.Minute,
 		PRComments:                    PRCommentConfig{Enabled: true, Mode: "external_or_strong", MinimumScore: 65, UpdateExisting: true},
 		TestIntelligence:              TestIntelligenceConfig{Enabled: true, AutoQuarantine: false, AutoQuarantineMinRuns: 5, AutoQuarantineMinScore: 65, AutoQuarantineDurationText: "7d"},
+		SSO:                           SSOConfig{Enabled: false, Mode: "oidc", DefaultTenant: "default", DefaultRole: "viewer", CookieName: "ciradar_session", CookieSecure: true},
+		LLM:                           LLMConfig{Enabled: false, Provider: "openai-compatible", Model: "gpt-5-mini", MinimumScore: 60, MaxInputCharacters: 24000, MaxOutputTokens: 1200, TimeoutText: "45s", SendRedactedExcerpt: true},
+		ChatOps:                       ChatOpsConfig{Enabled: false, DefaultTenant: "default", AllowAcknowledge: true, AllowResolve: true, AllowQuarantine: true, QuarantineDuration: "7d"},
+		Costs:                         CostConfig{Enabled: true, Currency: "USD", DefaultRates: map[string]float64{}, RunnerRates: map[string]float64{}, BillingRounds: map[string]int{}},
+		Semantic:                      SemanticConfig{Enabled: true, RemoteEmbeddings: false, VectorDimensions: 128, CandidateLimit: 500},
+		PredictiveTests:               PredictiveTestConfig{Enabled: true, DefaultLimit: 100, MinimumScore: 20, AlwaysRunFlaky: true, AlwaysRunFailed: true},
 		Notifications: NotificationConfig{Enabled: false, Channels: []NotificationChannel{
-			{Name: "slack-ops", Type: "slack", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "discord-ops", Type: "discord", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "telegram-ops", Type: "telegram", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "custom-webhook", Type: "webhook", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "slack-ops", Type: "slack", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "discord-ops", Type: "discord", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "telegram-ops", Type: "telegram", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "custom-webhook", Type: "webhook", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky"}, MinimumScore: 65, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
 			{Name: "teams-ops", Type: "teams", Enabled: false, Events: []string{"incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 70, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
 			{Name: "pagerduty-ops", Type: "pagerduty", Enabled: false, Events: []string{"incident_opened", "incident_updated", "incident_resolved"}, MinimumSeverity: "major", CooldownText: "5m", TimeoutText: "10s", MaxAttempts: 5},
 			{Name: "opsgenie-ops", Type: "opsgenie", Enabled: false, Events: []string{"incident_opened", "incident_updated", "incident_resolved"}, MinimumSeverity: "major", CooldownText: "5m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "email-ops", Type: "email", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_resolved"}, MinimumScore: 75, CooldownText: "15m", TimeoutText: "15s", MaxAttempts: 5, SMTPMode: "starttls", SMTPPort: 587},
+			{Name: "email-ops", Type: "email", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_resolved", "test_flaky"}, MinimumScore: 75, CooldownText: "15m", TimeoutText: "15s", MaxAttempts: 5, SMTPMode: "starttls", SMTPPort: 587},
 		}},
 		Connectors: []CIConnector{
 			{Name: "gitlab", Provider: "gitlab", Enabled: false, TenantID: "default", BaseURL: "https://gitlab.com"},
 			{Name: "buildkite", Provider: "buildkite", Enabled: false, TenantID: "default", BaseURL: "https://api.buildkite.com"},
 			{Name: "circleci", Provider: "circleci", Enabled: false, TenantID: "default", BaseURL: "https://circleci.com"},
 			{Name: "jenkins", Provider: "jenkins", Enabled: false, TenantID: "default"},
+			{Name: "azuredevops", Provider: "azuredevops", Enabled: false, TenantID: "default", BaseURL: "https://dev.azure.com"},
+			{Name: "bitrise", Provider: "bitrise", Enabled: false, TenantID: "default", BaseURL: "https://api.bitrise.io"},
+			{Name: "teamcity", Provider: "teamcity", Enabled: false, TenantID: "default"},
+			{Name: "travis", Provider: "travis", Enabled: false, TenantID: "default", BaseURL: "https://api.travis-ci.com"},
+			{Name: "codebuild", Provider: "codebuild", Enabled: false, TenantID: "default", BaseURL: "https://codebuild.amazonaws.com"},
 		},
 	}
 }
@@ -205,7 +229,7 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) resolveSecrets() error {
-	fields := []*string{&c.DatabaseURL, &c.GitHubWebhookSecret, &c.FingerprintHMACKey, &c.AdminToken}
+	fields := []*string{&c.DatabaseURL, &c.GitHubWebhookSecret, &c.FingerprintHMACKey, &c.AdminToken, &c.SSO.ClientSecret, &c.SSO.SessionSecret, &c.SSO.ProxySecret, &c.LLM.APIKey, &c.ChatOps.SlackSigningSecret, &c.ChatOps.TeamsSigningSecret}
 	for _, dst := range fields {
 		v, err := secrets.Resolve(c.MasterKey, *dst)
 		if err != nil {
@@ -215,7 +239,7 @@ func (c *Config) resolveSecrets() error {
 	}
 	for i := range c.Notifications.Channels {
 		ch := &c.Notifications.Channels[i]
-		for _, dst := range []*string{&ch.URL, &ch.BotToken, &ch.HMACSecret, &ch.APIKey, &ch.RoutingKey, &ch.SMTPPassword} {
+		for _, dst := range []*string{&ch.URL, &ch.BotToken, &ch.ChatID, &ch.HMACSecret, &ch.APIKey, &ch.RoutingKey, &ch.SMTPUsername, &ch.SMTPPassword, &ch.EmailFrom} {
 			v, err := secrets.Resolve(c.MasterKey, *dst)
 			if err != nil {
 				return fmt.Errorf("notification channel %q: %w", ch.Name, err)
@@ -231,6 +255,13 @@ func (c *Config) resolveSecrets() error {
 				return fmt.Errorf("connector %q: %w", co.Name, err)
 			}
 			*dst = v
+		}
+		for key, raw := range co.Headers {
+			v, err := secrets.Resolve(c.MasterKey, raw)
+			if err != nil {
+				return fmt.Errorf("connector %q header %q: %w", co.Name, key, err)
+			}
+			co.Headers[key] = v
 		}
 	}
 	return nil
@@ -359,7 +390,7 @@ func (c *Config) normalize() error {
 			ch.MinimumScore = 100
 		}
 		if len(ch.Events) == 0 {
-			ch.Events = []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"}
+			ch.Events = []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky"}
 		}
 		if ch.Timezone == "" {
 			ch.Timezone = "UTC"
@@ -448,6 +479,9 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("invalid auto_quarantine_duration %q", c.TestIntelligence.AutoQuarantineDurationText)
 	}
 	connectorNames := map[string]struct{}{}
+	if err := c.normalizeEnterprise(); err != nil {
+		return err
+	}
 	for i := range c.Connectors {
 		co := &c.Connectors[i]
 		co.Name = strings.TrimSpace(co.Name)
@@ -464,7 +498,7 @@ func (c *Config) normalize() error {
 		}
 		connectorNames[co.Name] = struct{}{}
 		switch co.Provider {
-		case "gitlab", "buildkite", "circleci", "jenkins":
+		case "gitlab", "buildkite", "circleci", "jenkins", "azuredevops", "bitrise", "teamcity", "travis", "codebuild":
 		default:
 			return fmt.Errorf("connector %q has unsupported provider %q", co.Name, co.Provider)
 		}
@@ -479,6 +513,14 @@ func (c *Config) normalize() error {
 				co.BaseURL = "https://api.buildkite.com"
 			case "circleci":
 				co.BaseURL = "https://circleci.com"
+			case "azuredevops":
+				co.BaseURL = "https://dev.azure.com"
+			case "bitrise":
+				co.BaseURL = "https://api.bitrise.io"
+			case "travis":
+				co.BaseURL = "https://api.travis-ci.com"
+			case "codebuild":
+				co.BaseURL = "https://codebuild.amazonaws.com"
 			}
 		}
 	}
@@ -511,7 +553,7 @@ func validSeverity(v string, allowEmpty bool) bool {
 
 func validNotificationEvent(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test":
+	case "analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test", "test_flaky":
 		return true
 	default:
 		return false
@@ -575,6 +617,20 @@ func applyEnv(c *Config) {
 	setBool(&c.Notifications.Enabled, "CIRADAR_NOTIFICATIONS_ENABLED")
 	setBool(&c.AllowUnauthenticatedLocalhost, "CIRADAR_ALLOW_UNAUTHENTICATED_LOCALHOST")
 	setBool(&c.DashboardEnabled, "CIRADAR_DASHBOARD_ENABLED")
+	setBool(&c.SSO.Enabled, "CIRADAR_SSO_ENABLED")
+	setString(&c.SSO.Mode, "CIRADAR_SSO_MODE")
+	setString(&c.SSO.IssuerURL, "CIRADAR_SSO_ISSUER")
+	setString(&c.SSO.ClientID, "CIRADAR_SSO_CLIENT_ID")
+	setString(&c.SSO.ClientSecret, "CIRADAR_SSO_CLIENT_SECRET")
+	setString(&c.SSO.RedirectURL, "CIRADAR_SSO_REDIRECT_URL")
+	setString(&c.SSO.SessionSecret, "CIRADAR_SSO_SESSION_SECRET")
+	setBool(&c.LLM.Enabled, "CIRADAR_LLM_ENABLED")
+	setString(&c.LLM.Endpoint, "CIRADAR_LLM_ENDPOINT")
+	setString(&c.LLM.APIKey, "CIRADAR_LLM_API_KEY")
+	setString(&c.LLM.Model, "CIRADAR_LLM_MODEL")
+	setBool(&c.ChatOps.Enabled, "CIRADAR_CHATOPS_ENABLED")
+	setString(&c.ChatOps.SlackSigningSecret, "CIRADAR_SLACK_SIGNING_SECRET")
+	setString(&c.ChatOps.TeamsSigningSecret, "CIRADAR_TEAMS_SIGNING_SECRET")
 	setInt(&c.RetentionDays, "CIRADAR_RETENTION_DAYS")
 	setInt(&c.WorkerCount, "CIRADAR_WORKERS")
 	setInt(&c.IncidentRepoThreshold, "CIRADAR_INCIDENT_REPO_THRESHOLD")
