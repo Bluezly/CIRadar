@@ -1,5 +1,6 @@
 {
   "listen_address": "127.0.0.1:8787",
+  "database_driver": "embedded",
   "database_path": ".ciradar/ciradar-state.json",
   "data_directory": ".ciradar",
   "rules_directory": "rules",
@@ -9,7 +10,6 @@
   "store_raw_logs": false,
   "cross_tenant_correlation": false,
   "incident_window": "15m",
-  "incident_resolve_after": "30m",
   "incident_repo_threshold": 3,
   "incident_org_threshold": 2,
   "worker_count": 2,
@@ -24,11 +24,12 @@
   "github_api_url": "https://api.github.com",
   "require_github_installation_binding": true,
   "public_base_url": "",
-  "fingerprint_hmac_key": "GENERATED_BY_CIRADAR_INIT",
-  "admin_token": "GENERATED_BY_CIRADAR_INIT",
+  "fingerprint_hmac_key": "REPLACE_WITH_32_BYTE_BASE64_HMAC_KEY",
+  "admin_token": "REPLACE_WITH_LONG_RANDOM_ROOT_TOKEN",
   "default_tenant_id": "default",
   "allow_unauthenticated_localhost": false,
   "dashboard_enabled": true,
+  "incident_resolve_after": "30m",
   "notifications": {
     "enabled": false,
     "channels": [
@@ -36,27 +37,30 @@
         "name": "slack-ops",
         "type": "slack",
         "enabled": false,
-        "url": "https://hooks.slack.com/services/REPLACE/ME",
-        "mention": "<!channel>",
-        "events": ["analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"],
-        "minimum_score": 70,
-        "external_only": true,
+        "events": [
+          "analysis",
+          "environment_changed",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
         "cooldown": "15m",
         "timeout": "10s",
-        "max_attempts": 5,
-        "quiet_hours_start": "23:00",
-        "quiet_hours_end": "07:00",
-        "timezone": "Asia/Baghdad",
-        "quiet_hours_bypass_severity": "critical"
+        "max_attempts": 5
       },
       {
         "name": "discord-ops",
         "type": "discord",
         "enabled": false,
-        "url": "https://discord.com/api/webhooks/REPLACE/ME",
-        "username": "CI Radar",
-        "events": ["incident_opened", "incident_updated", "incident_resolved"],
-        "minimum_score": 70,
+        "events": [
+          "analysis",
+          "environment_changed",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5
@@ -65,11 +69,14 @@
         "name": "telegram-ops",
         "type": "telegram",
         "enabled": false,
-        "bot_token": "REPLACE_WITH_BOT_TOKEN",
-        "chat_id": "REPLACE_WITH_CHAT_ID",
-        "message_thread_id": 0,
-        "events": ["incident_opened", "incident_updated", "incident_resolved"],
-        "minimum_severity": "major",
+        "events": [
+          "analysis",
+          "environment_changed",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5
@@ -78,15 +85,127 @@
         "name": "custom-webhook",
         "type": "webhook",
         "enabled": false,
-        "url": "https://alerts.example.com/ciradar",
-        "hmac_secret": "REPLACE_WITH_LONG_RANDOM_SECRET",
-        "headers": {"X-Environment": "production"},
-        "events": ["analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved"],
+        "events": [
+          "analysis",
+          "environment_changed",
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_score": 65,
+        "cooldown": "15m",
+        "timeout": "10s",
+        "max_attempts": 5
+      },
+      {
+        "name": "teams-ops",
+        "type": "teams",
+        "enabled": false,
+        "events": [
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
         "minimum_score": 70,
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5
+      },
+      {
+        "name": "pagerduty-ops",
+        "type": "pagerduty",
+        "enabled": false,
+        "events": [
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_severity": "major",
+        "cooldown": "5m",
+        "timeout": "10s",
+        "max_attempts": 5
+      },
+      {
+        "name": "opsgenie-ops",
+        "type": "opsgenie",
+        "enabled": false,
+        "events": [
+          "incident_opened",
+          "incident_updated",
+          "incident_resolved"
+        ],
+        "minimum_severity": "major",
+        "cooldown": "5m",
+        "timeout": "10s",
+        "max_attempts": 5
+      },
+      {
+        "name": "email-ops",
+        "type": "email",
+        "enabled": false,
+        "events": [
+          "analysis",
+          "incident_opened",
+          "incident_resolved"
+        ],
+        "minimum_score": 75,
+        "cooldown": "15m",
+        "timeout": "15s",
+        "max_attempts": 5,
+        "smtp_port": 587,
+        "smtp_mode": "starttls"
       }
     ]
-  }
+  },
+  "pr_comments": {
+    "enabled": true,
+    "mode": "external_or_strong",
+    "minimum_score": 65,
+    "update_existing": true
+  },
+  "connectors": [
+    {
+      "name": "gitlab",
+      "provider": "gitlab",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://gitlab.com",
+      "token": "",
+      "webhook_secret": ""
+    },
+    {
+      "name": "buildkite",
+      "provider": "buildkite",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://api.buildkite.com",
+      "token": "",
+      "webhook_secret": ""
+    },
+    {
+      "name": "circleci",
+      "provider": "circleci",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://circleci.com",
+      "token": "",
+      "webhook_secret": ""
+    },
+    {
+      "name": "jenkins",
+      "provider": "jenkins",
+      "enabled": false,
+      "tenant_id": "default",
+      "token": "",
+      "webhook_secret": ""
+    }
+  ],
+  "test_intelligence": {
+    "enabled": true,
+    "auto_quarantine": false,
+    "auto_quarantine_min_runs": 5,
+    "auto_quarantine_min_score": 65,
+    "auto_quarantine_duration": "7d"
+  },
+  "database_url": ""
 }

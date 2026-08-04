@@ -1,0 +1,14 @@
+{
+  "repository": "acme/payments",
+  "organization": "acme",
+  "workflow": "payments-ci",
+  "job": "unit-tests",
+  "run_id": "4815",
+  "commit_sha": "0123456789abcdef",
+  "branch": "main",
+  "conclusion": "failure",
+  "log_url": "https://jenkins.example.com/job/payments-ci/4815/consoleText",
+  "web_url": "https://jenkins.example.com/job/payments-ci/4815/",
+  "pull_request": 0,
+  "occurred_at": "2026-08-04T12:00:00Z"
+}
