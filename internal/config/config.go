@@ -127,7 +127,13 @@ type Config struct {
 	AdminToken                    string                 `json:"admin_token"`
 	DefaultTenantID               string                 `json:"default_tenant_id"`
 	AllowUnauthenticatedLocalhost bool                   `json:"allow_unauthenticated_localhost"`
+	TrustedProxyCIDRs             []string               `json:"trusted_proxy_cidrs,omitempty"`
 	DashboardEnabled              bool                   `json:"dashboard_enabled"`
+	DashboardSessionSecret        string                 `json:"dashboard_session_secret,omitempty"`
+	DashboardCookieSecure         bool                   `json:"dashboard_cookie_secure"`
+	RedactionPatterns             []string               `json:"redaction_patterns,omitempty"`
+	RedactionEntropyDetection     bool                   `json:"redaction_entropy_detection"`
+	GitHubMarketplace             MarketplaceConfig      `json:"github_marketplace"`
 	IncidentResolveAfterText      string                 `json:"incident_resolve_after"`
 	IncidentResolveAfter          time.Duration          `json:"-"`
 	Notifications                 NotificationConfig     `json:"notifications"`
@@ -171,7 +177,11 @@ func Default() Config {
 		RequireInstallationBinding:    true,
 		DefaultTenantID:               "default",
 		AllowUnauthenticatedLocalhost: false,
+		TrustedProxyCIDRs:             []string{},
 		DashboardEnabled:              true,
+		DashboardCookieSecure:         false,
+		RedactionEntropyDetection:     true,
+		GitHubMarketplace:             MarketplaceConfig{Enabled: false, AutoCreateTenant: true, CancellationPolicy: "retain_free", FreePlanName: "free"},
 		IncidentResolveAfterText:      "30m",
 		IncidentResolveAfter:          30 * time.Minute,
 		PRComments:                    PRCommentConfig{Enabled: true, Mode: "external_or_strong", MinimumScore: 65, UpdateExisting: true},
@@ -229,7 +239,7 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) resolveSecrets() error {
-	fields := []*string{&c.DatabaseURL, &c.GitHubWebhookSecret, &c.FingerprintHMACKey, &c.AdminToken, &c.SSO.ClientSecret, &c.SSO.SessionSecret, &c.SSO.ProxySecret, &c.LLM.APIKey, &c.ChatOps.SlackSigningSecret, &c.ChatOps.TeamsSigningSecret}
+	fields := []*string{&c.DatabaseURL, &c.GitHubWebhookSecret, &c.FingerprintHMACKey, &c.AdminToken, &c.DashboardSessionSecret, &c.GitHubMarketplace.WebhookSecret, &c.SSO.ClientSecret, &c.SSO.SessionSecret, &c.SSO.ProxySecret, &c.LLM.APIKey, &c.ChatOps.SlackSigningSecret, &c.ChatOps.TeamsSigningSecret}
 	for _, dst := range fields {
 		v, err := secrets.Resolve(c.MasterKey, *dst)
 		if err != nil {
@@ -482,6 +492,9 @@ func (c *Config) normalize() error {
 	if err := c.normalizeEnterprise(); err != nil {
 		return err
 	}
+	if err := c.normalizeHardening(); err != nil {
+		return err
+	}
 	for i := range c.Connectors {
 		co := &c.Connectors[i]
 		co.Name = strings.TrimSpace(co.Name)
@@ -564,6 +577,7 @@ func SaveDefault(path string) error {
 	cfg := Default()
 	cfg.AdminToken = generateToken(32)
 	cfg.FingerprintHMACKey = generateSecret(32)
+	cfg.DashboardSessionSecret = generateSecret(32)
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -617,6 +631,14 @@ func applyEnv(c *Config) {
 	setBool(&c.Notifications.Enabled, "CIRADAR_NOTIFICATIONS_ENABLED")
 	setBool(&c.AllowUnauthenticatedLocalhost, "CIRADAR_ALLOW_UNAUTHENTICATED_LOCALHOST")
 	setBool(&c.DashboardEnabled, "CIRADAR_DASHBOARD_ENABLED")
+	if v := strings.TrimSpace(os.Getenv("CIRADAR_TRUSTED_PROXY_CIDRS")); v != "" {
+		c.TrustedProxyCIDRs = splitCSV(v)
+	}
+	setString(&c.DashboardSessionSecret, "CIRADAR_DASHBOARD_SESSION_SECRET")
+	setBool(&c.DashboardCookieSecure, "CIRADAR_DASHBOARD_COOKIE_SECURE")
+	setBool(&c.RedactionEntropyDetection, "CIRADAR_REDACTION_ENTROPY")
+	setBool(&c.GitHubMarketplace.Enabled, "CIRADAR_MARKETPLACE_ENABLED")
+	setString(&c.GitHubMarketplace.WebhookSecret, "CIRADAR_MARKETPLACE_WEBHOOK_SECRET")
 	setBool(&c.SSO.Enabled, "CIRADAR_SSO_ENABLED")
 	setString(&c.SSO.Mode, "CIRADAR_SSO_MODE")
 	setString(&c.SSO.IssuerURL, "CIRADAR_SSO_ISSUER")
@@ -641,6 +663,17 @@ func applyEnv(c *Config) {
 			c.GitHubAppID = n
 		}
 	}
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if v := strings.TrimSpace(part); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func setString(dst *string, key string) {

@@ -143,6 +143,9 @@ func (c *Config) normalizeEnterprise() error {
 		c.SSO.Scopes = []string{"openid", "profile", "email"}
 	}
 	if c.SSO.Enabled {
+		if len(strings.TrimSpace(c.SSO.SessionSecret)) < 32 {
+			return errors.New("sso session_secret must contain at least 32 characters")
+		}
 		switch c.SSO.Mode {
 		case "oidc":
 			if c.SSO.IssuerURL == "" || c.SSO.ClientID == "" || c.SSO.RedirectURL == "" || c.SSO.SessionSecret == "" {
