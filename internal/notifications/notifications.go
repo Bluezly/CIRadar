@@ -22,16 +22,17 @@ import (
 	"ciradar/internal/config"
 	"ciradar/internal/db"
 	"ciradar/internal/model"
+	"ciradar/internal/version"
 )
 
 type Dispatcher struct {
 	cfg   config.NotificationConfig
-	store *db.Store
+	store db.Backend
 	log   *slog.Logger
 	http  *http.Client
 }
 
-func New(cfg config.NotificationConfig, store *db.Store, log *slog.Logger) *Dispatcher {
+func New(cfg config.NotificationConfig, store db.Backend, log *slog.Logger) *Dispatcher {
 	return &Dispatcher{cfg: cfg, store: store, log: log, http: &http.Client{Timeout: 30 * time.Second}}
 }
 
@@ -52,8 +53,20 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev model.NotificationEvent) e
 		return nil
 	}
 	var retryable []error
+	routedChannels := append([]string(nil), ev.TargetChannels...)
+	if ev.Repository != "" {
+		if profile, _ := d.store.GetRepositoryProfile(ctx, ev.TenantID, ev.Repository); profile != nil {
+			if len(routedChannels) == 0 {
+				routedChannels = profile.NotificationChannels
+			}
+			ev.Severity = elevateSeverityForCriticality(ev.Severity, profile.Criticality)
+		}
+	}
 	for _, ch := range d.cfg.Channels {
 		if !ch.Enabled || !matches(ch, ev) {
+			continue
+		}
+		if len(routedChannels) > 0 && !containsFold(routedChannels, ch.Name) {
 			continue
 		}
 		if err := d.dispatchChannel(ctx, ch, ev); err != nil {
@@ -74,12 +87,20 @@ func (e *permanentError) Error() string { return e.err.Error() }
 func (e *permanentError) Unwrap() error { return e.err }
 
 func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.NotificationChannel, ev model.NotificationEvent) error {
-	decision, delivery, err := d.store.BeginNotificationDelivery(ctx, ev.ID, ch.Name, ch.Type, ev.DedupeKey, ch.Cooldown, ch.MaxAttempts)
+	tenantID := ev.TenantID
+	if strings.TrimSpace(tenantID) == "" {
+		tenantID = model.DefaultTenantID
+	}
+	decision, delivery, err := d.store.BeginNotificationDeliveryForTenant(ctx, tenantID, ev.ID, ch.Name, ch.Type, ev.DedupeKey, ch.Cooldown, ch.MaxAttempts)
 	if err != nil {
 		return err
 	}
 	if decision != "send" {
 		return nil
+	}
+	if quiet, reason := inQuietHours(ch, ev); quiet {
+		now := time.Now().UTC()
+		return d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: delivery.ID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: "suppressed", Attempts: delivery.Attempts, SuppressedReason: reason, CreatedAt: delivery.CreatedAt, UpdatedAt: now})
 	}
 	attempt := delivery.Attempts
 	body, endpoint, headers, err := buildRequest(ch, ev)
@@ -98,7 +119,7 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 		return d.recordFailure(ctx, ch, ev, attempt, 0, err, true)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "CI-Radar/0.2")
+	req.Header.Set("User-Agent", "CI-Radar/"+version.Version)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
@@ -119,7 +140,7 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 			}
 		}
 		now := time.Now().UTC()
-		return d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: ev.ID + "|" + ch.Name, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: "sent", Attempts: attempt, HTTPStatus: resp.StatusCode, CreatedAt: delivery.CreatedAt, UpdatedAt: now, SentAt: now})
+		return d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: delivery.ID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: "sent", Attempts: attempt, HTTPStatus: resp.StatusCode, CreatedAt: delivery.CreatedAt, UpdatedAt: now, SentAt: now})
 	}
 	msg := fmt.Errorf("HTTP %d: %s", resp.StatusCode, sanitizeText(strings.TrimSpace(string(limited)), ch, endpoint))
 	permanent := resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 408 && resp.StatusCode != 409 && resp.StatusCode != 425 && resp.StatusCode != 429
@@ -136,7 +157,11 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 }
 
 func (d *Dispatcher) recordFailure(ctx context.Context, ch config.NotificationChannel, ev model.NotificationEvent, attempts, code int, err error, permanent bool) error {
-	old, _ := d.store.GetNotificationDelivery(ctx, ev.ID, ch.Name)
+	tenantID := ev.TenantID
+	if strings.TrimSpace(tenantID) == "" {
+		tenantID = model.DefaultTenantID
+	}
+	old, _ := d.store.GetNotificationDeliveryForTenant(ctx, tenantID, ev.ID, ch.Name)
 	created := time.Now().UTC()
 	if old != nil {
 		created = old.CreatedAt
@@ -150,7 +175,11 @@ func (d *Dispatcher) recordFailure(ctx context.Context, ch config.NotificationCh
 		permanent = true
 	}
 	now := time.Now().UTC()
-	_ = d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: ev.ID + "|" + ch.Name, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: status, Attempts: attempts, HTTPStatus: code, LastError: trim(err.Error(), 2000), CreatedAt: created, UpdatedAt: now})
+	deliveryID := ""
+	if old != nil {
+		deliveryID = old.ID
+	}
+	_ = d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: deliveryID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: status, Attempts: attempts, HTTPStatus: code, LastError: trim(err.Error(), 2000), CreatedAt: created, UpdatedAt: now})
 	if permanent {
 		return &permanentError{err}
 	}
@@ -168,7 +197,7 @@ func matches(ch config.NotificationChannel, ev model.NotificationEvent) bool {
 		if ev.Score < ch.MinimumScore {
 			return false
 		}
-		if ch.ExternalOnly && (ev.Confidence == model.ConfidenceLikelyCode || ev.Confidence == model.ConfidenceInsufficient) {
+		if ch.ExternalOnly && eventAttribution(ev) != model.AttributionExternal {
 			return false
 		}
 		if len(ch.Categories) > 0 && !containsFold(ch.Categories, string(ev.Category)) {
@@ -185,6 +214,67 @@ func matches(ch config.NotificationChannel, ev model.NotificationEvent) bool {
 		return false
 	}
 	return true
+}
+
+func eventAttribution(ev model.NotificationEvent) model.Attribution {
+	if ev.Attribution != "" {
+		return ev.Attribution
+	}
+	switch ev.Confidence {
+	case model.ConfidenceStrong, model.ConfidenceModerate:
+		return model.AttributionExternal
+	case model.ConfidenceLikelyCode:
+		return model.AttributionCode
+	case model.ConfidenceMixed:
+		return model.AttributionMixed
+	default:
+		return model.AttributionUnknown
+	}
+}
+
+func inQuietHours(ch config.NotificationChannel, ev model.NotificationEvent) (bool, string) {
+	if ch.QuietHoursStart == "" || ch.QuietHoursEnd == "" {
+		return false, ""
+	}
+	if severityRank(ev.Severity) >= severityRank(ch.QuietHoursBypassSeverity) {
+		return false, ""
+	}
+	loc, err := time.LoadLocation(ch.Timezone)
+	if err != nil {
+		return false, ""
+	}
+	now := time.Now().In(loc)
+	start, _ := time.ParseInLocation("15:04", ch.QuietHoursStart, loc)
+	end, _ := time.ParseInLocation("15:04", ch.QuietHoursEnd, loc)
+	mins := now.Hour()*60 + now.Minute()
+	sm := start.Hour()*60 + start.Minute()
+	em := end.Hour()*60 + end.Minute()
+	quiet := false
+	if sm < em {
+		quiet = mins >= sm && mins < em
+	} else {
+		quiet = mins >= sm || mins < em
+	}
+	if quiet {
+		return true, "quiet_hours:" + ch.Timezone
+	}
+	return false, ""
+}
+
+func elevateSeverityForCriticality(severity, criticality string) string {
+	severity = strings.ToLower(strings.TrimSpace(severity))
+	switch strings.ToLower(strings.TrimSpace(criticality)) {
+	case "critical":
+		return "critical"
+	case "high":
+		if severityRank(severity) < severityRank("major") {
+			return "major"
+		}
+	}
+	if severity == "" {
+		return "minor"
+	}
+	return severity
 }
 
 func buildRequest(ch config.NotificationChannel, ev model.NotificationEvent) ([]byte, string, map[string]string, error) {
@@ -248,7 +338,7 @@ func slackBody(ch config.NotificationChannel, ev model.NotificationEvent) string
 		fmt.Fprintf(&b, "*Repository:* `%s`\n", escapeSlack(ev.Repository))
 	}
 	if ev.Category != "" {
-		fmt.Fprintf(&b, "*Category:* `%s` · *Confidence:* `%s` · *Score:* %d/100\n", ev.Category, ev.Confidence, ev.Score)
+		fmt.Fprintf(&b, "*Category:* `%s` · *Attribution:* `%s` · *Confidence:* `%s` · *Score:* %d/100\n", ev.Category, ev.Attribution, ev.Confidence, ev.Score)
 	}
 	if ev.Provider != "" {
 		fmt.Fprintf(&b, "*Provider:* `%s` · *Operation:* `%s`\n", escapeSlack(ev.Provider), escapeSlack(ev.Operation))
@@ -425,7 +515,7 @@ func AnalysisEvent(in model.AnalysisInput, r model.AnalysisResult, publicBaseURL
 	if publicBaseURL != "" {
 		details = strings.TrimRight(publicBaseURL, "/") + "/api/v1/analyses/" + r.ID
 	}
-	return model.NotificationEvent{ID: "evt_analysis_" + r.ID, Type: "analysis", DedupeKey: "analysis:" + in.Repository + ":" + r.Fingerprint, OccurredAt: r.CreatedAt, Severity: analysisSeverity(r), Title: "CI Radar: " + r.Summary, Summary: r.Summary, Repository: in.Repository, Organization: in.Organization, Workflow: in.Workflow, Job: in.Job, RunID: in.RunID, CommitSHA: in.CommitSHA, DetailsURL: details, Category: r.Category, Confidence: r.Confidence, Score: r.Score, Provider: r.Provider, Operation: r.Operation, Fingerprint: r.Fingerprint, Recommendation: r.Recommendation, Evidence: r.Evidence}
+	return model.NotificationEvent{ID: "evt_analysis_" + r.ID, TenantID: r.TenantID, Type: "analysis", DedupeKey: "analysis:" + in.Repository + ":" + r.Fingerprint, OccurredAt: r.CreatedAt, Severity: analysisSeverity(r), Title: "CI Radar: " + r.Summary, Summary: r.Summary, Repository: in.Repository, Organization: in.Organization, Workflow: in.Workflow, Job: in.Job, RunID: in.RunID, CommitSHA: in.CommitSHA, DetailsURL: details, Category: r.Category, Confidence: r.Confidence, Attribution: r.Attribution, Score: r.Score, Provider: r.Provider, Operation: r.Operation, Fingerprint: r.Fingerprint, Recommendation: r.Recommendation, Evidence: r.Evidence}
 }
 func IncidentEvent(kind string, i model.Incident, publicBaseURL string) model.NotificationEvent {
 	title := "CI incident opened: " + i.Title
@@ -435,11 +525,26 @@ func IncidentEvent(kind string, i model.Incident, publicBaseURL string) model.No
 	if kind == "incident_resolved" {
 		title = "CI incident resolved: " + i.Title
 	}
-	return model.NotificationEvent{ID: fmt.Sprintf("evt_%s_%s_%d", kind, i.Fingerprint, i.LastSeenAt.Unix()), Type: kind, DedupeKey: kind + ":" + i.Fingerprint, OccurredAt: time.Now().UTC(), Severity: i.Severity, Title: title, Summary: fmt.Sprintf("%d repositories, %d organizations, %d occurrences", i.RepositoryCount, i.OrganizationCount, i.OccurrenceCount), Provider: i.Provider, Fingerprint: i.Fingerprint, Incident: &i}
+	return model.NotificationEvent{ID: fmt.Sprintf("evt_%s_%s_%d", kind, i.Fingerprint, i.LastSeenAt.Unix()), TenantID: i.TenantID, Type: kind, DedupeKey: kind + ":" + i.Fingerprint, OccurredAt: time.Now().UTC(), Severity: i.Severity, Title: title, Summary: fmt.Sprintf("%d repositories, %d organizations, %d occurrences", i.RepositoryCount, i.OrganizationCount, i.OccurrenceCount), Provider: i.Provider, Fingerprint: i.Fingerprint, Incident: &i}
 }
+
+func EnvironmentChangedEvent(tenantID, repository, organization, workflow, job, commitSHA, detailsURL string, changes []string) model.NotificationEvent {
+	now := time.Now().UTC()
+	summary := fmt.Sprintf("%d CI environment changes detected: %s", len(changes), strings.Join(changes, "; "))
+	h := sha256.Sum256([]byte(repository + "\x00" + workflow + "\x00" + job + "\x00" + strings.Join(changes, "\x00")))
+	return model.NotificationEvent{
+		ID:       "evt_environment_" + hex.EncodeToString(h[:8]) + "_" + fmt.Sprint(now.Unix()),
+		TenantID: tenantID, Type: "environment_changed", DedupeKey: "environment:" + repository + ":" + workflow + ":" + job + ":" + hex.EncodeToString(h[:8]),
+		OccurredAt: now, Severity: "minor", Title: "CI environment changed: " + repository, Summary: summary,
+		Repository: repository, Organization: organization, Workflow: workflow, Job: job, CommitSHA: commitSHA, DetailsURL: detailsURL,
+		Category: model.CategoryRunnerImageDrift, Attribution: model.AttributionExternal, Score: 70, Provider: "GitHub Actions", Operation: "runner-environment",
+		Recommendation: "Review and pin tool versions before the environment change reaches critical workflows.",
+	}
+}
+
 func TestEvent() model.NotificationEvent {
 	now := time.Now().UTC()
-	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_%d", now.UnixNano()), Type: "test", DedupeKey: "", OccurredAt: now, Severity: "info", Title: "CI Radar notification test", Summary: "Your notification channel is configured correctly.", Repository: "example/repository", Category: model.CategoryNetworkFailure, Confidence: model.ConfidenceModerate, Score: 75, Provider: "example-provider", Operation: "connect", Recommendation: "No action is required."}
+	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_%d", now.UnixNano()), TenantID: model.DefaultTenantID, Type: "test", DedupeKey: "", OccurredAt: now, Severity: "info", Title: "CI Radar notification test", Summary: "Your notification channel is configured correctly.", Repository: "example/repository", Category: model.CategoryNetworkFailure, Confidence: model.ConfidenceModerate, Score: 75, Provider: "example-provider", Operation: "connect", Recommendation: "No action is required."}
 }
 func analysisSeverity(r model.AnalysisResult) string {
 	if r.Score >= 90 {
