@@ -1,5 +1,5 @@
 .PHONY: test vet build windows linux clean
-VERSION ?= 1.1.0-oss-rc.2
+VERSION ?= 1.2.0-oss-rc.3
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X ciradar/internal/version.Version=$(VERSION) -X ciradar/internal/version.Commit=$(COMMIT) -X ciradar/internal/version.BuildDate=$(BUILD_DATE)

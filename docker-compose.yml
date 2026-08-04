@@ -18,7 +18,7 @@ services:
     build:
       context: .
       args:
-        VERSION: 1.1.0-oss-rc.2
+        VERSION: 1.2.0-oss-rc.3
     restart: unless-stopped
     depends_on:
       postgres:
