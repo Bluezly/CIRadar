@@ -4,7 +4,7 @@ chcp 65001 >nul
 if not exist ciradar.json CIRadar-Windows-x64.exe init --config ciradar.json >nul
 
 echo ============================================================
-echo CI Radar Beta 5 - Smoke Tests
+echo CI Radar 1.0.0 RC1 - Smoke Tests
 echo ============================================================
 for %%F in (
   samples\npm-econnreset.log
@@ -19,5 +19,12 @@ for %%F in (
   CIRadar-Windows-x64.exe analyze --config ciradar.json %%F
 )
 echo.
-echo Finished. These are smoke tests, not the 215-case benchmark.
+echo.
+echo Testing JUnit ingestion...
+CIRadar-Windows-x64.exe tests ingest --config ciradar.json --repo demo/payments --workflow ci --job tests --run-id 1 examples\junit-failing.xml >nul
+if errorlevel 1 exit /b %errorlevel%
+CIRadar-Windows-x64.exe tests list --config ciradar.json --repo demo/payments --limit 5
+
+echo.
+echo Finished. These are smoke tests, not an accuracy benchmark.
 pause

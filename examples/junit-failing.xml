@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="payments" tests="3" failures="1" errors="0" skipped="0" time="0.42">
+  <testcase classname="PaymentServiceTest" name="creates_payment" time="0.10"/>
+  <testcase classname="PaymentServiceTest" name="retries_transient_gateway_error" time="0.21">
+    <failure message="expected 200, received 503">payment_service_test.go:88</failure>
+  </testcase>
+  <testcase classname="PaymentServiceTest" name="rejects_invalid_card" time="0.11"/>
+</testsuite>
