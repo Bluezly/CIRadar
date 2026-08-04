@@ -29,9 +29,13 @@ type Analyzer struct {
 }
 
 func New(fingerprintKey string, extraRules ...Rule) *Analyzer {
+	return NewConfigured(fingerprintKey, nil, true, extraRules...)
+}
+
+func NewConfigured(fingerprintKey string, redactionPatterns []string, entropyDetection bool, extraRules ...Rule) *Analyzer {
 	rules := BuiltinRules()
 	rules = append(rules, extraRules...)
-	return &Analyzer{rules: rules, redactor: NewRedactor(), fingerprintKey: []byte(strings.TrimSpace(fingerprintKey)), maxExcerpt: 5000}
+	return &Analyzer{rules: rules, redactor: NewRedactorWithPatterns(redactionPatterns, entropyDetection), fingerprintKey: []byte(strings.TrimSpace(fingerprintKey)), maxExcerpt: 5000}
 }
 
 func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisResult {
