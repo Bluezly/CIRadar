@@ -381,3 +381,94 @@ func (c *Client) UpsertPRComment(ctx context.Context, installationID int64, owne
 	_, err := c.CreateIssueComment(ctx, installationID, owner, repo, number, body)
 	return err
 }
+
+type RepositoryInfo struct {
+	DefaultBranch string `json:"default_branch"`
+}
+
+type ContentFile struct {
+	Path     string `json:"path"`
+	SHA      string `json:"sha"`
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+}
+
+type PullRequestResult struct {
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+}
+
+func (c *Client) Repository(ctx context.Context, installationID int64, owner, repo string) (RepositoryInfo, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return RepositoryInfo{}, err
+	}
+	var out RepositoryInfo
+	err = c.doJSON(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s", url.PathEscape(owner), url.PathEscape(repo)), token, nil, &out)
+	return out, err
+}
+
+func (c *Client) CreateBranch(ctx context.Context, installationID int64, owner, repo, branch, sha string) error {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/repos/%s/%s/git/refs", url.PathEscape(owner), url.PathEscape(repo))
+	return c.doJSON(ctx, http.MethodPost, path, token, map[string]any{"ref": "refs/heads/" + strings.TrimPrefix(branch, "refs/heads/"), "sha": sha}, nil)
+}
+
+func (c *Client) GetContent(ctx context.Context, installationID int64, owner, repo, path, ref string) (ContentFile, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return ContentFile{}, err
+	}
+	endpoint := fmt.Sprintf("/repos/%s/%s/contents/%s", url.PathEscape(owner), url.PathEscape(repo), escapePath(path))
+	if ref != "" {
+		endpoint += "?ref=" + url.QueryEscape(ref)
+	}
+	var out ContentFile
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, token, nil, &out); err != nil {
+		return ContentFile{}, err
+	}
+	if out.Encoding != "base64" {
+		return ContentFile{}, fmt.Errorf("GitHub returned unsupported content encoding %q", out.Encoding)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(out.Content, "\n", ""))
+	if err != nil {
+		return ContentFile{}, err
+	}
+	out.Content = string(decoded)
+	return out, nil
+}
+
+func (c *Client) PutContent(ctx context.Context, installationID int64, owner, repo, path, branch, message, content, sha string) error {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{"message": message, "content": base64.StdEncoding.EncodeToString([]byte(content)), "branch": branch}
+	if sha != "" {
+		body["sha"] = sha
+	}
+	endpoint := fmt.Sprintf("/repos/%s/%s/contents/%s", url.PathEscape(owner), url.PathEscape(repo), escapePath(path))
+	return c.doJSON(ctx, http.MethodPut, endpoint, token, body, nil)
+}
+
+func (c *Client) CreateDraftPullRequest(ctx context.Context, installationID int64, owner, repo, title, body, head, base string) (PullRequestResult, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return PullRequestResult{}, err
+	}
+	var out PullRequestResult
+	endpoint := fmt.Sprintf("/repos/%s/%s/pulls", url.PathEscape(owner), url.PathEscape(repo))
+	err = c.doJSON(ctx, http.MethodPost, endpoint, token, map[string]any{"title": title, "body": body, "head": head, "base": base, "draft": true, "maintainer_can_modify": true}, &out)
+	return out, err
+}
+
+func escapePath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for index := range parts {
+		parts[index] = url.PathEscape(parts[index])
+	}
+	return strings.Join(parts, "/")
+}
