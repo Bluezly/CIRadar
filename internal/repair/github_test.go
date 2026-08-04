@@ -70,7 +70,7 @@ func TestCreateGitHubDraftRepairPR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	analysis := model.AnalysisResult{ID: "analysis-1234567890", TenantID: "alpha", Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: 90, Summary: "retry count is too low"}
+	analysis := model.AnalysisResult{ID: "analysis-1234567890", TenantID: "alpha", Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -90, ExternalityScore: -90, EvidenceStrength: 90, CodeEvidenceScore: 90, Summary: "retry count is too low"}
 	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", InstallationID: 77, CommitSHA: "abc", BaseBranch: "feature", RunURL: "https://github.example/run/1"}
 	patch := "--- a/src/app.js\n+++ b/src/app.js\n@@ -1 +1 @@\n-const retries = 1;\n+const retries = 2;\n"
 	result, err := CreateGitHubDraftPR(context.Background(), client, source, analysis, patch, "ciradar/repair-", 10, 1000)
