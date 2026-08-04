@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"ciradar/internal/config"
 	"ciradar/internal/db"
@@ -33,18 +34,15 @@ func New(cfg config.LLMConfig, store db.Backend) *Enhancer {
 }
 
 func (e *Enhancer) Enabled() bool {
-	return e != nil && e.cfg.Enabled && e.cfg.Endpoint != "" && e.cfg.APIKey != ""
+	return e != nil && e.cfg.Enabled && e.cfg.Endpoint != ""
 }
 
 func (e *Enhancer) Enhance(ctx context.Context, analysis model.AnalysisResult, changedFiles []string) (model.LLMEnhancement, error) {
 	if !e.Enabled() {
 		return model.LLMEnhancement{}, errors.New("LLM enhancement is disabled")
 	}
-	if analysis.Score < e.cfg.MinimumScore {
-		return model.LLMEnhancement{}, fmt.Errorf("analysis score %d is below LLM minimum %d", analysis.Score, e.cfg.MinimumScore)
-	}
 	prompt := e.buildPrompt(analysis, changedFiles)
-	fingerprint := sha256.Sum256([]byte(prompt + "\x00" + e.cfg.Model))
+	fingerprint := sha256.Sum256([]byte("prompt-v2\x00" + e.cfg.Provider + "\x00" + e.cfg.Endpoint + "\x00" + e.cfg.Model + "\x00" + prompt))
 	inputFingerprint := hex.EncodeToString(fingerprint[:])
 	var cached model.LLMEnhancement
 	if ok, _ := e.store.GetObject(ctx, analysis.TenantID, "llm_enhancement", analysis.ID, &cached); ok && cached.InputFingerprint == inputFingerprint {
@@ -64,19 +62,22 @@ func (e *Enhancer) Enhance(ctx context.Context, analysis model.AnalysisResult, c
 		"max_tokens":      e.cfg.MaxOutputTokens,
 		"response_format": map[string]string{"type": "json_object"},
 	}
-	b, _ := json.Marshal(requestBody)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+e.cfg.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "CI-Radar")
-	resp, err := e.http.Do(req)
+	body, status, err := e.sendChat(ctx, endpoint, requestBody)
 	if err != nil {
 		return model.LLMEnhancement{}, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return model.LLMEnhancement{}, fmt.Errorf("LLM HTTP %d: %s", resp.StatusCode, trim(string(body), 1000))
+	if status < 200 || status >= 300 {
+		lower := strings.ToLower(string(body))
+		if (status == http.StatusBadRequest || status == http.StatusUnprocessableEntity) && (strings.Contains(lower, "response_format") || strings.Contains(lower, "json_object")) {
+			delete(requestBody, "response_format")
+			body, status, err = e.sendChat(ctx, endpoint, requestBody)
+			if err != nil {
+				return model.LLMEnhancement{}, err
+			}
+		}
+	}
+	if status < 200 || status >= 300 {
+		return model.LLMEnhancement{}, fmt.Errorf("LLM HTTP %d: %s", status, trim(string(body), 1000))
 	}
 	content, usage, err := extractContent(body)
 	if err != nil {
@@ -122,19 +123,22 @@ func (e *Enhancer) buildPrompt(analysis model.AnalysisResult, changedFiles []str
 	payload := map[string]any{
 		"task": "Explain the deterministic CI Radar diagnosis in natural language and propose the safest next action.",
 		"diagnosis": map[string]any{
-			"category":            analysis.Category,
-			"attribution":         analysis.Attribution,
-			"confidence":          analysis.Confidence,
-			"score":               analysis.Score,
-			"summary":             analysis.Summary,
-			"recommendation":      analysis.Recommendation,
-			"decision_reason":     analysis.DecisionReason,
-			"provider":            analysis.Provider,
-			"operation":           analysis.Operation,
-			"matched_rules":       analysis.MatchedRules,
-			"evidence":            analysis.Evidence,
-			"environment_changes": analysis.EnvironmentChanges,
-			"suggested_actions":   analysis.SuggestedActions,
+			"category":                analysis.Category,
+			"attribution":             analysis.Attribution,
+			"confidence":              analysis.Confidence,
+			"externality_score":       model.ExternalityScoreOf(analysis),
+			"evidence_strength":       model.EvidenceStrengthOf(analysis),
+			"external_evidence_score": model.ExternalEvidenceScoreOf(analysis),
+			"code_evidence_score":     model.CodeEvidenceScoreOf(analysis),
+			"summary":                 analysis.Summary,
+			"recommendation":          analysis.Recommendation,
+			"decision_reason":         analysis.DecisionReason,
+			"provider":                analysis.Provider,
+			"operation":               analysis.Operation,
+			"matched_rules":           analysis.MatchedRules,
+			"evidence":                analysis.Evidence,
+			"environment_changes":     analysis.EnvironmentChanges,
+			"suggested_actions":       analysis.SuggestedActions,
 		},
 		"context": map[string]any{
 			"repository":      analysis.Repository,
@@ -153,8 +157,64 @@ func (e *Enhancer) buildPrompt(analysis model.AnalysisResult, changedFiles []str
 		}
 		payload["changed_files"] = changedFiles
 	}
-	b, _ := json.Marshal(payload)
-	return trim(string(b), e.cfg.MaxInputCharacters)
+	return marshalPrompt(payload, e.cfg.MaxInputCharacters)
+}
+
+func (e *Enhancer) sendChat(ctx context.Context, endpoint string, requestBody map[string]any) ([]byte, int, error) {
+	b, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(b))
+	if err != nil {
+		return nil, 0, err
+	}
+	if strings.TrimSpace(e.cfg.APIKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+e.cfg.APIKey)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "CI-Radar")
+	resp, err := e.http.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if readErr != nil {
+		return nil, resp.StatusCode, readErr
+	}
+	return body, resp.StatusCode, nil
+}
+
+func marshalPrompt(payload map[string]any, maximum int) string {
+	encode := func() string {
+		b, _ := json.Marshal(payload)
+		return string(b)
+	}
+	out := encode()
+	if maximum <= 0 || len(out) <= maximum {
+		return out
+	}
+	delete(payload, "changed_files")
+	out = encode()
+	if len(out) <= maximum {
+		return out
+	}
+	if excerpt, ok := payload["redacted_log_excerpt_untrusted"].(string); ok {
+		overhead := len(out) - len(excerpt)
+		budget := maximum - overhead - 64
+		if budget > 0 {
+			payload["redacted_log_excerpt_untrusted"] = trim(excerpt, budget)
+		} else {
+			delete(payload, "redacted_log_excerpt_untrusted")
+		}
+	}
+	out = encode()
+	if len(out) <= maximum {
+		return out
+	}
+	delete(payload, "redacted_log_excerpt_untrusted")
+	return encode()
 }
 
 func extractContent(body []byte) (string, map[string]int, error) {
@@ -191,8 +251,12 @@ func extractContent(body []byte) (string, map[string]int, error) {
 
 func trim(v string, max int) string {
 	v = strings.TrimSpace(v)
-	if max > 0 && len(v) > max {
-		return v[:max]
+	if max <= 0 || len(v) <= max {
+		return v
 	}
-	return v
+	end := max
+	for end > 0 && !utf8.ValidString(v[:end]) {
+		end--
+	}
+	return v[:end]
 }
