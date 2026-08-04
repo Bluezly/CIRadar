@@ -279,6 +279,51 @@
       "base_url": "https://codebuild.amazonaws.com",
       "region": "us-east-1",
       "webhook_secret": "env:CIRADAR_CODEBUILD_WEBHOOK_TOKEN"
+    },
+    {
+      "name": "bitbucket",
+      "provider": "bitbucket",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://api.bitbucket.org",
+      "token": "env:CIRADAR_BITBUCKET_TOKEN",
+      "webhook_secret": "env:CIRADAR_BITBUCKET_WEBHOOK_SECRET"
+    },
+    {
+      "name": "drone",
+      "provider": "drone",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://cloud.drone.io",
+      "token": "env:CIRADAR_DRONE_TOKEN",
+      "webhook_secret": "env:CIRADAR_DRONE_WEBHOOK_SECRET"
+    },
+    {
+      "name": "semaphore",
+      "provider": "semaphore",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://api.semaphoreci.com",
+      "token": "env:CIRADAR_SEMAPHORE_TOKEN",
+      "webhook_secret": "env:CIRADAR_SEMAPHORE_WEBHOOK_SECRET"
+    },
+    {
+      "name": "appveyor",
+      "provider": "appveyor",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://ci.appveyor.com",
+      "token": "env:CIRADAR_APPVEYOR_TOKEN",
+      "webhook_secret": "env:CIRADAR_APPVEYOR_WEBHOOK_SECRET"
+    },
+    {
+      "name": "cloudbuild",
+      "provider": "cloudbuild",
+      "enabled": false,
+      "tenant_id": "default",
+      "base_url": "https://cloudbuild.googleapis.com",
+      "token": "env:CIRADAR_CLOUDBUILD_TOKEN",
+      "webhook_secret": "env:CIRADAR_CLOUDBUILD_WEBHOOK_SECRET"
     }
   ],
   "test_intelligence": {
@@ -326,7 +371,16 @@
       "127.0.0.0/8"
     ],
     "proxy_secret_header": "X-CI-Radar-Proxy-Secret",
-    "proxy_secret": "env:CIRADAR_SSO_PROXY_SECRET"
+    "proxy_secret": "env:CIRADAR_SSO_PROXY_SECRET",
+    "saml_entity_id": "https://ci-radar.example.com/saml/metadata",
+    "saml_idp_sso_url": "https://identity.example.com/saml/sso",
+    "saml_idp_entity_id": "https://identity.example.com/metadata",
+    "saml_idp_certificate": "/run/secrets/idp-signing-cert.pem",
+    "saml_acs_url": "https://ci-radar.example.com/auth/callback",
+    "saml_xmlsec_path": "/usr/bin/xmlsec1",
+    "saml_name_attribute": "name",
+    "saml_email_attribute": "email",
+    "saml_clock_skew": "2m"
   },
   "llm": {
     "enabled": false,
@@ -370,7 +424,12 @@
       "bitrise": 0,
       "teamcity": 0,
       "travis": 0,
-      "codebuild": 0
+      "codebuild": 0,
+      "bitbucket": 0,
+      "drone": 0,
+      "semaphore": 0,
+      "appveyor": 0,
+      "cloudbuild": 0
     },
     "runner_rates": {
       "ubuntu-latest": 0.008,
@@ -383,7 +442,12 @@
     "enabled": true,
     "remote_embeddings": false,
     "vector_dimensions": 256,
-    "candidate_limit": 1000
+    "candidate_limit": 1000,
+    "mode": "ollama",
+    "local_endpoint": "http://127.0.0.1:11434/api/embed",
+    "local_model": "embeddinggemma",
+    "local_api_key": "",
+    "local_vector_path": ""
   },
   "predictive_tests": {
     "enabled": true,
@@ -391,5 +455,13 @@
     "minimum_score": 20,
     "always_run_flaky": true,
     "always_run_failed": true
+  },
+  "repair": {
+    "enabled": false,
+    "auto_draft_pr": false,
+    "minimum_score": 75,
+    "branch_prefix": "ciradar/repair-",
+    "maximum_files": 10,
+    "maximum_lines": 1000
   }
 }
