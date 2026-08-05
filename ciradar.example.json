@@ -64,7 +64,8 @@
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5,
-        "url": "env:CIRADAR_SLACK_WEBHOOK"
+        "url": "env:CIRADAR_SLACK_WEBHOOK",
+        "allow_private_network": false
       },
       {
         "name": "discord-ops",
@@ -82,7 +83,8 @@
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5,
-        "url": "env:CIRADAR_DISCORD_WEBHOOK"
+        "url": "env:CIRADAR_DISCORD_WEBHOOK",
+        "allow_private_network": false
       },
       {
         "name": "telegram-ops",
@@ -101,7 +103,8 @@
         "timeout": "10s",
         "max_attempts": 5,
         "bot_token": "env:CIRADAR_TELEGRAM_BOT_TOKEN",
-        "chat_id": "env:CIRADAR_TELEGRAM_CHAT_ID"
+        "chat_id": "env:CIRADAR_TELEGRAM_CHAT_ID",
+        "allow_private_network": false
       },
       {
         "name": "custom-webhook",
@@ -118,7 +121,8 @@
         "minimum_score": 60,
         "cooldown": "15m",
         "timeout": "10s",
-        "max_attempts": 5
+        "max_attempts": 5,
+        "allow_private_network": false
       },
       {
         "name": "teams-ops",
@@ -133,7 +137,8 @@
         "cooldown": "15m",
         "timeout": "10s",
         "max_attempts": 5,
-        "url": "env:CIRADAR_TEAMS_WEBHOOK"
+        "url": "env:CIRADAR_TEAMS_WEBHOOK",
+        "allow_private_network": false
       },
       {
         "name": "pagerduty-ops",
@@ -148,7 +153,8 @@
         "cooldown": "5m",
         "timeout": "10s",
         "max_attempts": 5,
-        "routing_key": "env:CIRADAR_PAGERDUTY_ROUTING_KEY"
+        "routing_key": "env:CIRADAR_PAGERDUTY_ROUTING_KEY",
+        "allow_private_network": false
       },
       {
         "name": "opsgenie-ops",
@@ -163,7 +169,8 @@
         "cooldown": "5m",
         "timeout": "10s",
         "max_attempts": 5,
-        "api_key": "env:CIRADAR_OPSGENIE_API_KEY"
+        "api_key": "env:CIRADAR_OPSGENIE_API_KEY",
+        "allow_private_network": false
       },
       {
         "name": "email-ops",
@@ -187,7 +194,8 @@
         "email_from": "ci-radar@example.com",
         "email_to": [
           "platform@example.com"
-        ]
+        ],
+        "allow_private_network": false
       }
     ]
   },
@@ -205,7 +213,8 @@
       "tenant_id": "default",
       "base_url": "https://gitlab.com",
       "token": "",
-      "webhook_secret": ""
+      "webhook_secret": "",
+      "allow_private_network": false
     },
     {
       "name": "buildkite",
@@ -214,7 +223,8 @@
       "tenant_id": "default",
       "base_url": "https://api.buildkite.com",
       "token": "",
-      "webhook_secret": ""
+      "webhook_secret": "",
+      "allow_private_network": false
     },
     {
       "name": "circleci",
@@ -223,7 +233,8 @@
       "tenant_id": "default",
       "base_url": "https://circleci.com",
       "token": "",
-      "webhook_secret": ""
+      "webhook_secret": "",
+      "allow_private_network": false
     },
     {
       "name": "jenkins",
@@ -231,7 +242,8 @@
       "enabled": false,
       "tenant_id": "default",
       "token": "",
-      "webhook_secret": ""
+      "webhook_secret": "",
+      "allow_private_network": false
     },
     {
       "name": "azuredevops",
@@ -242,7 +254,8 @@
       "organization": "YOUR_ORGANIZATION",
       "project": "YOUR_PROJECT",
       "token": "env:CIRADAR_AZURE_DEVOPS_PAT",
-      "webhook_secret": "env:CIRADAR_AZURE_WEBHOOK_TOKEN"
+      "webhook_secret": "env:CIRADAR_AZURE_WEBHOOK_TOKEN",
+      "allow_private_network": false
     },
     {
       "name": "bitrise",
@@ -251,7 +264,8 @@
       "tenant_id": "default",
       "base_url": "https://api.bitrise.io",
       "token": "env:CIRADAR_BITRISE_TOKEN",
-      "webhook_secret": "env:CIRADAR_BITRISE_WEBHOOK_TOKEN"
+      "webhook_secret": "env:CIRADAR_BITRISE_WEBHOOK_TOKEN",
+      "allow_private_network": false
     },
     {
       "name": "teamcity",
@@ -260,7 +274,8 @@
       "tenant_id": "default",
       "base_url": "https://teamcity.example.com",
       "token": "env:CIRADAR_TEAMCITY_TOKEN",
-      "webhook_secret": "env:CIRADAR_TEAMCITY_WEBHOOK_TOKEN"
+      "webhook_secret": "env:CIRADAR_TEAMCITY_WEBHOOK_TOKEN",
+      "allow_private_network": false
     },
     {
       "name": "travis",
@@ -269,7 +284,8 @@
       "tenant_id": "default",
       "base_url": "https://api.travis-ci.com",
       "token": "env:CIRADAR_TRAVIS_TOKEN",
-      "webhook_secret": "env:CIRADAR_TRAVIS_WEBHOOK_TOKEN"
+      "webhook_secret": "env:CIRADAR_TRAVIS_WEBHOOK_TOKEN",
+      "allow_private_network": false
     },
     {
       "name": "codebuild",
@@ -278,7 +294,8 @@
       "tenant_id": "default",
       "base_url": "https://codebuild.amazonaws.com",
       "region": "us-east-1",
-      "webhook_secret": "env:CIRADAR_CODEBUILD_WEBHOOK_TOKEN"
+      "webhook_secret": "env:CIRADAR_CODEBUILD_WEBHOOK_TOKEN",
+      "allow_private_network": false
     },
     {
       "name": "bitbucket",
@@ -287,7 +304,8 @@
       "tenant_id": "default",
       "base_url": "https://api.bitbucket.org",
       "token": "env:CIRADAR_BITBUCKET_TOKEN",
-      "webhook_secret": "env:CIRADAR_BITBUCKET_WEBHOOK_SECRET"
+      "webhook_secret": "env:CIRADAR_BITBUCKET_WEBHOOK_SECRET",
+      "allow_private_network": false
     },
     {
       "name": "drone",
@@ -296,7 +314,8 @@
       "tenant_id": "default",
       "base_url": "https://cloud.drone.io",
       "token": "env:CIRADAR_DRONE_TOKEN",
-      "webhook_secret": "env:CIRADAR_DRONE_WEBHOOK_SECRET"
+      "webhook_secret": "env:CIRADAR_DRONE_WEBHOOK_SECRET",
+      "allow_private_network": false
     },
     {
       "name": "semaphore",
@@ -305,7 +324,8 @@
       "tenant_id": "default",
       "base_url": "https://api.semaphoreci.com",
       "token": "env:CIRADAR_SEMAPHORE_TOKEN",
-      "webhook_secret": "env:CIRADAR_SEMAPHORE_WEBHOOK_SECRET"
+      "webhook_secret": "env:CIRADAR_SEMAPHORE_WEBHOOK_SECRET",
+      "allow_private_network": false
     },
     {
       "name": "appveyor",
@@ -314,7 +334,8 @@
       "tenant_id": "default",
       "base_url": "https://ci.appveyor.com",
       "token": "env:CIRADAR_APPVEYOR_TOKEN",
-      "webhook_secret": "env:CIRADAR_APPVEYOR_WEBHOOK_SECRET"
+      "webhook_secret": "env:CIRADAR_APPVEYOR_WEBHOOK_SECRET",
+      "allow_private_network": false
     },
     {
       "name": "cloudbuild",
@@ -323,7 +344,8 @@
       "tenant_id": "default",
       "base_url": "https://cloudbuild.googleapis.com",
       "token": "env:CIRADAR_CLOUDBUILD_TOKEN",
-      "webhook_secret": "env:CIRADAR_CLOUDBUILD_WEBHOOK_SECRET"
+      "webhook_secret": "env:CIRADAR_CLOUDBUILD_WEBHOOK_SECRET",
+      "allow_private_network": false
     }
   ],
   "test_intelligence": {
@@ -380,7 +402,8 @@
     "saml_xmlsec_path": "/usr/bin/xmlsec1",
     "saml_name_attribute": "name",
     "saml_email_attribute": "email",
-    "saml_clock_skew": "2m"
+    "saml_clock_skew": "2m",
+    "allow_private_network": false
   },
   "llm": {
     "enabled": false,
@@ -396,7 +419,8 @@
     "max_output_tokens": 1200,
     "timeout": "45s",
     "send_redacted_excerpt": true,
-    "send_changed_files": true
+    "send_changed_files": true,
+    "allow_private_network": false
   },
   "chatops": {
     "enabled": false,
@@ -463,5 +487,6 @@
     "branch_prefix": "ciradar/repair-",
     "maximum_files": 10,
     "maximum_lines": 1000
-  }
+  },
+  "github_allow_private_network": false
 }
