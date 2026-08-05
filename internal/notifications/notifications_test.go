@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -56,10 +57,10 @@ func TestDispatchAllChannelTypesAndSignature(t *testing.T) {
 	}))
 	defer server.Close()
 	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{
-		{Name: "slack", Type: "slack", Enabled: true, URL: server.URL + "/slack", Timeout: time.Second, MaxAttempts: 3},
-		{Name: "discord", Type: "discord", Enabled: true, URL: server.URL + "/discord", Timeout: time.Second, MaxAttempts: 3},
-		{Name: "telegram", Type: "telegram", Enabled: true, URL: server.URL + "/telegram", BotToken: "x", ChatID: "123", Timeout: time.Second, MaxAttempts: 3},
-		{Name: "generic", Type: "webhook", Enabled: true, URL: server.URL + "/generic", HMACSecret: "secret", Headers: map[string]string{"X-Custom": "ok"}, Timeout: time.Second, MaxAttempts: 3},
+		{Name: "slack", Type: "slack", Enabled: true, URL: server.URL + "/slack", AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 3},
+		{Name: "discord", Type: "discord", Enabled: true, URL: server.URL + "/discord", AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 3},
+		{Name: "telegram", Type: "telegram", Enabled: true, URL: server.URL + "/telegram", AllowPrivateNetwork: true, BotToken: "x", ChatID: "123", Timeout: time.Second, MaxAttempts: 3},
+		{Name: "generic", Type: "webhook", Enabled: true, URL: server.URL + "/generic", AllowPrivateNetwork: true, HMACSecret: "secret", Headers: map[string]string{"X-Custom": "ok"}, Timeout: time.Second, MaxAttempts: 3},
 	}}
 	d := New(cfg, testStore(t), testLog())
 	if err := d.Dispatch(context.Background(), TestEvent()); err != nil {
@@ -86,7 +87,7 @@ func TestCooldownSuppressesDuplicate(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { count++; w.WriteHeader(204) }))
 	defer ts.Close()
 	store := testStore(t)
-	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: ts.URL, Cooldown: time.Hour, Timeout: time.Second, MaxAttempts: 3, Events: []string{"analysis"}}}}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: ts.URL, AllowPrivateNetwork: true, Cooldown: time.Hour, Timeout: time.Second, MaxAttempts: 3, Events: []string{"analysis"}}}}
 	d := New(cfg, store, testLog())
 	ev := model.NotificationEvent{ID: "one", Type: "analysis", DedupeKey: "same", OccurredAt: time.Now(), Title: "x", Summary: "x", Category: model.CategoryNetworkFailure, Score: 80}
 	if err := d.Dispatch(context.Background(), ev); err != nil {
@@ -119,8 +120,8 @@ func TestRetryDoesNotRepeatSuccessfulChannel(t *testing.T) {
 	}))
 	defer bad.Close()
 	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{
-		{Name: "good", Type: "webhook", Enabled: true, URL: good.URL, Timeout: time.Second, MaxAttempts: 3},
-		{Name: "bad", Type: "webhook", Enabled: true, URL: bad.URL, Timeout: time.Second, MaxAttempts: 3},
+		{Name: "good", Type: "webhook", Enabled: true, URL: good.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 3},
+		{Name: "bad", Type: "webhook", Enabled: true, URL: bad.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 3},
 	}}
 	d := New(cfg, testStore(t), testLog())
 	ev := TestEvent()
@@ -139,7 +140,7 @@ func TestFiltering(t *testing.T) {
 	count := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { count++; w.WriteHeader(204) }))
 	defer ts.Close()
-	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "filtered", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: time.Second, MaxAttempts: 3, Events: []string{"analysis"}, Categories: []string{"NETWORK_FAILURE"}, MinimumScore: 70, ExternalOnly: true, IncludeRepositories: []string{"acme/*"}}}}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "filtered", Type: "webhook", Enabled: true, URL: ts.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 3, Events: []string{"analysis"}, Categories: []string{"NETWORK_FAILURE"}, MinimumScore: 70, ExternalOnly: true, IncludeRepositories: []string{"acme/*"}}}}
 	d := New(cfg, testStore(t), testLog())
 	ev := model.NotificationEvent{ID: "1", Type: "analysis", DedupeKey: "1", Title: "x", Summary: "x", Repository: "other/repo", Category: model.CategoryNetworkFailure, Confidence: model.ConfidenceModerate, Score: 90}
 	_ = d.Dispatch(context.Background(), ev)
@@ -169,7 +170,7 @@ func TestPayloadDoesNotContainLogOrSecrets(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	defer ts.Close()
-	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "g", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: time.Second, MaxAttempts: 2}}}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "g", Type: "webhook", Enabled: true, URL: ts.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 2}}}
 	ev := TestEvent()
 	ev.Summary = "safe summary"
 	if err := New(cfg, testStore(t), testLog()).Dispatch(context.Background(), ev); err != nil {
@@ -183,7 +184,7 @@ func TestPayloadDoesNotContainLogOrSecrets(t *testing.T) {
 func TestTransportErrorRedactsWebhookSecrets(t *testing.T) {
 	store := testStore(t)
 	secretURL := "http://127.0.0.1:1/hooks/SUPER_SECRET_VALUE"
-	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "secret", Type: "webhook", Enabled: true, URL: secretURL, Timeout: 100 * time.Millisecond, MaxAttempts: 1}}}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "secret", Type: "webhook", Enabled: true, URL: secretURL, AllowPrivateNetwork: true, Timeout: 100 * time.Millisecond, MaxAttempts: 1}}}
 	ev := TestEvent()
 	_ = New(cfg, store, testLog()).Dispatch(context.Background(), ev)
 	d, _ := store.GetNotificationDelivery(context.Background(), ev.ID, "secret")
@@ -212,7 +213,7 @@ func TestConcurrentDuplicateFingerprintSendsOnce(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	defer ts.Close()
-	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: 2 * time.Second, MaxAttempts: 3, Cooldown: time.Hour, Events: []string{"analysis"}}}}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: ts.URL, AllowPrivateNetwork: true, Timeout: 2 * time.Second, MaxAttempts: 3, Cooldown: time.Hour, Events: []string{"analysis"}}}}
 	d := New(cfg, testStore(t), testLog())
 	ev1 := model.NotificationEvent{ID: "concurrent-1", Type: "analysis", DedupeKey: "same-fingerprint", Title: "x", Summary: "x", Category: model.CategoryNetworkFailure, Confidence: model.ConfidenceModerate, Score: 90}
 	ev2 := ev1
@@ -246,8 +247,8 @@ func TestRepositoryProfileRoutesChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{
-		{Name: "team-a", Type: "webhook", Enabled: true, URL: sa.URL, Timeout: time.Second, MaxAttempts: 2},
-		{Name: "team-b", Type: "webhook", Enabled: true, URL: sb.URL, Timeout: time.Second, MaxAttempts: 2},
+		{Name: "team-a", Type: "webhook", Enabled: true, URL: sa.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 2},
+		{Name: "team-b", Type: "webhook", Enabled: true, URL: sb.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 2},
 	}}
 	d := New(cfg, store, testLog())
 	ev := TestEvent()
@@ -267,7 +268,7 @@ func TestQuietHoursSuppressUnlessCritical(t *testing.T) {
 	now := time.Now().UTC()
 	start := now.Add(-time.Minute).Format("15:04")
 	end := now.Add(time.Minute).Format("15:04")
-	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: time.Second, MaxAttempts: 2, QuietHoursStart: start, QuietHoursEnd: end, Timezone: "UTC", QuietHoursBypassSeverity: "critical"}}}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: ts.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 2, QuietHoursStart: start, QuietHoursEnd: end, Timezone: "UTC", QuietHoursBypassSeverity: "critical"}}}
 	store := testStore(t)
 	d := New(cfg, store, testLog())
 	ev := TestEvent()
@@ -307,7 +308,7 @@ func TestNegativeCodeScorePassesEvidenceFilter(t *testing.T) {
 	count := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { count++; w.WriteHeader(http.StatusNoContent) }))
 	defer ts.Close()
-	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "code", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: time.Second, MaxAttempts: 1, Events: []string{"analysis"}, MinimumScore: 60}}}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "code", Type: "webhook", Enabled: true, URL: ts.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 1, Events: []string{"analysis"}, MinimumScore: 60}}}
 	ev := model.NotificationEvent{ID: "code-negative", Type: "analysis", DedupeKey: "code-negative", Title: "test failed", Summary: "expected 4, got 5", Category: model.CategoryCodeFailure, Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -62, ExternalityScore: -62, EvidenceStrength: 62, CodeEvidenceScore: 62}
 	if err := New(cfg, testStore(t), testLog()).Dispatch(context.Background(), ev); err != nil {
 		t.Fatal(err)
@@ -321,5 +322,52 @@ func TestNotificationTruncateKeepsUTF8Valid(t *testing.T) {
 	out := truncate("تنبيه عربي طويل", 7)
 	if !utf8.ValidString(out) {
 		t.Fatalf("invalid UTF-8: %q", out)
+	}
+}
+
+func TestWebhookBlocksPrivateNetworkByDefault(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "blocked", Type: "webhook", Enabled: true, URL: ts.URL, Timeout: 250 * time.Millisecond, MaxAttempts: 2, Events: []string{"test"}}}}
+	err := New(cfg, testStore(t), testLog()).Dispatch(context.Background(), TestEvent())
+	if err == nil || !strings.Contains(err.Error(), "not public") {
+		t.Fatalf("private webhook was not blocked: %v", err)
+	}
+}
+
+type failingNotificationMetadataStore struct {
+	db.Backend
+	lookupErr error
+	recordErr error
+}
+
+func (s failingNotificationMetadataStore) GetNotificationDeliveryForTenant(context.Context, string, string, string) (*model.NotificationDelivery, error) {
+	return nil, s.lookupErr
+}
+
+func (s failingNotificationMetadataStore) RecordNotificationDelivery(context.Context, model.NotificationDelivery) error {
+	return s.recordErr
+}
+
+func TestRecordFailurePropagatesNotificationMetadataErrors(t *testing.T) {
+	base := testStore(t)
+	channel := config.NotificationChannel{Name: "ops", Type: "webhook", MaxAttempts: 3}
+	event := TestEvent()
+	original := errors.New("delivery failed")
+
+	lookupErr := errors.New("lookup unavailable")
+	dispatcher := New(config.NotificationConfig{}, failingNotificationMetadataStore{Backend: base, lookupErr: lookupErr}, testLog())
+	err := dispatcher.recordFailure(context.Background(), channel, event, 1, 500, original, false)
+	if !errors.Is(err, original) || !errors.Is(err, lookupErr) {
+		t.Fatalf("lookup failure error=%v", err)
+	}
+
+	recordErr := errors.New("record unavailable")
+	dispatcher = New(config.NotificationConfig{}, failingNotificationMetadataStore{Backend: base, recordErr: recordErr}, testLog())
+	err = dispatcher.recordFailure(context.Background(), channel, event, 1, 500, original, false)
+	if !errors.Is(err, original) || !errors.Is(err, recordErr) {
+		t.Fatalf("record failure error=%v", err)
 	}
 }

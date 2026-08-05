@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
 	"strings"
 	"sync"
 	"testing"
@@ -31,9 +32,9 @@ func TestEnterpriseHTTPChannels(t *testing.T) {
 	}))
 	defer ts.Close()
 	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{
-		{Name: "teams", Type: "teams", Enabled: true, URL: ts.URL + "/teams", Timeout: time.Second, MaxAttempts: 2},
-		{Name: "pager", Type: "pagerduty", Enabled: true, URL: ts.URL + "/pager", RoutingKey: "route-secret", Timeout: time.Second, MaxAttempts: 2},
-		{Name: "ops", Type: "opsgenie", Enabled: true, URL: ts.URL, APIKey: "ops-secret", Timeout: time.Second, MaxAttempts: 2},
+		{Name: "teams", Type: "teams", Enabled: true, URL: ts.URL + "/teams", AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 2},
+		{Name: "pager", Type: "pagerduty", Enabled: true, URL: ts.URL + "/pager", AllowPrivateNetwork: true, RoutingKey: "route-secret", Timeout: time.Second, MaxAttempts: 2},
+		{Name: "ops", Type: "opsgenie", Enabled: true, URL: ts.URL, AllowPrivateNetwork: true, APIKey: "ops-secret", Timeout: time.Second, MaxAttempts: 2},
 	}}
 	ev := TestEvent()
 	ev.DedupeKey = "incident:abc"
@@ -95,7 +96,7 @@ func TestEmailSMTPPlain(t *testing.T) {
 	host, portText, _ := net.SplitHostPort(ln.Addr().String())
 	var port int
 	_, _ = fmt.Sscanf(portText, "%d", &port)
-	ch := config.NotificationChannel{Name: "email", Type: "email", Enabled: true, SMTPHost: host, SMTPPort: port, SMTPMode: "plain", EmailFrom: "ci@example.com", EmailTo: []string{"ops@example.com"}, Timeout: 2 * time.Second, MaxAttempts: 2}
+	ch := config.NotificationChannel{Name: "email", Type: "email", Enabled: true, SMTPHost: host, AllowPrivateNetwork: true, SMTPPort: port, SMTPMode: "plain", EmailFrom: "ci@example.com", EmailTo: []string{"ops@example.com"}, Timeout: 2 * time.Second, MaxAttempts: 2}
 	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{ch}}
 	if err := New(cfg, testStore(t), testLog()).Dispatch(context.Background(), TestEvent()); err != nil {
 		t.Fatal(err)
@@ -153,5 +154,29 @@ func serveFakeSMTP(ln net.Listener, messages chan<- string) {
 		default:
 			write("250 ok")
 		}
+	}
+}
+
+func TestEmailSubjectCannotInjectHeaders(t *testing.T) {
+	from, err := parseEmailAddress("CI Radar <ci@example.com>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipient, err := parseEmailAddress("Ops <ops@example.com>")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := TestEvent()
+	ev.Title = "build failed\r\nBcc: attacker@example.com"
+	message := string(buildEmailMessage(from, []*mail.Address{recipient}, ev))
+	header, _, ok := strings.Cut(message, "\r\n\r\n")
+	if !ok {
+		t.Fatalf("message has no header/body boundary: %q", message)
+	}
+	if strings.Contains(header, "\r\nBcc:") || strings.Contains(header, "\nBcc:") {
+		t.Fatalf("injected header found in message: %q", message)
+	}
+	if !strings.Contains(header, "Subject: [CI Radar] build failed Bcc: attacker@example.com") {
+		t.Fatalf("subject was not safely flattened: %q", message)
 	}
 }
