@@ -371,3 +371,47 @@ func TestRecordFailurePropagatesNotificationMetadataErrors(t *testing.T) {
 		t.Fatalf("record failure error=%v", err)
 	}
 }
+
+type failingRepositoryProfileStore struct {
+	db.Backend
+	err error
+}
+
+func (s failingRepositoryProfileStore) GetRepositoryProfile(context.Context, string, string) (*model.RepositoryProfile, error) {
+	return nil, s.err
+}
+
+func TestDispatchFailsClosedWhenRepositoryRoutingCannotBeLoaded(t *testing.T) {
+	var requests int
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer endpoint.Close()
+
+	sentinel := errors.New("repository profile storage unavailable")
+	store := failingRepositoryProfileStore{Backend: testStore(t), err: sentinel}
+	cfg := config.NotificationConfig{Enabled: true, Channels: []config.NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: endpoint.URL, AllowPrivateNetwork: true, Timeout: time.Second, MaxAttempts: 1}}}
+	event := TestEvent()
+	event.Repository = "acme/api"
+	err := New(cfg, store, testLog()).Dispatch(context.Background(), event)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("dispatch error=%v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("notification was sent without repository routing metadata: requests=%d", requests)
+	}
+}
+
+type failingResponseReader struct {
+	err error
+}
+
+func (r failingResponseReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestReadResponseSnippetPropagatesReadFailure(t *testing.T) {
+	sentinel := errors.New("response stream failed")
+	if _, err := readResponseSnippet(failingResponseReader{err: sentinel}, 1024); !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+}
