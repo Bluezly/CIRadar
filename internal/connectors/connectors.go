@@ -1294,7 +1294,10 @@ func postForm(ctx context.Context, client *http.Client, method, endpoint string,
 		return err
 	}
 	defer resp.Body.Close()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	b, err := readStrictResponseBody(resp.Body, 1<<20)
+	if err != nil {
+		return fmt.Errorf("read HTTP response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
@@ -1335,12 +1338,29 @@ func Retry(ctx context.Context, co config.CIConnector, ev model.CIEvent) (RetryR
 		return RetryResult{}, err
 	}
 	defer resp.Body.Close()
-	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	result := RetryResult{Provider: co.Provider, Endpoint: endpoint, HTTPStatus: resp.StatusCode, RequestID: firstNonEmpty(resp.Header.Get("X-Request-Id"), resp.Header.Get("X-Gitlab-Trace-Id"), resp.Header.Get("X-Circleci-Request-Id"))}
+	responseBody, err := readStrictResponseBody(resp.Body, 1<<20)
+	if err != nil {
+		return result, fmt.Errorf("read retry response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return result, fmt.Errorf("retry HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	return result, nil
+}
+
+func readStrictResponseBody(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, errors.New("response body limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("response body exceeds %d bytes", max)
+	}
+	return body, nil
 }
 
 func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, string, map[string]string, error) {
