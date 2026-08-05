@@ -16,6 +16,7 @@ import (
 
 	"ciradar/internal/config"
 	"ciradar/internal/db"
+	"ciradar/internal/httpguard"
 	"ciradar/internal/model"
 )
 
@@ -30,7 +31,7 @@ func New(cfg config.LLMConfig, store db.Backend) *Enhancer {
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
-	return &Enhancer{cfg: cfg, store: store, http: &http.Client{Timeout: timeout}}
+	return &Enhancer{cfg: cfg, store: store, http: httpguard.NewClient(timeout, cfg.AllowPrivateNetwork)}
 }
 
 func (e *Enhancer) Enabled() bool {
@@ -45,7 +46,11 @@ func (e *Enhancer) Enhance(ctx context.Context, analysis model.AnalysisResult, c
 	fingerprint := sha256.Sum256([]byte("prompt-v2\x00" + e.cfg.Provider + "\x00" + e.cfg.Endpoint + "\x00" + e.cfg.Model + "\x00" + prompt))
 	inputFingerprint := hex.EncodeToString(fingerprint[:])
 	var cached model.LLMEnhancement
-	if ok, _ := e.store.GetObject(ctx, analysis.TenantID, "llm_enhancement", analysis.ID, &cached); ok && cached.InputFingerprint == inputFingerprint {
+	ok, err := e.store.GetObject(ctx, analysis.TenantID, "llm_enhancement", analysis.ID, &cached)
+	if err != nil {
+		return model.LLMEnhancement{}, err
+	}
+	if ok && cached.InputFingerprint == inputFingerprint {
 		return cached, nil
 	}
 	endpoint := strings.TrimRight(e.cfg.Endpoint, "/")
