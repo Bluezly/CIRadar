@@ -25,15 +25,20 @@ func (c *Config) normalizeHardening() error {
 		}
 	}
 	if strings.TrimSpace(c.DashboardSessionSecret) == "" {
-		for _, fallback := range []string{c.MasterKey, c.AdminToken, c.FingerprintHMACKey} {
-			if strings.TrimSpace(fallback) != "" {
-				c.DashboardSessionSecret = fallback
-				break
-			}
-		}
+		return errors.New("dashboard_session_secret is required; run `ciradar init` or set CIRADAR_DASHBOARD_SESSION_SECRET")
 	}
-	if c.DashboardSessionSecret != "" && len(strings.TrimSpace(c.DashboardSessionSecret)) < 32 {
+	if len(strings.TrimSpace(c.DashboardSessionSecret)) < 32 {
 		return errors.New("dashboard_session_secret must contain at least 32 characters")
+	}
+	for name, value := range map[string]string{
+		"admin_token":          c.AdminToken,
+		"fingerprint_hmac_key": c.FingerprintHMACKey,
+		"master_key":           c.MasterKey,
+		"sso.session_secret":   c.SSO.SessionSecret,
+	} {
+		if strings.TrimSpace(value) != "" && c.DashboardSessionSecret == value {
+			return fmt.Errorf("dashboard_session_secret must not reuse %s", name)
+		}
 	}
 	for _, raw := range c.RedactionPatterns {
 		if strings.TrimSpace(raw) == "" {

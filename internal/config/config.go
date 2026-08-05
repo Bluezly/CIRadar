@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/mail"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -53,26 +55,28 @@ type NotificationChannel struct {
 	QuietHoursEnd            string            `json:"quiet_hours_end,omitempty"`
 	Timezone                 string            `json:"timezone,omitempty"`
 	QuietHoursBypassSeverity string            `json:"quiet_hours_bypass_severity,omitempty"`
+	AllowPrivateNetwork      bool              `json:"allow_private_network,omitempty"`
 }
 
 type CIConnector struct {
-	Name          string            `json:"name"`
-	Provider      string            `json:"provider"`
-	Enabled       bool              `json:"enabled"`
-	TenantID      string            `json:"tenant_id"`
-	BaseURL       string            `json:"base_url,omitempty"`
-	Token         string            `json:"token,omitempty"`
-	WebhookSecret string            `json:"webhook_secret,omitempty"`
-	Username      string            `json:"username,omitempty"`
-	Organization  string            `json:"organization,omitempty"`
-	Project       string            `json:"project,omitempty"`
-	Region        string            `json:"region,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	RetryURL      string            `json:"retry_url,omitempty"`
-	RetryMethod   string            `json:"retry_method,omitempty"`
-	RetryBody     string            `json:"retry_body,omitempty"`
-	CostPerMinute float64           `json:"cost_per_minute,omitempty"`
-	Currency      string            `json:"currency,omitempty"`
+	Name                string            `json:"name"`
+	Provider            string            `json:"provider"`
+	Enabled             bool              `json:"enabled"`
+	TenantID            string            `json:"tenant_id"`
+	BaseURL             string            `json:"base_url,omitempty"`
+	Token               string            `json:"token,omitempty"`
+	WebhookSecret       string            `json:"webhook_secret,omitempty"`
+	Username            string            `json:"username,omitempty"`
+	Organization        string            `json:"organization,omitempty"`
+	Project             string            `json:"project,omitempty"`
+	Region              string            `json:"region,omitempty"`
+	Headers             map[string]string `json:"headers,omitempty"`
+	RetryURL            string            `json:"retry_url,omitempty"`
+	RetryMethod         string            `json:"retry_method,omitempty"`
+	RetryBody           string            `json:"retry_body,omitempty"`
+	CostPerMinute       float64           `json:"cost_per_minute,omitempty"`
+	Currency            string            `json:"currency,omitempty"`
+	AllowPrivateNetwork bool              `json:"allow_private_network,omitempty"`
 }
 
 type TestIntelligenceConfig struct {
@@ -123,6 +127,7 @@ type Config struct {
 	GitHubPrivateKeyPath          string                 `json:"github_private_key_path"`
 	GitHubWebhookSecret           string                 `json:"github_webhook_secret"`
 	GitHubAPIURL                  string                 `json:"github_api_url"`
+	GitHubAllowPrivateNetwork     bool                   `json:"github_allow_private_network,omitempty"`
 	RequireInstallationBinding    bool                   `json:"require_github_installation_binding"`
 	PublicBaseURL                 string                 `json:"public_base_url"`
 	SourceURL                     string                 `json:"source_url,omitempty"`
@@ -249,32 +254,115 @@ func Load(path string) (Config, error) {
 }
 
 func (c *Config) resolveSecrets() error {
-	fields := []*string{&c.DatabaseURL, &c.GitHubWebhookSecret, &c.FingerprintHMACKey, &c.AdminToken, &c.DashboardSessionSecret, &c.GitHubMarketplace.WebhookSecret, &c.SSO.ClientSecret, &c.SSO.SessionSecret, &c.SSO.ProxySecret, &c.LLM.APIKey, &c.ChatOps.SlackSigningSecret, &c.ChatOps.TeamsSigningSecret}
-	for _, dst := range fields {
-		v, err := secrets.Resolve(c.MasterKey, *dst)
-		if err != nil {
+	if strings.TrimSpace(c.MasterKey) != "" {
+		if err := secrets.ValidateMasterKey(c.MasterKey); err != nil {
 			return err
 		}
-		*dst = v
 	}
-	for i := range c.Notifications.Channels {
-		ch := &c.Notifications.Channels[i]
-		for _, dst := range []*string{&ch.URL, &ch.BotToken, &ch.ChatID, &ch.HMACSecret, &ch.APIKey, &ch.RoutingKey, &ch.SMTPUsername, &ch.SMTPPassword, &ch.EmailFrom} {
-			v, err := secrets.Resolve(c.MasterKey, *dst)
-			if err != nil {
-				return fmt.Errorf("notification channel %q: %w", ch.Name, err)
+	resolve := func(name string, dst *string) error {
+		v, err := secrets.Resolve(c.MasterKey, *dst)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+		*dst = v
+		return nil
+	}
+	for name, dst := range map[string]*string{
+		"fingerprint_hmac_key":     &c.FingerprintHMACKey,
+		"admin_token":              &c.AdminToken,
+		"dashboard_session_secret": &c.DashboardSessionSecret,
+	} {
+		if err := resolve(name, dst); err != nil {
+			return err
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(c.DatabaseDriver), "postgres") {
+		if err := resolve("database_url", &c.DatabaseURL); err != nil {
+			return err
+		}
+	}
+	usesGitHubWebhook := c.GitHubAppID > 0 || strings.TrimSpace(c.GitHubPrivateKeyPath) != "" || (c.GitHubMarketplace.Enabled && strings.TrimSpace(c.GitHubMarketplace.WebhookSecret) == "")
+	if usesGitHubWebhook {
+		if err := resolve("github_webhook_secret", &c.GitHubWebhookSecret); err != nil {
+			return err
+		}
+	}
+	if c.GitHubMarketplace.Enabled {
+		if err := resolve("github_marketplace.webhook_secret", &c.GitHubMarketplace.WebhookSecret); err != nil {
+			return err
+		}
+	}
+	if c.SSO.Enabled {
+		if err := resolve("sso.session_secret", &c.SSO.SessionSecret); err != nil {
+			return err
+		}
+		mode := strings.ToLower(strings.TrimSpace(c.SSO.Mode))
+		if mode == "" || mode == "oidc" {
+			if err := resolve("sso.client_secret", &c.SSO.ClientSecret); err != nil {
+				return err
 			}
-			*dst = v
+		}
+		if mode == "proxy" || mode == "saml_proxy" {
+			if err := resolve("sso.proxy_secret", &c.SSO.ProxySecret); err != nil {
+				return err
+			}
+		}
+	}
+	semanticMode := strings.ToLower(strings.TrimSpace(c.Semantic.Mode))
+	remoteSemantic := c.Semantic.RemoteEmbeddings || semanticMode == "remote"
+	if c.LLM.Enabled || remoteSemantic {
+		if err := resolve("llm.api_key", &c.LLM.APIKey); err != nil {
+			return err
+		}
+	}
+	localSemantic := c.Semantic.Enabled && (semanticMode == "" || semanticMode == "ollama")
+	if localSemantic && strings.TrimSpace(c.Semantic.LocalAPIKey) != "" {
+		if err := resolve("semantic_similarity.local_api_key", &c.Semantic.LocalAPIKey); err != nil {
+			return err
+		}
+	}
+	if c.ChatOps.Enabled {
+		for name, dst := range map[string]*string{
+			"chatops.slack_signing_secret": &c.ChatOps.SlackSigningSecret,
+			"chatops.teams_signing_secret": &c.ChatOps.TeamsSigningSecret,
+		} {
+			if err := resolve(name, dst); err != nil {
+				return err
+			}
+		}
+	}
+	if c.Notifications.Enabled {
+		for i := range c.Notifications.Channels {
+			ch := &c.Notifications.Channels[i]
+			if !ch.Enabled {
+				continue
+			}
+			for name, dst := range map[string]*string{
+				"url":           &ch.URL,
+				"bot_token":     &ch.BotToken,
+				"chat_id":       &ch.ChatID,
+				"hmac_secret":   &ch.HMACSecret,
+				"api_key":       &ch.APIKey,
+				"routing_key":   &ch.RoutingKey,
+				"smtp_username": &ch.SMTPUsername,
+				"smtp_password": &ch.SMTPPassword,
+				"email_from":    &ch.EmailFrom,
+			} {
+				if err := resolve("notification channel "+ch.Name+"."+name, dst); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	for i := range c.Connectors {
 		co := &c.Connectors[i]
-		for _, dst := range []*string{&co.Token, &co.WebhookSecret} {
-			v, err := secrets.Resolve(c.MasterKey, *dst)
-			if err != nil {
-				return fmt.Errorf("connector %q: %w", co.Name, err)
+		if !co.Enabled {
+			continue
+		}
+		for name, dst := range map[string]*string{"token": &co.Token, "webhook_secret": &co.WebhookSecret} {
+			if err := resolve("connector "+co.Name+"."+name, dst); err != nil {
+				return err
 			}
-			*dst = v
 		}
 		for key, raw := range co.Headers {
 			v, err := secrets.Resolve(c.MasterKey, raw)
@@ -323,6 +411,12 @@ func (c *Config) normalize() error {
 		return fmt.Errorf("invalid provider_poll_interval %q", c.ProviderPollIntervalText)
 	}
 	c.ProviderPollInterval = d
+	if c.IncidentRepoThreshold < 2 {
+		c.IncidentRepoThreshold = 2
+	}
+	if c.IncidentOrgThreshold < 2 {
+		c.IncidentOrgThreshold = 2
+	}
 	if c.WorkerCount < 1 {
 		c.WorkerCount = 1
 	}
@@ -334,6 +428,20 @@ func (c *Config) normalize() error {
 	}
 	if c.GitHubAPIURL == "" {
 		c.GitHubAPIURL = "https://api.github.com"
+	}
+	if strings.TrimSpace(c.PublicBaseURL) != "" {
+		publicURL, err := url.Parse(strings.TrimSpace(c.PublicBaseURL))
+		if err != nil {
+			return fmt.Errorf("invalid public_base_url %q: use an absolute HTTP(S) origin without a path, query, fragment, or credentials", c.PublicBaseURL)
+		}
+		publicURL.Scheme = strings.ToLower(publicURL.Scheme)
+		if publicURL.Host == "" || publicURL.Hostname() == "" || publicURL.User != nil || publicURL.RawQuery != "" || publicURL.ForceQuery || publicURL.Fragment != "" || publicURL.RawPath != "" || (publicURL.Path != "" && publicURL.Path != "/") || (publicURL.Scheme != "http" && publicURL.Scheme != "https") {
+			return fmt.Errorf("invalid public_base_url %q: use an absolute HTTP(S) origin without a path, query, fragment, or credentials", c.PublicBaseURL)
+		}
+		c.PublicBaseURL = strings.TrimRight(publicURL.String(), "/")
+		if publicURL.Scheme == "https" {
+			c.DashboardCookieSecure = true
+		}
 	}
 	c.DefaultTenantID = strings.ToLower(strings.TrimSpace(c.DefaultTenantID))
 	if c.DefaultTenantID == "" {
@@ -470,8 +578,18 @@ func (c *Config) normalize() error {
 			if ch.Type == "opsgenie" && strings.TrimSpace(ch.APIKey) == "" {
 				return fmt.Errorf("notification channel %q requires api_key", ch.Name)
 			}
-			if ch.Type == "email" && (strings.TrimSpace(ch.SMTPHost) == "" || strings.TrimSpace(ch.EmailFrom) == "" || len(ch.EmailTo) == 0) {
-				return fmt.Errorf("notification channel %q requires smtp_host, email_from and email_to", ch.Name)
+			if ch.Type == "email" {
+				if strings.TrimSpace(ch.SMTPHost) == "" || strings.TrimSpace(ch.EmailFrom) == "" || len(ch.EmailTo) == 0 {
+					return fmt.Errorf("notification channel %q requires smtp_host, email_from and email_to", ch.Name)
+				}
+				if err := validateEmailAddress(ch.EmailFrom); err != nil {
+					return fmt.Errorf("notification channel %q has invalid email_from: %w", ch.Name, err)
+				}
+				for _, recipient := range ch.EmailTo {
+					if err := validateEmailAddress(recipient); err != nil {
+						return fmt.Errorf("notification channel %q has invalid email_to: %w", ch.Name, err)
+					}
+				}
 			}
 		}
 	}
@@ -571,6 +689,20 @@ func (c Config) Connector(provider string) *CIConnector {
 	return nil
 }
 
+func validateEmailAddress(raw string) error {
+	if strings.ContainsAny(raw, "\r\n") {
+		return errors.New("address contains a line break")
+	}
+	address, err := mail.ParseAddress(strings.TrimSpace(raw))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(address.Address) == "" {
+		return errors.New("address is empty")
+	}
+	return nil
+}
+
 func validSeverity(v string, allowEmpty bool) bool {
 	v = strings.ToLower(strings.TrimSpace(v))
 	if v == "" {
@@ -595,9 +727,19 @@ func validNotificationEvent(v string) bool {
 
 func SaveDefault(path string) error {
 	cfg := Default()
-	cfg.AdminToken = generateToken(32)
-	cfg.FingerprintHMACKey = generateSecret(32)
-	cfg.DashboardSessionSecret = generateSecret(32)
+	var err error
+	cfg.AdminToken, err = generateToken(32)
+	if err != nil {
+		return err
+	}
+	cfg.FingerprintHMACKey, err = generateSecret(32)
+	if err != nil {
+		return err
+	}
+	cfg.DashboardSessionSecret, err = generateSecret(32)
+	if err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -608,16 +750,20 @@ func SaveDefault(path string) error {
 	return os.WriteFile(path, append(b, '\n'), 0o600)
 }
 
-func generateToken(n int) string {
-	return "cir_root_" + generateSecret(n)
+func generateToken(n int) (string, error) {
+	secret, err := generateSecret(n)
+	if err != nil {
+		return "", err
+	}
+	return "cir_root_" + secret, nil
 }
 
-func generateSecret(n int) string {
+func generateSecret(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
-		return ""
+		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func (c Config) GitHubConfigured() bool {
@@ -636,6 +782,7 @@ func applyEnv(c *Config) {
 	setString(&c.GitHubPrivateKeyPath, "CIRADAR_GITHUB_PRIVATE_KEY")
 	setString(&c.GitHubWebhookSecret, "CIRADAR_GITHUB_WEBHOOK_SECRET")
 	setString(&c.GitHubAPIURL, "CIRADAR_GITHUB_API_URL")
+	setBool(&c.GitHubAllowPrivateNetwork, "CIRADAR_GITHUB_ALLOW_PRIVATE_NETWORK")
 	setString(&c.PublicBaseURL, "CIRADAR_PUBLIC_BASE_URL")
 	setString(&c.FingerprintHMACKey, "CIRADAR_FINGERPRINT_KEY")
 	setString(&c.AdminToken, "CIRADAR_ADMIN_TOKEN")
@@ -670,6 +817,7 @@ func applyEnv(c *Config) {
 	setString(&c.LLM.Endpoint, "CIRADAR_LLM_ENDPOINT")
 	setString(&c.LLM.APIKey, "CIRADAR_LLM_API_KEY")
 	setString(&c.LLM.Model, "CIRADAR_LLM_MODEL")
+	setBool(&c.LLM.AllowPrivateNetwork, "CIRADAR_LLM_ALLOW_PRIVATE_NETWORK")
 	setBool(&c.ChatOps.Enabled, "CIRADAR_CHATOPS_ENABLED")
 	setString(&c.ChatOps.SlackSigningSecret, "CIRADAR_SLACK_SIGNING_SECRET")
 	setString(&c.ChatOps.TeamsSigningSecret, "CIRADAR_TEAMS_SIGNING_SECRET")

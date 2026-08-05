@@ -10,44 +10,45 @@ import (
 )
 
 type SSOConfig struct {
-	Enabled            bool          `json:"enabled"`
-	Mode               string        `json:"mode"`
-	IssuerURL          string        `json:"issuer_url,omitempty"`
-	ClientID           string        `json:"client_id,omitempty"`
-	ClientSecret       string        `json:"client_secret,omitempty"`
-	RedirectURL        string        `json:"redirect_url,omitempty"`
-	Scopes             []string      `json:"scopes,omitempty"`
-	AllowedDomains     []string      `json:"allowed_domains,omitempty"`
-	TenantClaim        string        `json:"tenant_claim,omitempty"`
-	RoleClaim          string        `json:"role_claim,omitempty"`
-	GroupsClaim        string        `json:"groups_claim,omitempty"`
-	AdminGroups        []string      `json:"admin_groups,omitempty"`
-	OperatorGroups     []string      `json:"operator_groups,omitempty"`
-	ViewerGroups       []string      `json:"viewer_groups,omitempty"`
-	DefaultTenant      string        `json:"default_tenant,omitempty"`
-	DefaultRole        string        `json:"default_role,omitempty"`
-	SessionSecret      string        `json:"session_secret,omitempty"`
-	CookieName         string        `json:"cookie_name,omitempty"`
-	CookieSecure       bool          `json:"cookie_secure"`
-	TrustedProxyCIDRs  []string      `json:"trusted_proxy_cidrs,omitempty"`
-	ProxySecretHeader  string        `json:"proxy_secret_header,omitempty"`
-	ProxySecret        string        `json:"proxy_secret,omitempty"`
-	ProxySubjectHeader string        `json:"proxy_subject_header,omitempty"`
-	ProxyEmailHeader   string        `json:"proxy_email_header,omitempty"`
-	ProxyNameHeader    string        `json:"proxy_name_header,omitempty"`
-	ProxyGroupsHeader  string        `json:"proxy_groups_header,omitempty"`
-	ProxyTenantHeader  string        `json:"proxy_tenant_header,omitempty"`
-	ProxyRoleHeader    string        `json:"proxy_role_header,omitempty"`
-	SAMLEntityID       string        `json:"saml_entity_id,omitempty"`
-	SAMLIdPSSOURL      string        `json:"saml_idp_sso_url,omitempty"`
-	SAMLIdPEntityID    string        `json:"saml_idp_entity_id,omitempty"`
-	SAMLIdPCertificate string        `json:"saml_idp_certificate,omitempty"`
-	SAMLACSURL         string        `json:"saml_acs_url,omitempty"`
-	SAMLXMLSecPath     string        `json:"saml_xmlsec_path,omitempty"`
-	SAMLNameAttribute  string        `json:"saml_name_attribute,omitempty"`
-	SAMLEmailAttribute string        `json:"saml_email_attribute,omitempty"`
-	SAMLClockSkewText  string        `json:"saml_clock_skew,omitempty"`
-	SAMLClockSkew      time.Duration `json:"-"`
+	Enabled             bool          `json:"enabled"`
+	Mode                string        `json:"mode"`
+	IssuerURL           string        `json:"issuer_url,omitempty"`
+	ClientID            string        `json:"client_id,omitempty"`
+	ClientSecret        string        `json:"client_secret,omitempty"`
+	RedirectURL         string        `json:"redirect_url,omitempty"`
+	Scopes              []string      `json:"scopes,omitempty"`
+	AllowedDomains      []string      `json:"allowed_domains,omitempty"`
+	TenantClaim         string        `json:"tenant_claim,omitempty"`
+	RoleClaim           string        `json:"role_claim,omitempty"`
+	GroupsClaim         string        `json:"groups_claim,omitempty"`
+	AdminGroups         []string      `json:"admin_groups,omitempty"`
+	OperatorGroups      []string      `json:"operator_groups,omitempty"`
+	ViewerGroups        []string      `json:"viewer_groups,omitempty"`
+	DefaultTenant       string        `json:"default_tenant,omitempty"`
+	DefaultRole         string        `json:"default_role,omitempty"`
+	SessionSecret       string        `json:"session_secret,omitempty"`
+	CookieName          string        `json:"cookie_name,omitempty"`
+	CookieSecure        bool          `json:"cookie_secure"`
+	TrustedProxyCIDRs   []string      `json:"trusted_proxy_cidrs,omitempty"`
+	ProxySecretHeader   string        `json:"proxy_secret_header,omitempty"`
+	ProxySecret         string        `json:"proxy_secret,omitempty"`
+	ProxySubjectHeader  string        `json:"proxy_subject_header,omitempty"`
+	ProxyEmailHeader    string        `json:"proxy_email_header,omitempty"`
+	ProxyNameHeader     string        `json:"proxy_name_header,omitempty"`
+	ProxyGroupsHeader   string        `json:"proxy_groups_header,omitempty"`
+	ProxyTenantHeader   string        `json:"proxy_tenant_header,omitempty"`
+	ProxyRoleHeader     string        `json:"proxy_role_header,omitempty"`
+	SAMLEntityID        string        `json:"saml_entity_id,omitempty"`
+	SAMLIdPSSOURL       string        `json:"saml_idp_sso_url,omitempty"`
+	SAMLIdPEntityID     string        `json:"saml_idp_entity_id,omitempty"`
+	SAMLIdPCertificate  string        `json:"saml_idp_certificate,omitempty"`
+	SAMLACSURL          string        `json:"saml_acs_url,omitempty"`
+	SAMLXMLSecPath      string        `json:"saml_xmlsec_path,omitempty"`
+	SAMLNameAttribute   string        `json:"saml_name_attribute,omitempty"`
+	SAMLEmailAttribute  string        `json:"saml_email_attribute,omitempty"`
+	SAMLClockSkewText   string        `json:"saml_clock_skew,omitempty"`
+	SAMLClockSkew       time.Duration `json:"-"`
+	AllowPrivateNetwork bool          `json:"allow_private_network,omitempty"`
 }
 
 type LLMConfig struct {
@@ -66,6 +67,7 @@ type LLMConfig struct {
 	Timeout             time.Duration `json:"-"`
 	SendRedactedExcerpt bool          `json:"send_redacted_excerpt"`
 	SendChangedFiles    bool          `json:"send_changed_files"`
+	AllowPrivateNetwork bool          `json:"allow_private_network,omitempty"`
 }
 
 type RepairConfig struct {
