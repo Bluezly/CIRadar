@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"ciradar/internal/config"
+	"ciradar/internal/httpguard"
 )
 
 type wordVectorModel struct {
@@ -137,8 +138,11 @@ func (m *wordVectorModel) sentence(value string) []float64 {
 }
 
 func ollamaEmbeddings(ctx context.Context, semantic config.SemanticConfig, input []string) ([][]float64, error) {
-	payload, _ := json.Marshal(map[string]any{"model": semantic.LocalModel, "input": input, "truncate": true})
-	client := &http.Client{Timeout: 60 * time.Second}
+	payload, err := json.Marshal(map[string]any{"model": semantic.LocalModel, "input": input, "truncate": true})
+	if err != nil {
+		return nil, err
+	}
+	client := httpguard.NewClient(60*time.Second, true)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, semantic.LocalEndpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -152,7 +156,10 @@ func ollamaEmbeddings(ctx context.Context, semantic config.SemanticConfig, input
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("local embedding HTTP %d", resp.StatusCode)
 	}

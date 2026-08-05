@@ -12,6 +12,7 @@ import (
 
 	"ciradar/internal/config"
 	"ciradar/internal/db"
+	"ciradar/internal/httpguard"
 	"ciradar/internal/model"
 )
 
@@ -28,8 +29,11 @@ func FindConfigured(ctx context.Context, store db.Backend, tenant, analysisID st
 		return Find(ctx, store, tenant, analysisID, limit, semantic.VectorDimensions)
 	}
 	target, err := store.GetAnalysisForTenant(ctx, tenant, analysisID)
-	if err != nil || target == nil {
+	if err != nil {
 		return nil, err
+	}
+	if target == nil {
+		return nil, fmt.Errorf("%w: %s", ErrAnalysisNotFound, analysisID)
 	}
 	items, err := store.ListAnalysesForTenant(ctx, tenant, semantic.CandidateLimit)
 	if err != nil {
@@ -48,7 +52,10 @@ func FindConfigured(ctx context.Context, store db.Backend, tenant, analysisID st
 	modelName := configuredModelName(semantic, llm)
 	for i, analysis := range all {
 		var cached storedEmbedding
-		ok, _ := store.GetObject(ctx, tenant, "analysis_embedding", analysis.ID+"|"+modelName, &cached)
+		ok, err := store.GetObject(ctx, tenant, "analysis_embedding", analysis.ID+"|"+modelName, &cached)
+		if err != nil {
+			return nil, err
+		}
 		if ok && len(cached.Vector) > 0 {
 			vectors[i] = cached.Vector
 		} else {
@@ -126,12 +133,15 @@ func configuredEmbeddings(ctx context.Context, semantic config.SemanticConfig, l
 }
 
 func embedRemote(ctx context.Context, cfg config.LLMConfig, modelName string, input []string) ([][]float64, error) {
-	payload, _ := json.Marshal(map[string]any{"model": modelName, "input": input, "encoding_format": "float"})
+	payload, err := json.Marshal(map[string]any{"model": modelName, "input": input, "encoding_format": "float"})
+	if err != nil {
+		return nil, err
+	}
 	timeout := cfg.Timeout
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
-	client := &http.Client{Timeout: timeout}
+	client := httpguard.NewClient(timeout, cfg.AllowPrivateNetwork)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.EmbeddingsEndpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -143,7 +153,10 @@ func embedRemote(ctx context.Context, cfg config.LLMConfig, modelName string, in
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("embedding HTTP %d", resp.StatusCode)
 	}

@@ -2,6 +2,8 @@ package similarity
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"sort"
@@ -11,6 +13,8 @@ import (
 	"ciradar/internal/db"
 	"ciradar/internal/model"
 )
+
+var ErrAnalysisNotFound = errors.New("analysis not found")
 
 func Find(ctx context.Context, store db.Backend, tenant, analysisID string, limit, dimensions int) ([]model.SimilarAnalysis, error) {
 	if limit < 1 || limit > 100 {
@@ -24,7 +28,7 @@ func Find(ctx context.Context, store db.Backend, tenant, analysisID string, limi
 		return nil, err
 	}
 	if target == nil {
-		return nil, nil
+		return nil, fmt.Errorf("%w: %s", ErrAnalysisNotFound, analysisID)
 	}
 	items, err := store.ListAnalysesForTenant(ctx, tenant, 5000)
 	if err != nil {
