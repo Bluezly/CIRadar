@@ -382,3 +382,30 @@ func TestSameBaseRequiresPathBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestPostFormRejectsOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, strings.Repeat("x", (1<<20)+1))
+	}))
+	defer srv.Close()
+	if err := postForm(context.Background(), srv.Client(), http.MethodPost, srv.URL, nil, nil); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRetryReportsUnreadableResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "10")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, "x")
+	}))
+	defer srv.Close()
+	co := config.CIConnector{Provider: "jenkins", BaseURL: srv.URL, AllowPrivateNetwork: true, RetryURL: srv.URL + "/retry"}
+	result, err := Retry(context.Background(), co, model.CIEvent{})
+	if err == nil || !strings.Contains(err.Error(), "read retry response") {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if result.HTTPStatus != http.StatusAccepted {
+		t.Fatalf("result=%#v", result)
+	}
+}
