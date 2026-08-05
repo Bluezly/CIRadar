@@ -105,3 +105,17 @@ func TestSpecWhereTargetsSingleObject(t *testing.T) {
 		t.Fatalf("where=%s", where)
 	}
 }
+
+func TestParsePostgresIntRejectsMalformedValues(t *testing.T) {
+	valid := "42"
+	if got, err := parsePostgresInt(&valid, "count"); err != nil || got != 42 {
+		t.Fatalf("got=%d err=%v", got, err)
+	}
+	invalid := "not-a-number"
+	if _, err := parsePostgresInt(&invalid, "count"); err == nil {
+		t.Fatal("malformed PostgreSQL integer was accepted")
+	}
+	if _, err := parsePostgresInt(nil, "count"); err == nil {
+		t.Fatal("NULL PostgreSQL integer was accepted")
+	}
+}

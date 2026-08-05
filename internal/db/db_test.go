@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -336,5 +337,70 @@ func TestCorrelationCandidateDoesNotInventNewRepositoryOrOrganization(t *testing
 	}
 	if other.Repositories != 2 || other.Organizations != 2 || other.Occurrences != 2 {
 		t.Fatalf("other=%+v", other)
+	}
+}
+
+func TestCloseCanBeRetriedAfterPersistenceFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := store.path
+	blockingFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockingFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.path = filepath.Join(blockingFile, "state.json")
+	if err := store.Close(); err == nil {
+		t.Fatal("Close unexpectedly succeeded with an invalid persistence path")
+	}
+	if store.closed {
+		t.Fatal("store was marked closed after persistence failed")
+	}
+	store.path = originalPath
+	if err := store.Close(); err != nil {
+		t.Fatalf("retry Close failed: %v", err)
+	}
+	if !store.closed {
+		t.Fatal("store was not marked closed after successful retry")
+	}
+}
+
+func TestReplaceFileWithRollbackPreservesOriginalOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingTemp := filepath.Join(dir, "missing.tmp")
+	if err := replaceFileWithRollback(missingTemp, target); err == nil {
+		t.Fatal("replacement unexpectedly succeeded")
+	}
+	body, err := os.ReadFile(target)
+	if err != nil || string(body) != "old" {
+		t.Fatalf("target=%q err=%v", string(body), err)
+	}
+	if _, err := os.Stat(target + ".replace-old"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback file remains: %v", err)
+	}
+}
+
+func TestReplaceFileWithRollbackInstallsNewFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "state.json")
+	temp := filepath.Join(dir, "state.tmp")
+	if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(temp, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceFileWithRollback(temp, target); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(target)
+	if err != nil || string(body) != "new" {
+		t.Fatalf("target=%q err=%v", string(body), err)
 	}
 }
