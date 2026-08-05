@@ -359,3 +359,13 @@ func TestParseJWKRejectsWeakAndInvalidKeys(t *testing.T) {
 		t.Fatal("off-curve EC JWK accepted")
 	}
 }
+
+func TestReadLimitedResponseBodyRejectsOversizedBody(t *testing.T) {
+	if _, err := readLimitedResponseBody(strings.NewReader("12345"), 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err=%v", err)
+	}
+	body, err := readLimitedResponseBody(strings.NewReader("1234"), 4)
+	if err != nil || string(body) != "1234" {
+		t.Fatalf("body=%q err=%v", string(body), err)
+	}
+}
