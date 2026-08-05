@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,6 +45,47 @@ type oauthAccessToken struct {
 	Principal model.Principal `json:"principal"`
 	IssuedAt  time.Time       `json:"issued_at"`
 	ExpiresAt time.Time       `json:"expires_at"`
+}
+
+var oauthConsentTemplate = template.Must(template.New("oauth-consent").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorize {{.ClientName}}</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h1>Authorize {{.ClientName}}</h1>
+    <p>This application is requesting access to CI Radar.</p>
+    <dl>
+      <dt>Redirect destination</dt><dd><code>{{.RedirectURI}}</code></dd>
+      <dt>Tenant</dt><dd><code>{{.TenantID}}</code></dd>
+      <dt>Permissions</dt><dd><code>{{.Scope}}</code></dd>
+    </dl>
+    <form method="post" action="/oauth/authorize">
+      {{range .Fields}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">{{end}}
+      <button type="submit" name="decision" value="approve">Authorize</button>
+      <button type="submit" name="decision" value="deny">Deny</button>
+    </form>
+  </section>
+</main>
+</body>
+</html>`))
+
+type oauthConsentField struct {
+	Name  string
+	Value string
+}
+
+type oauthConsentPage struct {
+	ClientName  string
+	RedirectURI string
+	TenantID    string
+	Scope       string
+	Fields      []oauthConsentField
 }
 
 func (s *Server) oauthAuthorizationServer(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +141,12 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "only public clients are supported")
 		return
 	}
-	client := oauthClient{ID: "mcp_" + randomOpaque(24), Name: strings.TrimSpace(input.ClientName), RedirectURIs: uniqueStrings(input.RedirectURIs), CreatedAt: time.Now().UTC(), ClientURI: strings.TrimSpace(input.ClientURI), SoftwareID: strings.TrimSpace(input.SoftwareID), SoftwareVersion: strings.TrimSpace(input.SoftwareVersion)}
+	clientID, err := randomOpaque(24)
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not generate client ID")
+		return
+	}
+	client := oauthClient{ID: "mcp_" + clientID, Name: strings.TrimSpace(input.ClientName), RedirectURIs: uniqueStrings(input.RedirectURIs), CreatedAt: time.Now().UTC(), ClientURI: strings.TrimSpace(input.ClientURI), SoftwareID: strings.TrimSpace(input.SoftwareID), SoftwareVersion: strings.TrimSpace(input.SoftwareVersion)}
 	if err := s.store.PutObject(r.Context(), model.DefaultTenantID, "oauth_client", client.ID, client); err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not register client")
 		return
@@ -108,7 +155,17 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		if err := r.ParseForm(); err != nil {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid authorization request")
+			return
+		}
+	}
 	query := r.URL.Query()
+	if r.Method == http.MethodPost {
+		query = r.Form
+	}
 	clientID := strings.TrimSpace(query.Get("client_id"))
 	redirectURI := strings.TrimSpace(query.Get("redirect_uri"))
 	state := query.Get("state")
@@ -128,7 +185,7 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	p, authenticated := s.authenticate(r)
 	if !authenticated {
-		if s.sso != nil {
+		if s.sso != nil && r.Method == http.MethodGet {
 			returnTo := r.URL.RequestURI()
 			http.Redirect(w, r, "/auth/login?return_to="+url.QueryEscape(returnTo), http.StatusFound)
 			return
@@ -149,14 +206,54 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.redirectOAuthError(w, r, redirectURI, state, "invalid_scope", "requested scope is not allowed")
 		return
 	}
+	if r.Method == http.MethodGet {
+		clientName := strings.TrimSpace(client.Name)
+		if clientName == "" {
+			clientName = client.ID
+		}
+		fields := make([]oauthConsentField, 0, 8)
+		for _, name := range []string{"response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "scope", "resource", "state"} {
+			if value := query.Get(name); value != "" {
+				fields = append(fields, oauthConsentField{Name: name, Value: value})
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := oauthConsentTemplate.Execute(w, oauthConsentPage{ClientName: clientName, RedirectURI: redirectURI, TenantID: p.TenantID, Scope: scope, Fields: fields}); err != nil {
+			s.log.Error("render OAuth consent page", "error", err)
+		}
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "unsupported authorization method")
+		return
+	}
+	switch query.Get("decision") {
+	case "deny":
+		s.redirectOAuthError(w, r, redirectURI, state, "access_denied", "the resource owner denied the request")
+		return
+	case "approve":
+		// Continue and issue the authorization code below.
+	default:
+		s.redirectOAuthError(w, r, redirectURI, state, "invalid_request", "an explicit authorization decision is required")
+		return
+	}
 	p.Root = false
-	code := oauthCode{ID: randomOpaque(24), ClientID: clientID, RedirectURI: redirectURI, CodeChallenge: challenge, Resource: resource, Scope: scope, Principal: p, ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
+	codeID, err := randomOpaque(24)
+	if err != nil {
+		s.redirectOAuthError(w, r, redirectURI, state, "server_error", "could not generate authorization code")
+		return
+	}
+	code := oauthCode{ID: codeID, ClientID: clientID, RedirectURI: redirectURI, CodeChallenge: challenge, Resource: resource, Scope: scope, Principal: p, ExpiresAt: time.Now().UTC().Add(5 * time.Minute)}
 	sealed, err := sealOAuthValue(s.dashboardSecret(), "code", code)
 	if err != nil {
 		s.redirectOAuthError(w, r, redirectURI, state, "server_error", "could not create authorization code")
 		return
 	}
-	destination, _ := url.Parse(redirectURI)
+	destination, err := url.Parse(redirectURI)
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "redirect URI is invalid")
+		return
+	}
 	values := destination.Query()
 	values.Set("code", sealed)
 	if state != "" {
@@ -167,6 +264,7 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid token request")
 		return
@@ -200,7 +298,12 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	access := oauthAccessToken{ID: randomOpaque(24), Resource: code.Resource, Scope: code.Scope, Principal: code.Principal, IssuedAt: now, ExpiresAt: now.Add(time.Hour)}
+	accessID, err := randomOpaque(24)
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not generate access token")
+		return
+	}
+	access := oauthAccessToken{ID: accessID, Resource: code.Resource, Scope: code.Scope, Principal: code.Principal, IssuedAt: now, ExpiresAt: now.Add(time.Hour)}
 	access.Principal.Root = false
 	token, err := sealOAuthValue(s.dashboardSecret(), "access", access)
 	if err != nil {
@@ -211,13 +314,17 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) oauthRevoke(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 	var token oauthAccessToken
 	if openOAuthValue(s.dashboardSecret(), "access", r.Form.Get("token"), &token) == nil && token.ID != "" {
-		_ = s.store.PutObject(r.Context(), token.Principal.TenantID, "oauth_revocation", token.ID, map[string]any{"revoked_at": time.Now().UTC()})
+		if err := s.store.PutObject(r.Context(), token.Principal.TenantID, "oauth_revocation", token.ID, map[string]any{"revoked_at": time.Now().UTC()}); err != nil {
+			writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not revoke access token")
+			return
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }
@@ -227,11 +334,11 @@ func (s *Server) authenticateOAuthToken(ctx context.Context, raw string) (model.
 	if openOAuthValue(s.dashboardSecret(), "access", raw, &token) != nil || token.ID == "" || time.Now().UTC().After(token.ExpiresAt) {
 		return model.Principal{}, false
 	}
-	if ok, _ := s.store.GetObject(ctx, token.Principal.TenantID, "oauth_revocation", token.ID, nil); ok {
+	if ok, err := s.store.GetObject(ctx, token.Principal.TenantID, "oauth_revocation", token.ID, nil); err != nil || ok {
 		return model.Principal{}, false
 	}
-	tenant, _ := s.store.GetTenant(ctx, token.Principal.TenantID)
-	if tenant == nil || !tenant.Enabled {
+	tenant, err := s.store.GetTenant(ctx, token.Principal.TenantID)
+	if err != nil || tenant == nil || !tenant.Enabled {
 		return model.Principal{}, false
 	}
 	token.Principal.Root = false
@@ -258,11 +365,14 @@ func (s *Server) requestBaseURL(r *http.Request) string {
 
 func (s *Server) validOAuthResource(r *http.Request, raw string) bool {
 	resource, err := url.Parse(raw)
+	if err != nil || resource.User != nil || resource.RawQuery != "" || resource.Fragment != "" || resource.Opaque != "" {
+		return false
+	}
+	mcp, err := url.Parse(s.requestBaseURL(r) + "/mcp")
 	if err != nil {
 		return false
 	}
-	mcp, _ := url.Parse(s.requestBaseURL(r) + "/mcp")
-	return strings.EqualFold(resource.Scheme, mcp.Scheme) && strings.EqualFold(resource.Host, mcp.Host) && strings.TrimRight(resource.Path, "/") == strings.TrimRight(mcp.Path, "/")
+	return strings.EqualFold(resource.Scheme, mcp.Scheme) && strings.EqualFold(resource.Host, mcp.Host) && strings.TrimRight(resource.EscapedPath(), "/") == strings.TrimRight(mcp.EscapedPath(), "/")
 }
 
 func sealOAuthValue(secret, purpose string, value any) (string, error) {
@@ -270,7 +380,7 @@ func sealOAuthValue(secret, purpose string, value any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ciphertext, err := secrets.Encrypt(secret+"|oauth|"+purpose, string(encoded))
+	ciphertext, err := secrets.EncryptDerived(secret+"|oauth|"+purpose, string(encoded))
 	if err != nil {
 		return "", err
 	}
@@ -285,7 +395,7 @@ func openOAuthValue(secret, purpose, value string, out any) error {
 	if err != nil {
 		return err
 	}
-	plain, err := secrets.Decrypt(secret+"|oauth|"+purpose, string(encoded))
+	plain, err := secrets.DecryptDerived(secret+"|oauth|"+purpose, string(encoded))
 	if err != nil {
 		return err
 	}
@@ -294,7 +404,7 @@ func openOAuthValue(secret, purpose, value string, out any) error {
 
 func validOAuthRedirect(raw string) bool {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Fragment != "" || parsed.Host == "" {
+	if err != nil || parsed.Fragment != "" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" {
 		return false
 	}
 	if strings.EqualFold(parsed.Scheme, "https") {
@@ -369,10 +479,12 @@ func constantString(a, b string) bool {
 	return difference == 0
 }
 
-func randomOpaque(size int) string {
+func randomOpaque(size int) (string, error) {
 	value := make([]byte, size)
-	_, _ = rand.Read(value)
-	return base64.RawURLEncoding.EncodeToString(value)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, description string) {

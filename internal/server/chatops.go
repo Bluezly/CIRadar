@@ -179,7 +179,9 @@ func (s *Server) performChatAction(r *http.Request, value, actor string) (string
 		if e != nil {
 			return "", e
 		}
-		_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "incident.acknowledge.chatops", Resource: "incident", ResourceID: id, Metadata: map[string]string{"channel": "chatops"}})
+		if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "incident.acknowledge.chatops", Resource: "incident", ResourceID: id, Metadata: map[string]string{"channel": "chatops"}}); err != nil {
+			s.log.Error("record ChatOps acknowledgement audit failed", "tenant_id", tenant, "incident_id", id, "error", err)
+		}
 		return "CI Radar acknowledged incident " + inc.Title, nil
 	case "resolve":
 		if !s.cfg.ChatOps.AllowResolve {
@@ -189,7 +191,9 @@ func (s *Server) performChatAction(r *http.Request, value, actor string) (string
 		if e != nil {
 			return "", e
 		}
-		_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "incident.resolve.chatops", Resource: "incident", ResourceID: id, Metadata: map[string]string{"channel": "chatops"}})
+		if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "incident.resolve.chatops", Resource: "incident", ResourceID: id, Metadata: map[string]string{"channel": "chatops"}}); err != nil {
+			s.log.Error("record ChatOps resolution audit failed", "tenant_id", tenant, "incident_id", id, "error", err)
+		}
 		return "CI Radar resolved incident " + inc.Title, nil
 	case "quarantine":
 		if !s.cfg.ChatOps.AllowQuarantine {
@@ -200,7 +204,9 @@ func (s *Server) performChatAction(r *http.Request, value, actor string) (string
 		if e != nil {
 			return "", e
 		}
-		_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "test.quarantine.chatops", Resource: "test", ResourceID: id})
+		if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "test.quarantine.chatops", Resource: "test", ResourceID: id}); err != nil {
+			s.log.Error("record ChatOps quarantine audit failed", "tenant_id", tenant, "test_key", id, "error", err)
+		}
 		return "CI Radar quarantined test until " + q.ExpiresAt.Format(time.RFC3339), nil
 	default:
 		return "", fmt.Errorf("unsupported action %q", action)

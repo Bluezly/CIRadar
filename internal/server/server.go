@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"ciradar/internal/analyzer"
@@ -140,6 +141,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.oauthAuthorizationServer)
 	mux.HandleFunc("POST /oauth/register", s.oauthRegister)
 	mux.HandleFunc("GET /oauth/authorize", s.oauthAuthorize)
+	mux.HandleFunc("POST /oauth/authorize", s.oauthAuthorize)
 	mux.HandleFunc("POST /oauth/token", s.oauthToken)
 	mux.HandleFunc("POST /oauth/revoke", s.oauthRevoke)
 	mux.HandleFunc("POST /webhooks/github", s.githubWebhook)
@@ -160,7 +162,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /webhooks/cloudbuild", s.ciWebhook("cloudbuild"))
 	mux.HandleFunc("POST /chatops/slack", s.slackChatOps)
 	mux.HandleFunc("POST /chatops/teams", s.teamsChatOps)
-	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, logging(log, rateLimit(newRateLimiter(600, time.Minute), s.ipResolver, mux)))))
+	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, s.ipResolver, logging(log, rateLimit(newRateLimiter(600, time.Minute), s.ipResolver, mux)))))
 	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 	return s
 }
@@ -278,9 +280,21 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	providerList, _ := s.store.ListProviderStatuses(r.Context())
-	feedback, _ := s.store.FeedbackMetrics(r.Context(), p.TenantID)
-	tests, _ := s.store.ListTestCaseStats(r.Context(), p.TenantID, "", "", 5000)
+	providerList, err := s.store.ListProviderStatuses(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	feedback, err := s.store.FeedbackMetrics(r.Context(), p.TenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tests, err := s.store.ListTestCaseStats(r.Context(), p.TenantID, "", "", 5000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	flaky, quarantined := 0, 0
 	for _, tc := range tests {
 		if tc.Classification == "flaky" {
@@ -314,9 +328,21 @@ func (s *Server) dashboardData(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	dora, _ := insights.DORA(r.Context(), s.store, tenantID, r.URL.Query().Get("environment"), since, until)
-	usage, _ := insights.Usage(r.Context(), s.store, tenantID, since, until)
-	trends, _ := insights.Trends(r.Context(), s.store, tenantID, since, until)
+	dora, err := insights.DORA(r.Context(), s.store, tenantID, r.URL.Query().Get("environment"), since, until)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	usage, err := insights.Usage(r.Context(), s.store, tenantID, since, until)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	trends, err := insights.Trends(r.Context(), s.store, tenantID, since, until)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	d.DORA = dora
 	d.Usage = usage
 	d.DailyCost = trends["cost"]
@@ -517,7 +543,10 @@ func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ChangedFiles []string `json:"changed_files"`
 	}
-	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
 	result, err := s.llm.Enhance(r.Context(), *analysis, body.ChangedFiles)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -560,7 +589,11 @@ func (s *Server) feedbackList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	metrics, _ := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
+	metrics, err := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, 200, map[string]any{"feedback": items, "metrics": metrics})
 }
 func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
@@ -581,7 +614,10 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 	auto := []model.TestQuarantine{}
 	if s.cfg.TestIntelligence.Enabled && s.cfg.TestIntelligence.AutoQuarantine {
 		owner := "ci-radar"
-		if profile, _ := s.store.GetRepositoryProfile(r.Context(), p.TenantID, q.Get("repository")); profile != nil {
+		profile, profileErr := s.store.GetRepositoryProfile(r.Context(), p.TenantID, q.Get("repository"))
+		if profileErr != nil {
+			s.log.Error("load repository profile for auto-quarantine failed", "tenant_id", p.TenantID, "repository", q.Get("repository"), "error", profileErr)
+		} else if profile != nil {
 			if profile.Owner != "" {
 				owner = profile.Owner
 			} else if profile.Team != "" {
@@ -595,13 +631,19 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 			qu, e := s.store.SetTestQuarantine(r.Context(), model.TestQuarantine{TenantID: p.TenantID, TestKey: st.TestKey, Reason: "Automatic quarantine: repeated pass/fail transitions", Owner: owner, CreatedBy: "system", ExpiresAt: time.Now().UTC().Add(s.cfg.TestIntelligence.AutoQuarantineDuration)})
 			if e == nil {
 				auto = append(auto, qu)
-				_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: "system", Role: model.RoleOperator, Action: "test.auto_quarantine", Resource: "test", ResourceID: st.TestKey, Metadata: map[string]string{"repository": st.Repository, "score": fmt.Sprintf("%.1f", st.FlakeScore)}})
+				if auditErr := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: "system", Role: model.RoleOperator, Action: "test.auto_quarantine", Resource: "test", ResourceID: st.TestKey, Metadata: map[string]string{"repository": st.Repository, "score": fmt.Sprintf("%.1f", st.FlakeScore)}}); auditErr != nil {
+					s.log.Error("record auto-quarantine audit failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", auditErr)
+				}
+			} else {
+				s.log.Error("auto-quarantine test failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", e)
 			}
 		}
 	}
 	for _, st := range stats {
 		if st.Classification == "flaky" && !st.Quarantined {
-			_ = s.store.EnqueueForTenant(r.Context(), p.TenantID, "notify.event", notifications.FlakyTestEvent(st, s.cfg.PublicBaseURL), time.Now().UTC())
+			if enqueueErr := s.store.EnqueueForTenant(r.Context(), p.TenantID, "notify.event", notifications.FlakyTestEvent(st, s.cfg.PublicBaseURL), time.Now().UTC()); enqueueErr != nil {
+				s.log.Error("enqueue flaky-test notification failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", enqueueErr)
+			}
 		}
 	}
 	s.audit(r, "tests.ingest", "repository", q.Get("repository"), map[string]string{"tests": strconv.Itoa(len(obs)), "auto_quarantined": strconv.Itoa(len(auto))})
@@ -682,6 +724,10 @@ func (s *Server) similarAnalyses(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, e := similarity.FindConfigured(r.Context(), s.store, principal(r).TenantID, r.PathValue("id"), limit, s.cfg.Semantic, s.cfg.LLM)
 	if e != nil {
+		if errors.Is(e, similarity.ErrAnalysisNotFound) {
+			writeError(w, http.StatusNotFound, e.Error())
+			return
+		}
 		writeError(w, 500, e.Error())
 		return
 	}
@@ -805,22 +851,39 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	prev, _ := s.store.LastSuccessfulEnvironmentForTenant(r.Context(), p.TenantID, in.Repository, in.Workflow, in.Job)
-	result := s.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: s.providerIncident(r.Context(), initial.Provider), PreviousEnvironment: prev})
+	prev, err := s.store.LastSuccessfulEnvironmentForTenant(r.Context(), p.TenantID, in.Repository, in.Workflow, in.Job)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	providerIncident, err := s.providerIncident(r.Context(), initial.Provider)
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	result := s.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: providerIncident, PreviousEnvironment: prev})
 	if err := s.store.RecordAnalysisForTenant(r.Context(), p.TenantID, in, result, s.cfg.StoreRedactedExcerpts, s.cfg.StoreRawLogs); err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
 	if s.cfg.Notifications.Enabled {
-		_ = s.store.EnqueueForTenant(r.Context(), in.TenantID, "notify.event", notifications.AnalysisEvent(in, result, s.cfg.PublicBaseURL), time.Now().UTC())
+		if err := s.store.EnqueueForTenant(r.Context(), in.TenantID, "notify.event", notifications.AnalysisEvent(in, result, s.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
+			s.log.Error("analysis notification enqueue failed", "analysis_id", result.ID, "tenant_id", in.TenantID, "error", err)
+		}
 	}
-	incident, created, _ := s.maybeIncident(r.Context(), p.TenantID, in.Repository, result, corr)
+	incident, created, err := s.maybeIncident(r.Context(), p.TenantID, in.Repository, result, corr)
+	if err != nil {
+		s.log.Error("incident update failed", "analysis_id", result.ID, "tenant_id", p.TenantID, "error", err)
+		w.Header().Set("X-CI-Radar-Warning", "incident-update-failed")
+	}
 	if incident != nil && s.cfg.Notifications.Enabled {
 		kind := "incident_updated"
 		if created {
 			kind = "incident_opened"
 		}
-		_ = s.store.EnqueueForTenant(r.Context(), incident.TenantID, "notify.event", notifications.IncidentEvent(kind, *incident, s.cfg.PublicBaseURL), time.Now().UTC())
+		if err := s.store.EnqueueForTenant(r.Context(), incident.TenantID, "notify.event", notifications.IncidentEvent(kind, *incident, s.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
+			s.log.Error("incident notification enqueue failed", "incident_id", incident.ID, "tenant_id", incident.TenantID, "error", err)
+		}
 	}
 	s.audit(r, "analysis.create", "analysis", result.ID, map[string]string{"repository": in.Repository, "category": string(result.Category)})
 	writeJSON(w, 200, result)
@@ -865,7 +928,10 @@ func (s *Server) changeIncidentState(w http.ResponseWriter, r *http.Request, sta
 	var body struct {
 		Note string `json:"note"`
 	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
 	p := principal(r)
 	inc, err := s.store.UpdateIncidentState(r.Context(), p.TenantID, r.PathValue("fingerprint"), state, p.Name, body.Note)
 	if err != nil {
@@ -881,7 +947,9 @@ func (s *Server) changeIncidentState(w http.ResponseWriter, r *http.Request, sta
 		kind = "incident_resolved"
 	}
 	if s.cfg.Notifications.Enabled {
-		_ = s.store.EnqueueForTenant(r.Context(), inc.TenantID, "notify.event", notifications.IncidentEvent(kind, *inc, s.cfg.PublicBaseURL), time.Now().UTC())
+		if err := s.store.EnqueueForTenant(r.Context(), inc.TenantID, "notify.event", notifications.IncidentEvent(kind, *inc, s.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
+			s.log.Error("incident notification enqueue failed", "incident_id", inc.ID, "tenant_id", inc.TenantID, "error", err)
+		}
 	}
 	s.audit(r, "incident."+state, "incident", inc.ID, map[string]string{"note": body.Note})
 	writeJSON(w, 200, inc)
@@ -986,7 +1054,15 @@ func (s *Server) updateTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	tenant, _ := s.store.GetTenant(r.Context(), id)
+	tenant, err := s.store.GetTenant(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tenant == nil {
+		writeError(w, http.StatusNotFound, "tenant not found")
+		return
+	}
 	s.audit(r, "tenant.update", "tenant", id, map[string]string{"enabled": strconv.FormatBool(*body.Enabled)})
 	writeJSON(w, 200, tenant)
 }
@@ -1035,8 +1111,16 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	feedback, _ := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
-	tests, _ := s.store.ListTestCaseStats(r.Context(), principal(r).TenantID, "", "", 5000)
+	feedback, err := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tests, err := s.store.ListTestCaseStats(r.Context(), principal(r).TenantID, "", "", 5000)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	flaky, quarantined := 0, 0
 	for _, tc := range tests {
 		if tc.Classification == "flaky" {
@@ -1150,7 +1234,12 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := strings.TrimSpace(r.Header.Get("MCP-Session-Id"))
 	if req.Method == "initialize" && sessionID == "" {
-		sessionID = s.mcpRuntime.CreateSession(p)
+		var err error
+		sessionID, err = s.mcpRuntime.CreateSession(p)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not create MCP session")
+			return
+		}
 		w.Header().Set("MCP-Session-Id", sessionID)
 	} else if sessionID != "" {
 		if _, ok := s.mcpRuntime.Session(sessionID, p); !ok {
@@ -1196,18 +1285,7 @@ func (s *Server) validMCPOrigin(r *http.Request) bool {
 	if origin == "" {
 		return true
 	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	if strings.EqualFold(u.Host, r.Host) {
-		return true
-	}
-	if strings.TrimSpace(s.cfg.PublicBaseURL) != "" {
-		p, err := url.Parse(s.cfg.PublicBaseURL)
-		return err == nil && strings.EqualFold(p.Scheme, u.Scheme) && strings.EqualFold(p.Host, u.Host)
-	}
-	return false
+	return sameRequestOrigin(r, origin, s.cfg.PublicBaseURL, s.ipResolver)
 }
 
 func (s *Server) ciWebhook(provider string) http.HandlerFunc {
@@ -1248,21 +1326,21 @@ func (s *Server) ciWebhook(provider string) http.HandlerFunc {
 		}
 		ev, err := connectors.ParseWebhook(provider, co.TenantID, delivery, body)
 		if err != nil {
-			_ = s.store.UpdateDelivery(r.Context(), delivery, "invalid", err.Error())
+			s.updateDeliveryStatus(r.Context(), delivery, "invalid", err.Error())
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if ev.Conclusion == "" || (ev.Conclusion != "success" && !failedCIConclusion(ev.Conclusion)) {
-			_ = s.store.UpdateDelivery(r.Context(), delivery, "ignored", "not terminal")
+			s.updateDeliveryStatus(r.Context(), delivery, "ignored", "not terminal")
 			writeJSON(w, http.StatusAccepted, map[string]any{"status": "ignored"})
 			return
 		}
 		if err := s.store.EnqueueForTenant(r.Context(), ev.TenantID, "ci.event", ev, time.Now().UTC()); err != nil {
-			_ = s.store.UpdateDelivery(r.Context(), delivery, "error", err.Error())
+			s.updateDeliveryStatus(r.Context(), delivery, "error", err.Error())
 			writeError(w, 500, err.Error())
 			return
 		}
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "queued", "")
+		s.updateDeliveryStatus(r.Context(), delivery, "queued", "")
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "provider": provider, "repository": ev.Repository, "job": ev.Job})
 	}
 }
@@ -1332,11 +1410,11 @@ func (s *Server) githubMarketplaceWebhook(w http.ResponseWriter, r *http.Request
 	}
 	subscription, err := s.marketplace.Handle(r.Context(), body)
 	if err != nil {
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "error", err.Error())
+		s.updateDeliveryStatus(r.Context(), delivery, "error", err.Error())
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_ = s.store.UpdateDelivery(r.Context(), delivery, "processed", "")
+	s.updateDeliveryStatus(r.Context(), delivery, "processed", "")
 	writeJSON(w, http.StatusOK, map[string]any{"status": "processed", "tenant_id": subscription.TenantID, "plan": subscription.PlanName, "subscription_status": subscription.Status})
 }
 
@@ -1374,56 +1452,62 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if eventType != "workflow_run" {
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "ignored", "")
+		s.updateDeliveryStatus(r.Context(), delivery, "ignored", "")
 		writeJSON(w, 202, map[string]any{"status": "ignored", "event": eventType})
 		return
 	}
 	var ev model.GitHubWorkflowRunEvent
 	if err := json.Unmarshal(body, &ev); err != nil {
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "invalid", err.Error())
+		s.updateDeliveryStatus(r.Context(), delivery, "invalid", err.Error())
 		writeError(w, 400, "invalid workflow_run payload")
 		return
 	}
 	var bound bool
 	ev.TenantID, bound = s.store.ResolveInstallationTenant(r.Context(), ev.Installation.ID)
 	if s.cfg.RequireInstallationBinding && !bound {
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "unbound", "GitHub installation is not assigned to a tenant")
+		s.updateDeliveryStatus(r.Context(), delivery, "unbound", "GitHub installation is not assigned to a tenant")
 		writeError(w, http.StatusConflict, "GitHub installation is not assigned to a tenant; use `ciradar github-installation bind`")
 		return
 	}
 	ev.DeliveryID = delivery
 	if ev.Action != "completed" || ev.WorkflowRun.Status != "completed" {
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "ignored", "")
+		s.updateDeliveryStatus(r.Context(), delivery, "ignored", "")
 		writeJSON(w, 202, map[string]any{"status": "ignored", "reason": "not completed"})
 		return
 	}
 	switch ev.WorkflowRun.Conclusion {
 	case "success", "failure", "timed_out", "cancelled", "startup_failure", "stale":
 	default:
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "ignored", "")
+		s.updateDeliveryStatus(r.Context(), delivery, "ignored", "")
 		writeJSON(w, 202, map[string]any{"status": "ignored", "reason": "unsupported conclusion"})
 		return
 	}
 	if err := s.store.EnqueueForTenant(r.Context(), ev.TenantID, "github.workflow_run", ev, time.Now().UTC()); err != nil {
-		_ = s.store.UpdateDelivery(r.Context(), delivery, "error", err.Error())
+		s.updateDeliveryStatus(r.Context(), delivery, "error", err.Error())
 		writeError(w, 500, err.Error())
 		return
 	}
-	_ = s.store.UpdateDelivery(r.Context(), delivery, "queued", "")
+	s.updateDeliveryStatus(r.Context(), delivery, "queued", "")
 	writeJSON(w, 202, map[string]any{"status": "queued", "tenant_id": ev.TenantID, "run_id": ev.WorkflowRun.ID, "conclusion": ev.WorkflowRun.Conclusion})
 }
 
-func (s *Server) providerIncident(ctx context.Context, provider string) bool {
+func (s *Server) updateDeliveryStatus(ctx context.Context, deliveryID, status, detail string) {
+	if err := s.store.UpdateDelivery(ctx, deliveryID, status, detail); err != nil {
+		s.log.Error("update webhook delivery failed", "delivery_id", deliveryID, "status", status, "error", err)
+	}
+}
+
+func (s *Server) providerIncident(ctx context.Context, provider string) (bool, error) {
 	statuses, err := s.store.ListProviderStatuses(ctx)
 	if err != nil {
-		return false
+		return false, err
 	}
-	for _, st := range statuses {
-		if st.Incident && providers.MatchesStatusProvider(provider, st.Provider) {
-			return true
+	for _, status := range statuses {
+		if status.Incident && providers.MatchesStatusProvider(provider, status.Provider) {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 func (s *Server) maybeIncident(ctx context.Context, tenantID, repository string, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
 	// CorrelationForTenant already includes the candidate analysis represented by r.
@@ -1431,7 +1515,9 @@ func (s *Server) maybeIncident(ctx context.Context, tenantID, repository string,
 	repos := c.Repositories
 	orgs := c.Organizations
 	occ := c.Occurrences
-	if !r.ProviderIncident && repos < s.cfg.IncidentRepoThreshold && orgs < s.cfg.IncidentOrgThreshold {
+	repoThreshold := max(2, s.cfg.IncidentRepoThreshold)
+	orgThreshold := max(2, s.cfg.IncidentOrgThreshold)
+	if !r.ProviderIncident && repos < repoThreshold && orgs < orgThreshold {
 		return nil, false, nil
 	}
 	severity := "minor"
@@ -1441,7 +1527,11 @@ func (s *Server) maybeIncident(ctx context.Context, tenantID, repository string,
 	if repos >= 50 {
 		severity = "critical"
 	}
-	if profile, _ := s.store.GetRepositoryProfile(ctx, tenantID, repository); profile != nil {
+	profile, err := s.store.GetRepositoryProfile(ctx, tenantID, repository)
+	if err != nil {
+		return nil, false, err
+	}
+	if profile != nil {
 		switch strings.ToLower(profile.Criticality) {
 		case "critical":
 			severity = "critical"
@@ -1461,7 +1551,10 @@ func (s *Server) maybeIncident(ctx context.Context, tenantID, repository string,
 	if err := s.store.UpsertIncidentForTenant(ctx, tenantID, i); err != nil {
 		return nil, false, err
 	}
-	out, _ := s.store.GetIncidentForTenant(ctx, tenantID, r.Fingerprint)
+	out, err := s.store.GetIncidentForTenant(ctx, tenantID, r.Fingerprint)
+	if err != nil {
+		return nil, false, err
+	}
 	return out, created, nil
 }
 
@@ -1541,14 +1634,22 @@ func (s *Server) authenticate(r *http.Request) (model.Principal, bool) {
 	}
 	if s.sso != nil {
 		if p, ok := s.sso.Authenticate(r); ok {
-			t, _ := s.store.GetTenant(r.Context(), p.TenantID)
+			t, err := s.store.GetTenant(r.Context(), p.TenantID)
+			if err != nil {
+				s.log.Error("SSO tenant lookup failed", "tenant_id", p.TenantID, "error", err)
+				return model.Principal{}, false
+			}
 			if t != nil && t.Enabled {
 				return *p, true
 			}
 		}
 	}
 	if token == "" && s.cfg.AllowUnauthenticatedLocalhost && isLoopback(s.ipResolver.resolve(r)) {
-		t, _ := s.store.GetTenant(r.Context(), s.cfg.DefaultTenantID)
+		t, err := s.store.GetTenant(r.Context(), s.cfg.DefaultTenantID)
+		if err != nil {
+			s.log.Error("localhost tenant lookup failed", "tenant_id", s.cfg.DefaultTenantID, "error", err)
+			return model.Principal{}, false
+		}
 		if t == nil || !t.Enabled {
 			return model.Principal{}, false
 		}
@@ -1582,7 +1683,9 @@ func isLoopback(remote string) bool {
 }
 func (s *Server) audit(r *http.Request, action, resource, id string, metadata map[string]string) {
 	p := principal(r)
-	_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: p.Name, Role: p.Role, Action: action, Resource: resource, ResourceID: id, RemoteIP: s.ipResolver.resolve(r), RequestID: requestIDFrom(r), Metadata: metadata})
+	if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: p.Name, Role: p.Role, Action: action, Resource: resource, ResourceID: id, RemoteIP: s.ipResolver.resolve(r), RequestID: requestIDFrom(r), Metadata: metadata}); err != nil {
+		s.log.Error("audit record failed", "action", action, "resource", resource, "resource_id", id, "tenant_id", p.TenantID, "error", err)
+	}
 }
 
 func logging(log *slog.Logger, next http.Handler) http.Handler {
@@ -1595,15 +1698,44 @@ func logging(log *slog.Logger, next http.Handler) http.Handler {
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-		if id == "" {
-			b := make([]byte, 12)
-			_, _ = rand.Read(b)
-			id = hex.EncodeToString(b)
+		if !validRequestID(id) {
+			id = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey, id)))
 	})
 }
+
+func validRequestID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for _, char := range id {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '-', '_', '.', ':':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+var requestIDFallbackCounter atomic.Uint64
+
+func newRequestID() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err == nil {
+		return hex.EncodeToString(b)
+	}
+	material := fmt.Sprintf("%d:%d", time.Now().UnixNano(), requestIDFallbackCounter.Add(1))
+	sum := sha256.Sum256([]byte(material))
+	return hex.EncodeToString(sum[:12])
+}
+
 func requestIDFrom(r *http.Request) string {
 	v, _ := r.Context().Value(requestIDKey).(string)
 	return v
@@ -1636,8 +1768,16 @@ func requestIsHTTPS(r *http.Request, publicBaseURL string, resolver *clientIPRes
 	return resolver != nil && resolver.trustedIP(peer) && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
-func csrfGuard(cfg config.Config, next http.Handler) http.Handler {
+func csrfGuard(cfg config.Config, resolver *clientIPResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// SAML authentication returns through a cross-site form POST. The signed
+		// assertion and encrypted RelayState bind that callback, so a pre-existing
+		// CI Radar session cookie must not cause legitimate reauthentication to be
+		// rejected by the generic same-origin check.
+		if r.Method == http.MethodPost && r.URL.Path == "/auth/callback" && cfg.SSO.Enabled && strings.EqualFold(strings.TrimSpace(cfg.SSO.Mode), "saml") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions || strings.HasPrefix(strings.ToLower(strings.TrimSpace(r.Header.Get("Authorization"))), "bearer ") {
 			next.ServeHTTP(w, r)
 			return
@@ -1659,13 +1799,47 @@ func csrfGuard(cfg config.Config, next http.Handler) http.Handler {
 		if origin == "" {
 			origin = strings.TrimSpace(r.Header.Get("Referer"))
 		}
-		parsed, err := url.Parse(origin)
-		if err != nil || parsed.Host == "" || !strings.EqualFold(parsed.Host, r.Host) {
+		if !sameRequestOrigin(r, origin, cfg.PublicBaseURL, resolver) {
 			writeError(w, http.StatusForbidden, "cross-site request rejected")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func sameRequestOrigin(r *http.Request, rawOrigin, publicBaseURL string, resolver *clientIPResolver) bool {
+	candidate, err := url.Parse(strings.TrimSpace(rawOrigin))
+	if err != nil || candidate.Scheme == "" || candidate.Host == "" || candidate.User != nil {
+		return false
+	}
+	expectedRaw := strings.TrimSpace(publicBaseURL)
+	if expectedRaw == "" {
+		scheme := "http"
+		if requestIsHTTPS(r, publicBaseURL, resolver) {
+			scheme = "https"
+		}
+		expectedRaw = scheme + "://" + r.Host
+	}
+	expected, err := url.Parse(expectedRaw)
+	if err != nil || expected.Scheme == "" || expected.Host == "" {
+		return false
+	}
+	return strings.EqualFold(candidate.Scheme, expected.Scheme) &&
+		strings.EqualFold(strings.TrimSuffix(candidate.Hostname(), "."), strings.TrimSuffix(expected.Hostname(), ".")) &&
+		originPort(candidate) == originPort(expected)
+}
+
+func originPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

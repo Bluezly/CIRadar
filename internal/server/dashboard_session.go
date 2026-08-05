@@ -26,16 +26,11 @@ type dashboardSession struct {
 }
 
 func (s *Server) dashboardSecret() string {
-	for _, value := range []string{s.cfg.DashboardSessionSecret, s.cfg.MasterKey, s.cfg.AdminToken, s.cfg.FingerprintHMACKey} {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	return strings.TrimSpace(s.cfg.DashboardSessionSecret)
 }
 
 func sealDashboardSession(secret string, session dashboardSession) (string, error) {
-	if len(strings.TrimSpace(secret)) < 16 {
+	if len(strings.TrimSpace(secret)) < 32 {
 		return "", errors.New("dashboard session secret is not configured")
 	}
 	plain, err := json.Marshal(session)
@@ -60,6 +55,9 @@ func sealDashboardSession(secret string, session dashboardSession) (string, erro
 }
 
 func openDashboardSession(secret, value string) (dashboardSession, error) {
+	if len(strings.TrimSpace(secret)) < 32 {
+		return dashboardSession{}, errors.New("dashboard session secret is not configured")
+	}
 	if !strings.HasPrefix(value, "v1.") {
 		return dashboardSession{}, errors.New("unsupported session")
 	}
@@ -122,7 +120,11 @@ func (s *Server) authenticateDashboardSession(r *http.Request) (model.Principal,
 	if err != nil {
 		return model.Principal{}, false
 	}
-	tenant, _ := s.store.GetTenant(r.Context(), session.Principal.TenantID)
+	tenant, err := s.store.GetTenant(r.Context(), session.Principal.TenantID)
+	if err != nil {
+		s.log.Error("dashboard session tenant lookup failed", "tenant_id", session.Principal.TenantID, "error", err)
+		return model.Principal{}, false
+	}
 	if tenant == nil || !tenant.Enabled {
 		return model.Principal{}, false
 	}
@@ -137,13 +139,22 @@ func (s *Server) authenticateToken(ctx context.Context, token, tenant string) (m
 		tenant = s.cfg.DefaultTenantID
 	}
 	if s.cfg.AdminToken != "" && secureEqual(token, s.cfg.AdminToken) {
-		t, _ := s.store.GetTenant(ctx, tenant)
+		t, err := s.store.GetTenant(ctx, tenant)
+		if err != nil {
+			s.log.Error("admin token tenant lookup failed", "tenant_id", tenant, "error", err)
+			return model.Principal{}, false
+		}
 		if t == nil || !t.Enabled {
 			return model.Principal{}, false
 		}
 		return model.Principal{TenantID: t.ID, Name: "root", Role: model.RoleAdmin, Root: true}, true
 	}
-	if p, _ := s.store.AuthenticateAPIKey(ctx, token); p != nil {
+	p, err := s.store.AuthenticateAPIKey(ctx, token)
+	if err != nil {
+		s.log.Error("API key authentication lookup failed", "error", err)
+		return model.Principal{}, false
+	}
+	if p != nil {
 		return *p, true
 	}
 	return model.Principal{}, false
