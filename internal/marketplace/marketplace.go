@@ -69,6 +69,32 @@ type Service struct {
 	store db.Backend
 }
 
+// PayloadError identifies a webhook payload that the sender must correct.
+// Storage and other operational failures intentionally remain unwrapped so
+// the HTTP layer can return a retryable 5xx response instead of a misleading
+// 4xx response.
+type PayloadError struct {
+	Err error
+}
+
+func (e *PayloadError) Error() string { return e.Err.Error() }
+func (e *PayloadError) Unwrap() error { return e.Err }
+
+// PostCommitError reports a failure that occurred after the subscription was
+// persisted. Retrying the webhook as though nothing was applied could produce
+// duplicate side effects, so callers should acknowledge the delivery while
+// surfacing the warning operationally.
+type PostCommitError struct {
+	Err error
+}
+
+func (e *PostCommitError) Error() string { return e.Err.Error() }
+func (e *PostCommitError) Unwrap() error { return e.Err }
+
+func payloadErrorf(format string, args ...any) error {
+	return &PayloadError{Err: fmt.Errorf(format, args...)}
+}
+
 var tenantCleaner = regexp.MustCompile(`[^a-z0-9_-]+`)
 
 func New(cfg config.MarketplaceConfig, store db.Backend) *Service {
@@ -78,17 +104,26 @@ func New(cfg config.MarketplaceConfig, store db.Backend) *Service {
 func (s *Service) Handle(ctx context.Context, raw []byte) (Subscription, error) {
 	var payload Payload
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return Subscription{}, fmt.Errorf("decode marketplace payload: %w", err)
+		return Subscription{}, payloadErrorf("decode marketplace payload: %w", err)
 	}
 	action := strings.ToLower(strings.TrimSpace(payload.Action))
 	switch action {
 	case "purchased", "cancelled", "changed", "pending_change", "pending_change_cancelled":
 	default:
-		return Subscription{}, fmt.Errorf("unsupported marketplace action %q", action)
+		return Subscription{}, payloadErrorf("unsupported marketplace action %q", action)
 	}
 	purchase := payload.MarketplacePurchase
 	if purchase.Account.ID <= 0 || strings.TrimSpace(purchase.Account.Login) == "" {
-		return Subscription{}, fmt.Errorf("marketplace account is missing")
+		return Subscription{}, payloadErrorf("marketplace account is missing")
+	}
+	now := time.Now().UTC()
+	effective, err := parseDateField("effective_date", payload.EffectiveDate, now)
+	if err != nil {
+		return Subscription{}, &PayloadError{Err: err}
+	}
+	nextBilling, err := parseDateField("next_billing_date", purchase.NextBillingDate, time.Time{})
+	if err != nil {
+		return Subscription{}, &PayloadError{Err: err}
 	}
 	id := strconv.FormatInt(purchase.Account.ID, 10)
 	var existing Subscription
@@ -107,7 +142,11 @@ func (s *Service) Handle(ctx context.Context, raw []byte) (Subscription, error) 
 			return Subscription{}, fmt.Errorf("marketplace account is not linked to a tenant")
 		}
 		tenantID = tenantIDFor(purchase.Account.Login, purchase.Account.ID)
-		if tenant, _ := s.store.GetTenant(ctx, tenantID); tenant == nil {
+		tenant, err := s.store.GetTenant(ctx, tenantID)
+		if err != nil {
+			return Subscription{}, fmt.Errorf("check marketplace tenant: %w", err)
+		}
+		if tenant == nil {
 			if _, err := s.store.CreateTenant(ctx, tenantID, purchase.Account.Login); err != nil {
 				return Subscription{}, err
 			}
@@ -118,12 +157,9 @@ func (s *Service) Handle(ctx context.Context, raw []byte) (Subscription, error) 
 			return Subscription{}, err
 		}
 	}
-	now := time.Now().UTC()
-	effective := parseDate(payload.EffectiveDate, now)
 	if found && !existing.EffectiveAt.IsZero() && effective.Before(existing.EffectiveAt) {
 		return existing, nil
 	}
-	nextBilling := parseDate(purchase.NextBillingDate, time.Time{})
 	base := existing
 	if !found || action == "purchased" || action == "changed" {
 		base = Subscription{AccountID: purchase.Account.ID, AccountLogin: purchase.Account.Login, AccountType: purchase.Account.Type, TenantID: tenantID, InstallationID: payload.Installation.ID, PlanID: purchase.Plan.ID, PlanName: strings.TrimSpace(purchase.Plan.Name), Status: "active", UnitCount: purchase.UnitCount, OnFreeTrial: purchase.OnFreeTrial, BillingCycle: purchase.BillingCycle, EffectiveAt: effective, NextBillingDate: nextBilling}
@@ -179,7 +215,9 @@ func (s *Service) Handle(ctx context.Context, raw []byte) (Subscription, error) 
 	if err := s.store.PutObject(ctx, model.DefaultTenantID, "marketplace_account_index", id, sub); err != nil {
 		return Subscription{}, err
 	}
-	_ = s.store.RecordAudit(ctx, model.AuditEvent{TenantID: tenantID, Actor: "github-marketplace", Role: model.RoleAdmin, Action: "marketplace." + action, Resource: "subscription", ResourceID: id, Metadata: map[string]string{"plan": sub.PlanName, "status": sub.Status}})
+	if err := s.store.RecordAudit(ctx, model.AuditEvent{TenantID: tenantID, Actor: "github-marketplace", Role: model.RoleAdmin, Action: "marketplace." + action, Resource: "subscription", ResourceID: id, Metadata: map[string]string{"plan": sub.PlanName, "status": sub.Status}}); err != nil {
+		return sub, &PostCommitError{Err: fmt.Errorf("marketplace subscription updated, but recording its audit event failed: %w", err)}
+	}
 	return sub, nil
 }
 
@@ -201,15 +239,15 @@ func tenantIDFor(login string, accountID int64) string {
 	return value + "-" + suffix
 }
 
-func parseDate(raw string, fallback time.Time) time.Time {
+func parseDateField(name, raw string, fallback time.Time) (time.Time, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return fallback
+		return fallback, nil
 	}
 	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05Z", "2006-01-02"} {
 		if parsed, err := time.Parse(layout, raw); err == nil {
-			return parsed.UTC()
+			return parsed.UTC(), nil
 		}
 	}
-	return fallback
+	return time.Time{}, fmt.Errorf("%s is not a valid date: %q", name, raw)
 }
