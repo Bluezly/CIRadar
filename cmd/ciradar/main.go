@@ -386,7 +386,7 @@ func cmdSecret(args []string) error {
 		return nil
 	case "encrypt":
 		fs := flag.NewFlagSet("secret encrypt", flag.ContinueOnError)
-		key := fs.String("key", os.Getenv("CIRADAR_MASTER_KEY"), "master key (defaults to CIRADAR_MASTER_KEY)")
+		key := fs.String("key", os.Getenv("CIRADAR_MASTER_KEY"), "32-byte base64url master key from 'ciradar secret key' (defaults to CIRADAR_MASTER_KEY)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -462,7 +462,7 @@ func cmdServe(args []string) error {
 	}
 	var githubClient *gh.Client
 	if cfg.GitHubConfigured() {
-		githubClient, err = gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL)
+		githubClient, err = gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL, cfg.GitHubAllowPrivateNetwork)
 		if err != nil {
 			return err
 		}
@@ -897,7 +897,7 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("  Rules: %d built-in + %d custom\n", len(analyzer.BuiltinRules()), len(extra))
 	if cfg.GitHubConfigured() {
 		fmt.Println("  GitHub App config: PRESENT")
-		if _, err := gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL); err != nil {
+		if _, err := gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL, cfg.GitHubAllowPrivateNetwork); err != nil {
 			fmt.Println("  GitHub key check: FAILED -", err)
 			return err
 		}
