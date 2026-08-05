@@ -22,6 +22,7 @@ import (
 
 	"ciradar/internal/config"
 	"ciradar/internal/db"
+	"ciradar/internal/httpguard"
 	"ciradar/internal/model"
 	"ciradar/internal/version"
 )
@@ -30,11 +31,10 @@ type Dispatcher struct {
 	cfg   config.NotificationConfig
 	store db.Backend
 	log   *slog.Logger
-	http  *http.Client
 }
 
 func New(cfg config.NotificationConfig, store db.Backend, log *slog.Logger) *Dispatcher {
-	return &Dispatcher{cfg: cfg, store: store, log: log, http: &http.Client{Timeout: 30 * time.Second}}
+	return &Dispatcher{cfg: cfg, store: store, log: log}
 }
 
 func (d *Dispatcher) Enabled() bool {
@@ -132,7 +132,7 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := d.http.Do(req)
+	resp, err := httpguard.NewClient(timeout, ch.AllowPrivateNetwork).Do(req)
 	if err != nil {
 		return d.recordFailure(ctx, ch, ev, attempt, 0, sanitizeError(err, ch, endpoint), false)
 	}
@@ -170,7 +170,14 @@ func (d *Dispatcher) recordFailure(ctx context.Context, ch config.NotificationCh
 	if strings.TrimSpace(tenantID) == "" {
 		tenantID = model.DefaultTenantID
 	}
-	old, _ := d.store.GetNotificationDeliveryForTenant(ctx, tenantID, ev.ID, ch.Name)
+	old, lookupErr := d.store.GetNotificationDeliveryForTenant(ctx, tenantID, ev.ID, ch.Name)
+	if lookupErr != nil {
+		err = errors.Join(err, fmt.Errorf("read notification delivery: %w", lookupErr))
+		if permanent {
+			return &permanentError{err}
+		}
+		return err
+	}
 	created := time.Now().UTC()
 	if old != nil {
 		created = old.CreatedAt
@@ -188,7 +195,10 @@ func (d *Dispatcher) recordFailure(ctx context.Context, ch config.NotificationCh
 	if old != nil {
 		deliveryID = old.ID
 	}
-	_ = d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: deliveryID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: status, Attempts: attempts, HTTPStatus: code, LastError: trim(err.Error(), 2000), CreatedAt: created, UpdatedAt: now})
+	recordErr := d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: deliveryID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: status, Attempts: attempts, HTTPStatus: code, LastError: trim(err.Error(), 2000), CreatedAt: created, UpdatedAt: now})
+	if recordErr != nil {
+		err = errors.Join(err, fmt.Errorf("record notification failure: %w", recordErr))
+	}
 	if permanent {
 		return &permanentError{err}
 	}
@@ -537,13 +547,6 @@ func truncate(s string, n int) string {
 	return s[:end]
 }
 func trim(s string, n int) string { return truncate(s, n) }
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func AnalysisEvent(in model.AnalysisInput, r model.AnalysisResult, publicBaseURL string) model.NotificationEvent {
 	details := ""
 	if publicBaseURL != "" {

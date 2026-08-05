@@ -3,8 +3,10 @@ package notifications
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"net/smtp"
 	"net/textproto"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"ciradar/internal/config"
+	"ciradar/internal/httpguard"
 	"ciradar/internal/model"
 )
 
@@ -116,19 +119,38 @@ func urlPathEscape(s string) string {
 }
 
 func sendEmail(ctx context.Context, ch config.NotificationChannel, ev model.NotificationEvent) error {
+	from, err := parseEmailAddress(ch.EmailFrom)
+	if err != nil {
+		return fmt.Errorf("invalid email_from: %w", err)
+	}
+	recipients := make([]*mail.Address, 0, len(ch.EmailTo))
+	for _, raw := range ch.EmailTo {
+		recipient, parseErr := parseEmailAddress(raw)
+		if parseErr != nil {
+			return fmt.Errorf("invalid email_to: %w", parseErr)
+		}
+		recipients = append(recipients, recipient)
+	}
 	timeout := ch.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
+	opCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	addr := net.JoinHostPort(ch.SMTPHost, strconv.Itoa(ch.SMTPPort))
 	dialer := &net.Dialer{Timeout: timeout}
+	dial := httpguard.GuardedDialContext(dialer, ch.AllowPrivateNetwork)
 	var conn net.Conn
-	var err error
 	tlsCfg := &tls.Config{ServerName: ch.SMTPHost, MinVersion: tls.VersionTLS12}
-	if ch.SMTPMode == "tls" {
-		conn, err = tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
-	} else {
-		conn, err = dialer.DialContext(ctx, "tcp", addr)
+	conn, err = dial(opCtx, "tcp", addr)
+	if err == nil && ch.SMTPMode == "tls" {
+		tlsConn := tls.Client(conn, tlsCfg)
+		if handshakeErr := tlsConn.HandshakeContext(opCtx); handshakeErr != nil {
+			_ = conn.Close()
+			err = handshakeErr
+		} else {
+			conn = tlsConn
+		}
 	}
 	if err != nil {
 		return err
@@ -155,11 +177,11 @@ func sendEmail(ctx context.Context, ch config.NotificationChannel, ev model.Noti
 			return err
 		}
 	}
-	if err := client.Mail(ch.EmailFrom); err != nil {
+	if err := client.Mail(from.Address); err != nil {
 		return err
 	}
-	for _, recipient := range ch.EmailTo {
-		if err := client.Rcpt(strings.TrimSpace(recipient)); err != nil {
+	for _, recipient := range recipients {
+		if err := client.Rcpt(recipient.Address); err != nil {
 			return err
 		}
 	}
@@ -167,7 +189,7 @@ func sendEmail(ctx context.Context, ch config.NotificationChannel, ev model.Noti
 	if err != nil {
 		return err
 	}
-	msg := buildEmailMessage(ch, ev)
+	msg := buildEmailMessage(from, recipients, ev)
 	if _, err := w.Write(msg); err != nil {
 		_ = w.Close()
 		return err
@@ -178,11 +200,32 @@ func sendEmail(ctx context.Context, ch config.NotificationChannel, ev model.Noti
 	return client.Quit()
 }
 
-func buildEmailMessage(ch config.NotificationChannel, ev model.NotificationEvent) []byte {
+func parseEmailAddress(raw string) (*mail.Address, error) {
+	if strings.ContainsAny(raw, "\r\n") {
+		return nil, errors.New("address contains a line break")
+	}
+	return mail.ParseAddress(strings.TrimSpace(raw))
+}
+
+func sanitizeEmailHeader(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || (r < 0x20 && r != '\t') || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func buildEmailMessage(from *mail.Address, recipients []*mail.Address, ev model.NotificationEvent) []byte {
 	h := textproto.MIMEHeader{}
-	h.Set("From", ch.EmailFrom)
-	h.Set("To", strings.Join(ch.EmailTo, ", "))
-	h.Set("Subject", "[CI Radar] "+truncate(ev.Title, 160))
+	h.Set("From", sanitizeEmailHeader(from.String()))
+	to := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		to = append(to, sanitizeEmailHeader(recipient.String()))
+	}
+	h.Set("To", strings.Join(to, ", "))
+	h.Set("Subject", "[CI Radar] "+truncate(sanitizeEmailHeader(ev.Title), 160))
 	h.Set("Date", time.Now().UTC().Format(time.RFC1123Z))
 	h.Set("MIME-Version", "1.0")
 	h.Set("Content-Type", "text/plain; charset=UTF-8")
