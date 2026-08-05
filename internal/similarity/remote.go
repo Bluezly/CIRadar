@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,7 +72,9 @@ func FindConfigured(ctx context.Context, store db.Backend, tenant, analysisID st
 		for i, index := range missingIndexes {
 			if i < len(generated) {
 				vectors[index] = generated[i]
-				_ = store.PutObject(ctx, tenant, "analysis_embedding", all[index].ID+"|"+modelName, storedEmbedding{AnalysisID: all[index].ID, Model: modelName, Vector: generated[i], CreatedAt: time.Now().UTC()})
+				if err := store.PutObject(ctx, tenant, "analysis_embedding", all[index].ID+"|"+modelName, storedEmbedding{AnalysisID: all[index].ID, Model: modelName, Vector: generated[i], CreatedAt: time.Now().UTC()}); err != nil {
+					return nil, fmt.Errorf("store embedding for analysis %s: %w", all[index].ID, err)
+				}
 			}
 		}
 	}
@@ -153,7 +156,7 @@ func embedRemote(ctx context.Context, cfg config.LLMConfig, modelName string, in
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := readResponseBody(resp.Body, 8<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -182,6 +185,20 @@ func embedRemote(ctx context.Context, cfg config.LLMConfig, modelName string, in
 		}
 	}
 	return vectors, nil
+}
+
+func readResponseBody(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, errors.New("response body limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("response body exceeds %d bytes", max)
+	}
+	return body, nil
 }
 
 func sortSimilar(values []model.SimilarAnalysis) {

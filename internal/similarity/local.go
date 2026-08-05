@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"os"
@@ -156,7 +155,7 @@ func ollamaEmbeddings(ctx context.Context, semantic config.SemanticConfig, input
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	body, err := readResponseBody(resp.Body, 32<<20)
 	if err != nil {
 		return nil, err
 	}
