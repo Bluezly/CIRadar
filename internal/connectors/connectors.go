@@ -13,11 +13,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 
 	"ciradar/internal/config"
+	"ciradar/internal/httpguard"
 	"ciradar/internal/model"
 )
 
@@ -29,6 +31,13 @@ func VerifyWebhook(provider, secret string, h http.Header, body []byte, now time
 	case "gitlab":
 		if sig := h.Get("webhook-signature"); sig != "" {
 			id, ts := h.Get("webhook-id"), h.Get("webhook-timestamp")
+			if id == "" || ts == "" {
+				return false
+			}
+			n, err := strconv.ParseInt(ts, 10, 64)
+			if err != nil || !timestampWithin(now, time.Unix(n, 0), 5*time.Minute) {
+				return false
+			}
 			keyText := strings.TrimPrefix(secret, "whsec_")
 			key, err := base64.StdEncoding.DecodeString(keyText)
 			if err != nil {
@@ -52,7 +61,7 @@ func VerifyWebhook(provider, secret string, h http.Header, body []byte, now time
 			ts := vals["timestamp"]
 			got := vals["signature"]
 			n, err := strconv.ParseInt(ts, 10, 64)
-			if err != nil || absDuration(now.Sub(time.Unix(n, 0))) > 5*time.Minute {
+			if err != nil || !timestampWithin(now, time.Unix(n, 0), 5*time.Minute) {
 				return false
 			}
 			mac := hmac.New(sha256.New, []byte(secret))
@@ -96,11 +105,8 @@ func parsePairs(s string) map[string]string {
 	}
 	return m
 }
-func absDuration(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
-	}
-	return d
+func timestampWithin(now, timestamp time.Time, window time.Duration) bool {
+	return !timestamp.Before(now.Add(-window)) && !timestamp.After(now.Add(window))
 }
 
 func ParseWebhook(provider, tenant, delivery string, body []byte) (model.CIEvent, error) {
@@ -336,7 +342,7 @@ func parseAzureDevOps(tenant, delivery string, b []byte) (model.CIEvent, error) 
 		return model.CIEvent{}, err
 	}
 	if p.Resource.ID == 0 {
-		return model.CIEvent{}, errors.New("Azure DevOps webhook missing build id")
+		return model.CIEvent{}, errors.New("azure devops webhook missing build id")
 	}
 	repo := p.Resource.Project.Name + "/" + p.Resource.Repository.Name
 	if p.Resource.Repository.Name == "" {
@@ -370,7 +376,7 @@ func parseBitrise(tenant, delivery string, b []byte) (model.CIEvent, error) {
 		return model.CIEvent{}, err
 	}
 	if p.BuildSlug == "" {
-		return model.CIEvent{}, errors.New("Bitrise webhook missing build_slug")
+		return model.CIEvent{}, errors.New("bitrise webhook missing build_slug")
 	}
 	state := "failure"
 	if p.BuildStatus == 1 {
@@ -422,7 +428,7 @@ func parseTeamCity(tenant, delivery string, b []byte) (model.CIEvent, error) {
 		return model.CIEvent{}, err
 	}
 	if p.Build.ID == 0 {
-		return model.CIEvent{}, errors.New("TeamCity webhook missing build id")
+		return model.CIEvent{}, errors.New("teamcity webhook missing build id")
 	}
 	project := firstNonEmpty(p.Project.Name, p.BuildType.ProjectName)
 	workflow := firstNonEmpty(p.BuildType.Name, p.Build.BuildTypeID)
@@ -470,7 +476,7 @@ func parseTravis(tenant, delivery string, b []byte) (model.CIEvent, error) {
 		return model.CIEvent{}, err
 	}
 	if p.ID == 0 && p.Job.ID == 0 {
-		return model.CIEvent{}, errors.New("Travis webhook missing build id")
+		return model.CIEvent{}, errors.New("travis webhook missing build id")
 	}
 	state := firstNonEmpty(p.Job.State, p.State)
 	repo := p.Repository.Slug
@@ -524,7 +530,7 @@ func parseCodeBuild(tenant, delivery string, b []byte) (model.CIEvent, error) {
 		return model.CIEvent{}, err
 	}
 	if p.Detail.BuildID == "" {
-		return model.CIEvent{}, errors.New("CodeBuild event missing build-id")
+		return model.CIEvent{}, errors.New("codebuild event missing build-id")
 	}
 	var log strings.Builder
 	var start, finish time.Time
@@ -621,7 +627,7 @@ func parseBitbucket(tenant, delivery string, b []byte) (model.CIEvent, error) {
 	}
 	state := firstNonEmpty(p.Step.State.Result.Name, p.Step.State.Name, p.Pipeline.State.Result.Name, p.Pipeline.State.Name, p.CommitStatus.State)
 	if repo == "" || state == "" {
-		return model.CIEvent{}, errors.New("Bitbucket event missing repository or state")
+		return model.CIEvent{}, errors.New("bitbucket event missing repository or state")
 	}
 	started := firstTime(p.Step.StartedOn, p.Pipeline.CreatedOn)
 	finished := firstTime(p.Step.CompletedOn, p.Pipeline.CompletedOn)
@@ -684,7 +690,7 @@ func parseDrone(tenant, delivery string, b []byte) (model.CIEvent, error) {
 	}
 	state := firstNonEmpty(p.Step.Status, p.Stage.Status, p.Build.Status)
 	if repo == "" || state == "" {
-		return model.CIEvent{}, errors.New("Drone event missing repository or status")
+		return model.CIEvent{}, errors.New("drone event missing repository or status")
 	}
 	start, finish := unixTime(p.Build.Started), unixTime(p.Build.Finished)
 	dur := int64(0)
@@ -725,7 +731,7 @@ func parseSemaphore(tenant, delivery string, b []byte) (model.CIEvent, error) {
 	repo := strings.Trim(p.OrganizationName+"/"+project, "/")
 	state := firstNonEmpty(p.Result, p.Pipeline.Result, p.State, p.Pipeline.State)
 	if repo == "" || state == "" {
-		return model.CIEvent{}, errors.New("Semaphore event missing project or result")
+		return model.CIEvent{}, errors.New("semaphore event missing project or result")
 	}
 	start, finish := p.Pipeline.CreatedAt, p.Pipeline.DoneAt
 	dur := int64(0)
@@ -772,7 +778,7 @@ func parseAppVeyor(tenant, delivery string, b []byte) (model.CIEvent, error) {
 		}
 	}
 	if repo == "" || state == "" {
-		return model.CIEvent{}, errors.New("AppVeyor event missing project or status")
+		return model.CIEvent{}, errors.New("appVeyor event missing project or status")
 	}
 	dur := int64(0)
 	if !d.Started.IsZero() && !d.Finished.IsZero() {
@@ -834,7 +840,7 @@ func parseCloudBuild(tenant, delivery string, b []byte) (model.CIEvent, error) {
 		return model.CIEvent{}, err
 	}
 	if p.ID == "" || p.Status == "" {
-		return model.CIEvent{}, errors.New("Cloud Build event missing id or status")
+		return model.CIEvent{}, errors.New("cloud Build event missing id or status")
 	}
 	repo := firstNonEmpty(p.Substitutions["REPO_NAME"], p.SourceProvenance.ResolvedRepoSource.RepoName, p.ProjectID)
 	org := p.ProjectID
@@ -900,7 +906,10 @@ func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max 
 		}
 		return ev.InlineLog, nil
 	}
-	client := &http.Client{Timeout: 45 * time.Second}
+	client := httpguard.NewClientWithOptions(45*time.Second, httpguard.ClientOptions{
+		AllowPrivateNetwork:       co.AllowPrivateNetwork,
+		AllowCrossOriginRedirects: true,
+	})
 	switch co.Provider {
 	case "gitlab":
 		endpoint := strings.TrimRight(co.BaseURL, "/") + "/api/v4/projects/" + url.PathEscape(ev.ProjectID) + "/jobs/" + url.PathEscape(ev.JobID) + "/trace"
@@ -953,7 +962,7 @@ func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max 
 			}
 		}
 		if out.Len() == 0 {
-			return "", errors.New("Azure DevOps returned no build logs")
+			return "", errors.New("azure devops returned no build logs")
 		}
 		return truncateText(out.String(), max), nil
 	case "bitrise":
@@ -1031,7 +1040,7 @@ func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max 
 		}
 		return fetchText(ctx, client, endpoint, max, headers)
 	case "semaphore":
-		return "", errors.New("Semaphore webhook must include inline_log; external log URLs are not fetched")
+		return "", errors.New("semaphore webhook must include inline_log; external log URLs are not fetched")
 	case "jenkins":
 		raw := ev.Metadata["build_url"]
 		if raw == "" {
@@ -1039,7 +1048,7 @@ func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max 
 		}
 		endpoint := strings.TrimRight(raw, "/") + "/consoleText"
 		if !sameBase(co.BaseURL, endpoint) {
-			return "", errors.New("Jenkins build URL is outside configured base_url")
+			return "", errors.New("jenkins build URL is outside configured base_url")
 		}
 		headers := map[string]string{}
 		if co.Token != "" {
@@ -1068,7 +1077,7 @@ func fetchCircleCILog(ctx context.Context, c *http.Client, co config.CIConnector
 	slug := ev.Metadata["project_slug"]
 	num := ev.Metadata["job_number"]
 	if slug == "" || num == "" {
-		return "", errors.New("CircleCI webhook did not include project slug/job number")
+		return "", errors.New("circleci webhook did not include project slug/job number")
 	}
 	endpoint := strings.TrimRight(co.BaseURL, "/") + "/api/v2/project/" + slug + "/" + url.PathEscape(num) + "/steps"
 	raw, err := fetchBytes(ctx, c, endpoint, 4<<20, map[string]string{"Circle-Token": co.Token})
@@ -1115,7 +1124,7 @@ func fetchCircleCILog(ctx context.Context, c *http.Client, co config.CIConnector
 		}
 	}
 	if out.Len() == 0 {
-		return "", errors.New("CircleCI did not expose step output URLs")
+		return "", errors.New("circleci did not expose step output URLs")
 	}
 	return out.String(), nil
 }
@@ -1144,7 +1153,7 @@ func fetchBytes(ctx context.Context, c *http.Client, endpoint string, max int64,
 		return nil, e
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	if int64(len(b)) > max {
 		b = b[:max]
@@ -1152,9 +1161,61 @@ func fetchBytes(ctx context.Context, c *http.Client, endpoint string, max int64,
 	return b, nil
 }
 func sameBase(base, endpoint string) bool {
-	b, e1 := url.Parse(base)
-	e, e2 := url.Parse(endpoint)
-	return e1 == nil && e2 == nil && strings.EqualFold(b.Scheme, e.Scheme) && strings.EqualFold(b.Host, e.Host) && strings.HasPrefix(e.Path, strings.TrimRight(b.Path, "/"))
+	b, err := url.Parse(base)
+	if err != nil || b.Host == "" || b.User != nil || b.Fragment != "" {
+		return false
+	}
+	e, err := url.Parse(endpoint)
+	if err != nil || e.Host == "" || e.User != nil || e.Fragment != "" {
+		return false
+	}
+	if !sameURLOrigin(b, e) {
+		return false
+	}
+	basePath, ok := normalizedURLPath(b)
+	if !ok {
+		return false
+	}
+	endpointPath, ok := normalizedURLPath(e)
+	if !ok {
+		return false
+	}
+	return basePath == "/" || endpointPath == basePath || strings.HasPrefix(endpointPath, basePath+"/")
+}
+
+func sameURLOrigin(a, b *url.URL) bool {
+	if !strings.EqualFold(a.Scheme, b.Scheme) || !strings.EqualFold(strings.TrimSuffix(a.Hostname(), "."), strings.TrimSuffix(b.Hostname(), ".")) {
+		return false
+	}
+	return urlPort(a) == urlPort(b)
+}
+
+func urlPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(u.Scheme, "http") {
+		return "80"
+	}
+	return ""
+}
+
+func normalizedURLPath(u *url.URL) (string, bool) {
+	decoded := u.EscapedPath()
+	for range 4 {
+		next, err := url.PathUnescape(decoded)
+		if err != nil || strings.Contains(next, "\\") {
+			return "", false
+		}
+		if next == decoded {
+			break
+		}
+		decoded = next
+	}
+	return path.Clean("/" + strings.TrimPrefix(decoded, "/")), true
 }
 func normalizeConclusion(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -1198,7 +1259,7 @@ func UpsertGitLabMRComment(ctx context.Context, co config.CIConnector, ev model.
 		return nil
 	}
 	base := strings.TrimRight(co.BaseURL, "/") + "/api/v4/projects/" + url.PathEscape(ev.ProjectID) + "/merge_requests/" + strconv.Itoa(ev.MergeRequestIID) + "/notes"
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := httpguard.NewClient(20*time.Second, co.AllowPrivateNetwork)
 	headers := map[string]string{"PRIVATE-TOKEN": co.Token}
 	if update {
 		raw, err := fetchBytes(ctx, client, base+"?per_page=100&sort=desc", 4<<20, headers)
@@ -1235,7 +1296,7 @@ func postForm(ctx context.Context, client *http.Client, method, endpoint string,
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
 }
@@ -1269,7 +1330,7 @@ func Retry(ctx context.Context, co config.CIConnector, ev model.CIEvent) (RetryR
 	if body != "" && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := httpguard.NewClient(30*time.Second, co.AllowPrivateNetwork).Do(req)
 	if err != nil {
 		return RetryResult{}, err
 	}
@@ -1298,14 +1359,14 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 	switch strings.ToLower(co.Provider) {
 	case "gitlab":
 		if ev.ProjectID == "" || ev.JobID == "" {
-			return "", "", "", nil, errors.New("GitLab retry requires project_id and job_id")
+			return "", "", "", nil, errors.New("gitlab retry requires project_id and job_id")
 		}
 		endpoint = base + "/api/v4/projects/" + url.PathEscape(ev.ProjectID) + "/jobs/" + url.PathEscape(ev.JobID) + "/retry"
 		headers["PRIVATE-TOKEN"] = co.Token
 	case "circleci":
 		workflowID := firstNonEmpty(ev.Metadata["workflow_id"], ev.PipelineID)
 		if workflowID == "" {
-			return "", "", "", nil, errors.New("CircleCI retry requires workflow_id")
+			return "", "", "", nil, errors.New("circleci retry requires workflow_id")
 		}
 		endpoint = base + "/api/v2/workflow/" + url.PathEscape(workflowID) + "/rerun"
 		body = `{"from_failed":true}`
@@ -1313,14 +1374,14 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 	case "buildkite":
 		m := ev.Metadata
 		if m["organization"] == "" || m["pipeline_slug"] == "" || m["build_number"] == "" {
-			return "", "", "", nil, errors.New("Buildkite retry requires organization, pipeline_slug, and build_number")
+			return "", "", "", nil, errors.New("buildkite retry requires organization, pipeline_slug, and build_number")
 		}
 		endpoint = base + "/v2/organizations/" + url.PathEscape(m["organization"]) + "/pipelines/" + url.PathEscape(m["pipeline_slug"]) + "/builds/" + url.PathEscape(m["build_number"]) + "/rebuild"
 		headers["Authorization"] = "Bearer " + co.Token
 	case "travis":
 		buildID := firstNonEmpty(ev.Metadata["build_id"], ev.PipelineID, strconv.FormatInt(ev.RunID, 10))
 		if buildID == "" || buildID == "0" {
-			return "", "", "", nil, errors.New("Travis retry requires build_id")
+			return "", "", "", nil, errors.New("travis retry requires build_id")
 		}
 		endpoint = base + "/build/" + url.PathEscape(buildID) + "/restart"
 		headers["Travis-API-Version"] = "3"
@@ -1332,7 +1393,7 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 			location := firstNonEmpty(ev.Metadata["location"], co.Region, "global")
 			buildID := firstNonEmpty(ev.Metadata["build_id"], ev.JobID, ev.PipelineID)
 			if project == "" || buildID == "" {
-				return "", "", "", nil, errors.New("Cloud Build retry requires project_id and build_id")
+				return "", "", "", nil, errors.New("cloud Build retry requires project_id and build_id")
 			}
 			name = "projects/" + project + "/locations/" + location + "/builds/" + buildID
 		}
@@ -1343,7 +1404,7 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 		project := firstNonEmpty(ev.Metadata["project_id"], ev.Metadata["project"], co.Project, ev.ProjectID)
 		buildID := firstNonEmpty(ev.Metadata["build_id"], ev.JobID, strconv.FormatInt(ev.RunID, 10))
 		if organization == "" || project == "" || buildID == "" || buildID == "0" {
-			return "", "", "", nil, errors.New("Azure DevOps retry requires organization, project, and build_id")
+			return "", "", "", nil, errors.New("azure devops retry requires organization, project, and build_id")
 		}
 		endpoint = base + "/" + url.PathEscape(organization) + "/" + url.PathEscape(project) + "/_apis/build/builds/" + url.PathEscape(buildID) + "?retry=true&api-version=7.1"
 		method = http.MethodPatch
@@ -1354,7 +1415,7 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 		repo := firstNonEmpty(ev.Metadata["repo_slug"], lastPath(ev.Repository))
 		branch := firstNonEmpty(ev.Branch, "main")
 		if workspace == "" || repo == "" {
-			return "", "", "", nil, errors.New("Bitbucket retry requires workspace and repo_slug")
+			return "", "", "", nil, errors.New("bitbucket retry requires workspace and repo_slug")
 		}
 		endpoint = base + "/2.0/repositories/" + url.PathEscape(workspace) + "/" + url.PathEscape(repo) + "/pipelines/"
 		bodyBytes, _ := json.Marshal(map[string]any{"target": map[string]any{"type": "pipeline_ref_target", "ref_type": "branch", "ref_name": branch}})
@@ -1365,21 +1426,21 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 		parts := strings.SplitN(strings.Trim(repo, "/"), "/", 2)
 		build := firstNonEmpty(ev.Metadata["build_number"], strconv.FormatInt(ev.RunID, 10))
 		if len(parts) != 2 || build == "" || build == "0" {
-			return "", "", "", nil, errors.New("Drone retry requires owner, repository, and build_number")
+			return "", "", "", nil, errors.New("drone retry requires owner, repository, and build_number")
 		}
 		endpoint = base + "/api/repos/" + url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1]) + "/builds/" + url.PathEscape(build)
 		headers["Authorization"] = "Bearer " + co.Token
 	case "semaphore":
 		workflowID := firstNonEmpty(ev.Metadata["workflow_id"], ev.PipelineID)
 		if workflowID == "" {
-			return "", "", "", nil, errors.New("Semaphore retry requires workflow_id")
+			return "", "", "", nil, errors.New("semaphore retry requires workflow_id")
 		}
 		endpoint = base + "/api/v1alpha/plumber-workflows/" + url.PathEscape(workflowID) + "/reschedule?request_token=" + url.QueryEscape(retryToken(ev))
 		headers["Authorization"] = "Token " + co.Token
 	case "appveyor":
 		buildID := firstNonEmpty(ev.Metadata["build_id"], strconv.FormatInt(ev.RunID, 10))
 		if buildID == "" || buildID == "0" {
-			return "", "", "", nil, errors.New("AppVeyor retry requires build_id")
+			return "", "", "", nil, errors.New("appVeyor retry requires build_id")
 		}
 		endpoint = base + "/api/builds"
 		method = http.MethodPut
@@ -1389,14 +1450,14 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 		app := firstNonEmpty(ev.Metadata["app_slug"], co.Project)
 		pipeline := firstNonEmpty(ev.Metadata["pipeline_id"], ev.Metadata["build_slug"], ev.PipelineID)
 		if app == "" || pipeline == "" {
-			return "", "", "", nil, errors.New("Bitrise retry requires app_slug and pipeline_id")
+			return "", "", "", nil, errors.New("bitrise retry requires app_slug and pipeline_id")
 		}
 		endpoint = base + "/v0.1/apps/" + url.PathEscape(app) + "/pipelines/" + url.PathEscape(pipeline) + "/rebuild"
 		headers["Authorization"] = co.Token
 	case "teamcity":
 		buildType := firstNonEmpty(ev.PipelineID, ev.Metadata["build_type_id"])
 		if buildType == "" {
-			return "", "", "", nil, errors.New("TeamCity retry requires build_type_id")
+			return "", "", "", nil, errors.New("teamcity retry requires build_type_id")
 		}
 		endpoint = base + "/app/rest/buildQueue"
 		bodyBytes, _ := json.Marshal(map[string]any{"buildType": map[string]string{"id": buildType}, "branchName": ev.Branch, "comment": map[string]string{"text": "Safe rerun requested by CI Radar"}})
