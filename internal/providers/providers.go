@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ciradar/internal/db"
+	"ciradar/internal/httpguard"
 	"ciradar/internal/model"
 )
 
@@ -32,7 +33,7 @@ func NewPoller(store db.Backend, log *slog.Logger) *Poller {
 	return &Poller{
 		store: store,
 		log:   log,
-		http:  &http.Client{Timeout: 15 * time.Second},
+		http:  httpguard.NewClient(15*time.Second, false),
 		endpoints: []Endpoint{
 			{Name: "GitHub Actions", URL: "https://www.githubstatus.com/api/v2/summary.json", ComponentKeywords: []string{"actions"}},
 			{Name: "npm", URL: "https://status.npmjs.org/api/v2/summary.json"},
