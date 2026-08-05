@@ -100,6 +100,9 @@ type Job struct {
 	Payload  json.RawMessage
 	Attempts int
 }
+
+// CorrelationStats includes the candidate repository/organization passed to
+// CorrelationForTenant. Callers must not add the current analysis a second time.
 type CorrelationStats struct {
 	Repositories  int
 	Organizations int
