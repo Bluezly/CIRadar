@@ -28,3 +28,15 @@ func TestProviderPollerBlocksPrivateTargets(t *testing.T) {
 		t.Fatalf("private provider endpoint was not blocked: %v", err)
 	}
 }
+
+func TestProviderPollerRejectsOversizedResponse(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, strings.Repeat("x", (1<<20)+1))
+	}))
+	defer target.Close()
+	poller := &Poller{http: target.Client(), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	_, err := poller.fetch(context.Background(), Endpoint{Name: "test", URL: target.URL})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err=%v", err)
+	}
+}
