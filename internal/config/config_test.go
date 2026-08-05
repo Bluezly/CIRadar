@@ -253,3 +253,47 @@ func TestSemanticLocalAPIKeyIsResolved(t *testing.T) {
 		t.Fatalf("local API key=%q", cfg.Semantic.LocalAPIKey)
 	}
 }
+
+func TestChatOpsRequiresExplicitAllowlists(t *testing.T) {
+	cfg := testConfig()
+	cfg.ChatOps.Enabled = true
+	cfg.ChatOps.SlackSigningSecret = "slack-secret"
+	cfg.ChatOps.TeamsSigningSecret = ""
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "slack_allowed") {
+		t.Fatalf("Slack ChatOps without an allowlist was accepted: %v", err)
+	}
+
+	cfg = testConfig()
+	cfg.ChatOps.Enabled = true
+	cfg.ChatOps.SlackSigningSecret = ""
+	cfg.ChatOps.TeamsSigningSecret = "teams-secret"
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "teams_allowed_users") {
+		t.Fatalf("Teams ChatOps without an allowlist was accepted: %v", err)
+	}
+
+	cfg = testConfig()
+	cfg.ChatOps.Enabled = true
+	cfg.ChatOps.SlackSigningSecret = "slack-secret"
+	cfg.ChatOps.SlackAllowedTeams = []string{"T123"}
+	cfg.ChatOps.TeamsSigningSecret = "teams-secret"
+	cfg.ChatOps.TeamsAllowedUsers = []string{"29:user"}
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("ChatOps with explicit allowlists was rejected: %v", err)
+	}
+}
+
+func TestNotificationRepositoryPatternsAreValidated(t *testing.T) {
+	cfg := testConfig()
+	cfg.Notifications.Enabled = true
+	cfg.Notifications.Channels = []NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: "https://hooks.example.test/notify", IncludeRepositories: []string{"[broken"}}}
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "invalid repository pattern") {
+		t.Fatalf("err=%v", err)
+	}
+
+	cfg = testConfig()
+	cfg.Notifications.Enabled = true
+	cfg.Notifications.Channels = []NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: "https://hooks.example.test/notify", ExcludeRepositories: []string{"acme/*"}}}
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("valid repository pattern rejected: %v", err)
+	}
+}
