@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"ciradar/internal/httpguard"
 )
 
 type Client struct {
@@ -26,6 +28,7 @@ type Client struct {
 	privateKey *rsa.PrivateKey
 	baseURL    string
 	http       *http.Client
+	download   *http.Client
 	mu         sync.Mutex
 	tokens     map[int64]cachedToken
 }
@@ -78,7 +81,7 @@ type CheckRunRequest struct {
 	Output     CheckOutput `json:"output"`
 }
 
-func New(appID int64, privateKeyPath, baseURL string) (*Client, error) {
+func New(appID int64, privateKeyPath, baseURL string, allowPrivateNetwork ...bool) (*Client, error) {
 	if appID <= 0 {
 		return nil, errors.New("GitHub App ID is required")
 	}
@@ -107,7 +110,22 @@ func New(appID int64, privateKeyPath, baseURL string) (*Client, error) {
 	if baseURL == "" {
 		baseURL = "https://api.github.com"
 	}
-	return &Client{appID: appID, privateKey: key, baseURL: strings.TrimRight(baseURL, "/"), http: &http.Client{Timeout: 60 * time.Second}, tokens: map[int64]cachedToken{}}, nil
+	allowPrivate := len(allowPrivateNetwork) > 0 && allowPrivateNetwork[0]
+	if err := httpguard.ValidateURL(baseURL, allowPrivate); err != nil {
+		return nil, fmt.Errorf("invalid GitHub API URL: %w", err)
+	}
+	download := httpguard.NewClientWithOptions(60*time.Second, httpguard.ClientOptions{
+		AllowPrivateNetwork:       allowPrivate,
+		AllowCrossOriginRedirects: true,
+	})
+	return &Client{
+		appID:      appID,
+		privateKey: key,
+		baseURL:    strings.TrimRight(baseURL, "/"),
+		http:       httpguard.NewClient(60*time.Second, allowPrivate),
+		download:   download,
+		tokens:     map[int64]cachedToken{},
+	}, nil
 }
 
 func (c *Client) AppJWT() (string, error) {
@@ -180,7 +198,7 @@ func (c *Client) DownloadJobLog(ctx context.Context, installationID int64, owner
 		return "", err
 	}
 	setHeaders(req, token)
-	resp, err := c.http.Do(req)
+	resp, err := c.download.Do(req)
 	if err != nil {
 		return "", err
 	}
