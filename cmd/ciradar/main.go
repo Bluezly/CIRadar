@@ -219,7 +219,9 @@ func cmdRepair(args []string) error {
 	for _, file := range plan.Files {
 		files = append(files, file.Path)
 	}
-	_ = store.RecordAudit(context.Background(), model.AuditEvent{TenantID: tid, Actor: "cli", Role: model.RoleOperator, Action: "repair." + status, Resource: "analysis", ResourceID: *analysisID, Metadata: map[string]string{"plan_id": plan.ID, "files": strings.Join(files, ",")}})
+	if err := store.RecordAudit(context.Background(), model.AuditEvent{TenantID: tid, Actor: "cli", Role: model.RoleOperator, Action: "repair." + status, Resource: "analysis", ResourceID: *analysisID, Metadata: map[string]string{"plan_id": plan.ID, "files": strings.Join(files, ",")}}); err != nil {
+		return fmt.Errorf("repair %s, but recording its audit event failed: %w", status, err)
+	}
 	return printJSON(map[string]any{"status": status, "plan_id": plan.ID, "analysis_id": *analysisID, "files": files})
 }
 
@@ -253,9 +255,18 @@ func cmdDeployment(args []string) error {
 		return errors.New("--repo and --sha are required")
 	}
 	now := time.Now().UTC()
-	fc := parseRFC(*firstCommit)
-	st := parseRFC(*started)
-	co := parseRFC(*completed)
+	fc, err := parseOptionalRFC3339("first-commit-at", *firstCommit)
+	if err != nil {
+		return err
+	}
+	st, err := parseOptionalRFC3339("started-at", *started)
+	if err != nil {
+		return err
+	}
+	co, err := parseOptionalRFC3339("completed-at", *completed)
+	if err != nil {
+		return err
+	}
 	if co.IsZero() {
 		co = now
 	}
@@ -336,7 +347,17 @@ func cmdSimilar(args []string) error {
 	}
 	return printJSON(v)
 }
-func parseRFC(v string) time.Time { t, _ := time.Parse(time.RFC3339, strings.TrimSpace(v)); return t }
+func parseOptionalRFC3339(name, value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("--%s must be RFC3339: %w", name, err)
+	}
+	return parsed, nil
+}
 
 func cmdDatabase(args []string) error {
 	if len(args) < 1 {
@@ -523,8 +544,15 @@ func cmdAnalyze(args []string) error {
 	org := strings.SplitN(*repo, "/", 2)[0]
 	in := model.AnalysisInput{TenantID: tenantID, Repository: *repo, Organization: org, Workflow: *workflow, Job: *job, PreviousSuccess: *previous, WorkflowChanged: *workflowChanged, DependencyChanged: *dependencyChanged, ChangeInfoAvailable: *changeInfo, Log: string(b), OccurredAt: time.Now().UTC()}
 	initial := a.Analyze(in, analyzer.Context{})
-	prev, _ := store.LastSuccessfulEnvironmentForTenant(context.Background(), tenantID, in.Repository, in.Workflow, in.Job)
-	analysisContext := analyzer.Context{ProviderIncident: providerIncident(context.Background(), store, initial.Provider), PreviousEnvironment: prev}
+	prev, err := store.LastSuccessfulEnvironmentForTenant(context.Background(), tenantID, in.Repository, in.Workflow, in.Job)
+	if err != nil {
+		return fmt.Errorf("load previous successful environment: %w", err)
+	}
+	providerDown, err := providerIncident(context.Background(), store, initial.Provider)
+	if err != nil {
+		return fmt.Errorf("load provider status: %w", err)
+	}
+	analysisContext := analyzer.Context{ProviderIncident: providerDown, PreviousEnvironment: prev}
 	if *correlate {
 		corr, corrErr := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
 		if corrErr != nil {
@@ -813,17 +841,25 @@ func cmdSimulate(args []string) error {
 		repo := fmt.Sprintf("simulation-org-%d/repo-%d", i%3, i)
 		in := model.AnalysisInput{TenantID: tenantID, Repository: repo, Organization: strings.SplitN(repo, "/", 2)[0], Workflow: "ci", Job: "test", Log: string(b), OccurredAt: time.Now().UTC().Add(time.Duration(i) * time.Millisecond)}
 		initial := a.Analyze(in, analyzer.Context{})
-		corr, _ := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
+		corr, err := store.CorrelationForTenant(context.Background(), tenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-cfg.IncidentWindow), cfg.CrossTenantCorrelation)
+		if err != nil {
+			return fmt.Errorf("correlate simulated failure %d: %w", i+1, err)
+		}
 		r := a.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences})
 		if err := store.RecordAnalysisForTenant(context.Background(), tenantID, in, r, cfg.StoreRedactedExcerpts, cfg.StoreRawLogs); err != nil {
 			return err
 		}
 		if r.CrossRepoCount >= cfg.IncidentRepoThreshold || r.CrossOrgCount >= cfg.IncidentOrgThreshold {
 			now := time.Now().UTC()
-			_ = store.UpsertIncidentForTenant(context.Background(), tenantID, model.Incident{ID: "inc_" + r.Fingerprint, TenantID: tenantID, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: "major", RepositoryCount: r.CrossRepoCount, OrganizationCount: r.CrossOrgCount, OccurrenceCount: corr.Occurrences, FirstSeenAt: now, LastSeenAt: now, Title: r.Provider + ": " + r.Summary})
+			if err := store.UpsertIncidentForTenant(context.Background(), tenantID, model.Incident{ID: "inc_" + tenantID + "_" + r.Fingerprint, TenantID: tenantID, Fingerprint: r.Fingerprint, Provider: r.Provider, ErrorFamily: r.ErrorFamily, State: "open", Severity: "major", RepositoryCount: r.CrossRepoCount, OrganizationCount: r.CrossOrgCount, OccurrenceCount: corr.Occurrences, FirstSeenAt: now, LastSeenAt: now, Title: r.Provider + ": " + r.Summary}); err != nil {
+				return fmt.Errorf("upsert simulated incident: %w", err)
+			}
 		}
 	}
-	st, _ := store.StatsForTenant(context.Background(), tenantID)
+	st, err := store.StatsForTenant(context.Background(), tenantID)
+	if err != nil {
+		return fmt.Errorf("load simulation stats: %w", err)
+	}
 	fmt.Printf("Inserted %d simulated failures. Analyses=%d incidents=%d open=%d\n", count, st.Analyses, st.Incidents, st.OpenIncidents)
 	return nil
 }
@@ -1014,14 +1050,17 @@ func newLogger(level string) *slog.Logger {
 	}
 	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
 }
-func providerIncident(ctx context.Context, store db.Backend, provider string) bool {
-	statuses, _ := store.ListProviderStatuses(ctx)
-	for _, s := range statuses {
-		if s.Incident && providers.MatchesStatusProvider(provider, s.Provider) {
-			return true
+func providerIncident(ctx context.Context, store db.Backend, provider string) (bool, error) {
+	statuses, err := store.ListProviderStatuses(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, status := range statuses {
+		if status.Incident && providers.MatchesStatusProvider(provider, status.Provider) {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 func cmdNotify(args []string) error {
 	if len(args) < 1 {
@@ -1378,7 +1417,9 @@ func cmdMCP(args []string) error {
 		dec := json.NewDecoder(strings.NewReader(line))
 		dec.UseNumber()
 		if err := dec.Decode(&req); err != nil {
-			_ = enc.Encode(mcpserver.Response{JSONRPC: "2.0", Error: &mcpserver.RPCError{Code: -32700, Message: "parse error"}})
+			if encodeErr := enc.Encode(mcpserver.Response{JSONRPC: "2.0", Error: &mcpserver.RPCError{Code: -32700, Message: "parse error"}}); encodeErr != nil {
+				return encodeErr
+			}
 			continue
 		}
 		if err := enc.Encode(srv.Handle(context.Background(), tenantID, req)); err != nil {
@@ -1630,7 +1671,9 @@ func cmdIncidentAction(args []string) error {
 	if incident == nil {
 		return errors.New("incident not found")
 	}
-	_ = store.RecordAudit(context.Background(), model.AuditEvent{TenantID: tenantID, Actor: *actor, Role: model.RoleOperator, Action: "incident." + state, Resource: "incident", ResourceID: incident.ID, Metadata: map[string]string{"note": *note}})
+	if err := store.RecordAudit(context.Background(), model.AuditEvent{TenantID: tenantID, Actor: *actor, Role: model.RoleOperator, Action: "incident." + state, Resource: "incident", ResourceID: incident.ID, Metadata: map[string]string{"note": *note}}); err != nil {
+		return fmt.Errorf("incident state changed to %s, but recording its audit event failed: %w", state, err)
+	}
 	return printJSON(incident)
 }
 
@@ -1676,7 +1719,9 @@ func maintenanceLoop(ctx context.Context, store db.Backend, cfg config.Config, l
 				log.Info("stale incidents resolved", "count", resolved)
 				if cfg.Notifications.Enabled {
 					for _, i := range resolvedItems {
-						_ = store.EnqueueForTenant(ctx, i.TenantID, "notify.event", notifications.IncidentEvent("incident_resolved", i, cfg.PublicBaseURL), time.Now().UTC())
+						if err := store.EnqueueForTenant(ctx, i.TenantID, "notify.event", notifications.IncidentEvent("incident_resolved", i, cfg.PublicBaseURL), time.Now().UTC()); err != nil {
+							log.Error("enqueue incident resolution notification failed", "tenant", i.TenantID, "incident_id", i.ID, "error", err)
+						}
 					}
 				}
 			}
