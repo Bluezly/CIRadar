@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +124,18 @@ func TestResolveTestKeyByReadableIdentity(t *testing.T) {
 	}
 	if key != stats[0].TestKey {
 		t.Fatalf("key=%s want=%s", key, stats[0].TestKey)
+	}
+}
+
+func TestParseOptionalRFC3339RejectsInvalidInput(t *testing.T) {
+	if value, err := parseOptionalRFC3339("started-at", ""); err != nil || !value.IsZero() {
+		t.Fatalf("empty value=%v err=%v", value, err)
+	}
+	if _, err := parseOptionalRFC3339("started-at", "not-a-time"); err == nil || !strings.Contains(err.Error(), "--started-at") {
+		t.Fatalf("invalid RFC3339 error=%v", err)
+	}
+	value, err := parseOptionalRFC3339("started-at", "2026-08-05T03:00:00Z")
+	if err != nil || value.UTC().Format(time.RFC3339) != "2026-08-05T03:00:00Z" {
+		t.Fatalf("value=%v err=%v", value, err)
 	}
 }
