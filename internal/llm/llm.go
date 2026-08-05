@@ -184,11 +184,25 @@ func (e *Enhancer) sendChat(ctx context.Context, endpoint string, requestBody ma
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, readErr := readLLMResponseBody(resp.Body, 4<<20)
 	if readErr != nil {
 		return nil, resp.StatusCode, readErr
 	}
 	return body, resp.StatusCode, nil
+}
+
+func readLLMResponseBody(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, errors.New("response body limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("LLM response body exceeds %d bytes", max)
+	}
+	return body, nil
 }
 
 func marshalPrompt(payload map[string]any, maximum int) string {
