@@ -267,8 +267,16 @@ func (c *Config) normalizeEnterprise() error {
 	if c.ChatOps.QuarantineDuration == "" {
 		c.ChatOps.QuarantineDuration = "7d"
 	}
-	if c.ChatOps.Enabled && c.ChatOps.SlackSigningSecret == "" && c.ChatOps.TeamsSigningSecret == "" {
-		return errors.New("chatops requires a Slack or Teams signing secret")
+	if c.ChatOps.Enabled {
+		if c.ChatOps.SlackSigningSecret == "" && c.ChatOps.TeamsSigningSecret == "" {
+			return errors.New("chatops requires a Slack or Teams signing secret")
+		}
+		if c.ChatOps.SlackSigningSecret != "" && len(c.ChatOps.SlackAllowedUsers) == 0 && len(c.ChatOps.SlackAllowedTeams) == 0 {
+			return errors.New("chatops Slack requires slack_allowed_users or slack_allowed_teams")
+		}
+		if c.ChatOps.TeamsSigningSecret != "" && len(c.ChatOps.TeamsAllowedUsers) == 0 {
+			return errors.New("chatops Teams requires teams_allowed_users")
+		}
 	}
 	if c.Costs.Currency == "" {
 		c.Costs.Currency = "USD"

@@ -9,6 +9,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -535,6 +536,15 @@ func (c *Config) normalize() error {
 		for _, event := range ch.Events {
 			if !validNotificationEvent(event) {
 				return fmt.Errorf("notification channel %q has unsupported event %q", ch.Name, event)
+			}
+		}
+		for _, pattern := range append(append([]string(nil), ch.IncludeRepositories...), ch.ExcludeRepositories...) {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				return fmt.Errorf("notification channel %q has an empty repository pattern", ch.Name)
+			}
+			if _, err := path.Match(strings.ToLower(pattern), "example/repository"); err != nil {
+				return fmt.Errorf("notification channel %q has invalid repository pattern %q: %w", ch.Name, pattern, err)
 			}
 		}
 		if (ch.QuietHoursStart == "") != (ch.QuietHoursEnd == "") {
