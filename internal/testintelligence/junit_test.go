@@ -24,3 +24,16 @@ func TestRejectEmpty(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+func TestJUnitDurationRejectsNonFiniteAndNegativeValues(t *testing.T) {
+	for _, value := range []string{"NaN", "+Inf", "-1", "not-a-number"} {
+		xml := `<testsuite><testcase name="test" time="` + value + `"/></testsuite>`
+		observations, err := ParseJUnit(strings.NewReader(xml), Metadata{Repository: "acme/api"})
+		if err != nil {
+			t.Fatalf("value=%q err=%v", value, err)
+		}
+		if len(observations) != 1 || observations[0].DurationMS != 0 {
+			t.Fatalf("value=%q observations=%+v", value, observations)
+		}
+	}
+}
