@@ -157,6 +157,18 @@ func TestIncidentWorkflowWritesAudit(t *testing.T) {
 	if err := store.UpsertIncidentForTenant(context.Background(), model.DefaultTenantID, inc); err != nil {
 		t.Fatal(err)
 	}
+	bad := httptest.NewRequest(http.MethodPost, "/api/v1/incidents/fp/acknowledge", strings.NewReader(`{"note":`))
+	bad.RemoteAddr = "203.0.113.10:1234"
+	bad.Header.Set("Authorization", "Bearer "+token)
+	badResult := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(badResult, bad)
+	if badResult.Code != http.StatusBadRequest {
+		t.Fatalf("malformed acknowledgement status=%d body=%s", badResult.Code, badResult.Body.String())
+	}
+	unchanged, _ := store.GetIncidentForTenant(context.Background(), model.DefaultTenantID, "fp")
+	if unchanged == nil || unchanged.State != "open" {
+		t.Fatalf("malformed request changed incident: %+v", unchanged)
+	}
 	rr := doReq(t, s, http.MethodPost, "/api/v1/incidents/fp/acknowledge", token, "", map[string]string{"note": "investigating"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("ack=%d body=%s", rr.Code, rr.Body.String())
@@ -168,6 +180,39 @@ func TestIncidentWorkflowWritesAudit(t *testing.T) {
 	audits, _ := store.ListAudit(context.Background(), model.DefaultTenantID, 10)
 	if len(audits) == 0 || audits[0].Action != "incident.acknowledged" {
 		t.Fatalf("audit=%+v", audits)
+	}
+}
+
+func TestCSRFGuardAllowsSignedSAMLCallbackWithExistingSession(t *testing.T) {
+	cfg := config.Default()
+	cfg.PublicBaseURL = "https://ciradar.example"
+	cfg.SSO.Enabled = true
+	cfg.SSO.Mode = "saml"
+	cfg.SSO.CookieName = "ciradar_session"
+	resolver := newClientIPResolver(nil)
+	called := false
+	handler := csrfGuard(cfg, resolver, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	callback := httptest.NewRequest(http.MethodPost, "https://ciradar.example/auth/callback", strings.NewReader("SAMLResponse=x"))
+	callback.Header.Set("Origin", "https://idp.example")
+	callback.AddCookie(&http.Cookie{Name: cfg.SSO.CookieName, Value: "existing-session"})
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, callback)
+	if result.Code != http.StatusNoContent || !called {
+		t.Fatalf("SAML callback status=%d called=%v body=%s", result.Code, called, result.Body.String())
+	}
+
+	called = false
+	unsafe := httptest.NewRequest(http.MethodPost, "https://ciradar.example/api/v1/analyze", strings.NewReader(`{"log":"x"}`))
+	unsafe.Header.Set("Origin", "https://idp.example")
+	unsafe.AddCookie(&http.Cookie{Name: cfg.SSO.CookieName, Value: "existing-session"})
+	result = httptest.NewRecorder()
+	handler.ServeHTTP(result, unsafe)
+	if result.Code != http.StatusForbidden || called {
+		t.Fatalf("ordinary cross-site POST status=%d called=%v body=%s", result.Code, called, result.Body.String())
 	}
 }
 
@@ -425,6 +470,16 @@ func TestMCPStreamableHTTPGuards(t *testing.T) {
 		t.Fatalf("origin=%d %s", w.Code, w.Body.String())
 	}
 
+	req = httptest.NewRequest(http.MethodPost, "http://ciradar.test/mcp", bytes.NewReader(body))
+	req.RemoteAddr = "203.0.113.9:1"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Origin", "https://ciradar.test")
+	w = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("cross-scheme MCP origin=%d %s", w.Code, w.Body.String())
+	}
+
 	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	req.RemoteAddr = "203.0.113.9:1"
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -531,6 +586,16 @@ func TestCookieAuthenticatedWritesRequireSameOrigin(t *testing.T) {
 	s.http.Handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("missing origin status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "http://ciradar.example/api/v1/analyze", bytes.NewReader(payload))
+	request.RemoteAddr = "203.0.113.10:1234"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://ciradar.example")
+	request.AddCookie(cookie)
+	response = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-scheme origin status=%d body=%s", response.Code, response.Body.String())
 	}
 	request = httptest.NewRequest(http.MethodPost, "http://ciradar.example/api/v1/analyze", bytes.NewReader(payload))
 	request.RemoteAddr = "203.0.113.10:1234"
@@ -652,5 +717,35 @@ func TestRepairAPIQueuesDraftPullRequest(t *testing.T) {
 	found := doReq(t, server, http.MethodGet, "/api/v1/analyses/"+analysis.ID+"/repair", token, "", nil)
 	if found.Code != http.StatusOK || !strings.Contains(found.Body.String(), "draft_pr_created") {
 		t.Fatalf("repair result status=%d body=%s", found.Code, found.Body.String())
+	}
+}
+
+func TestRequestIDRejectsUnsafeOrOversizedValues(t *testing.T) {
+	handler := requestID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Observed-Request-ID", requestIDFrom(r))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for _, supplied := range []string{"contains spaces", "../../logs", strings.Repeat("a", 129)} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Request-ID", supplied)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		generated := rr.Header().Get("X-Request-ID")
+		if generated == supplied || !validRequestID(generated) {
+			t.Fatalf("unsafe request ID %q produced %q", supplied, generated)
+		}
+		if rr.Header().Get("Observed-Request-ID") != generated {
+			t.Fatalf("context request ID does not match response header")
+		}
+	}
+
+	const valid = "trace_01HZY7Y3:worker-2"
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Request-ID", valid)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Header().Get("X-Request-ID") != valid {
+		t.Fatalf("valid request ID was replaced: %q", rr.Header().Get("X-Request-ID"))
 	}
 }

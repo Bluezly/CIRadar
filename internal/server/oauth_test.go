@@ -58,8 +58,32 @@ func TestMCPOAuthAuthorizationCodePKCE(t *testing.T) {
 	authorize.RemoteAddr = "203.0.113.10:1234"
 	authorizeResult := httptest.NewRecorder()
 	s.http.Handler.ServeHTTP(authorizeResult, authorize)
-	if authorizeResult.Code != http.StatusFound {
+	if authorizeResult.Code != http.StatusOK || !strings.Contains(authorizeResult.Body.String(), "Authorize MCP test") {
 		t.Fatalf("authorize status=%d body=%s", authorizeResult.Code, authorizeResult.Body.String())
+	}
+	if location := authorizeResult.Header().Get("Location"); location != "" {
+		t.Fatalf("GET authorization unexpectedly redirected to %q", location)
+	}
+	authorizeForm := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {clientID},
+		"redirect_uri":          {"http://127.0.0.1:9876/callback"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"ciradar.read ciradar.write"},
+		"resource":              {"http://ciradar.test/mcp"},
+		"state":                 {"state-1"},
+		"decision":              {"approve"},
+	}
+	authorize = httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/authorize", strings.NewReader(authorizeForm.Encode()))
+	authorize.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	authorize.Header.Set("Origin", "http://ciradar.test")
+	authorize.AddCookie(sessionCookie)
+	authorize.RemoteAddr = "203.0.113.10:1234"
+	authorizeResult = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(authorizeResult, authorize)
+	if authorizeResult.Code != http.StatusFound {
+		t.Fatalf("authorize approval status=%d body=%s", authorizeResult.Code, authorizeResult.Body.String())
 	}
 	location, err := url.Parse(authorizeResult.Header().Get("Location"))
 	if err != nil {
@@ -112,6 +136,85 @@ func TestMCPOAuthAuthorizationCodePKCE(t *testing.T) {
 	}
 }
 
+func TestOAuthAuthorizationRequiresExplicitSameOriginConsent(t *testing.T) {
+	s, _, _ := testServer(t)
+	login := httptest.NewRequest(http.MethodPost, "http://ciradar.test/auth/token", bytes.NewBufferString(`{"token":"root-secret","tenant":"default"}`))
+	login.Header.Set("Content-Type", "application/json")
+	login.RemoteAddr = "203.0.113.10:1234"
+	loginResult := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(loginResult, login)
+	if loginResult.Code != http.StatusOK || len(loginResult.Result().Cookies()) == 0 {
+		t.Fatalf("login status=%d body=%s", loginResult.Code, loginResult.Body.String())
+	}
+	sessionCookie := loginResult.Result().Cookies()[0]
+
+	registration := httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/register", strings.NewReader(`{"redirect_uris":["https://client.example/callback"],"client_name":"External client"}`))
+	registration.Header.Set("Content-Type", "application/json")
+	registration.RemoteAddr = "203.0.113.10:1234"
+	registrationResult := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(registrationResult, registration)
+	if registrationResult.Code != http.StatusCreated {
+		t.Fatalf("registration status=%d body=%s", registrationResult.Code, registrationResult.Body.String())
+	}
+	var registered map[string]any
+	if err := json.Unmarshal(registrationResult.Body.Bytes(), &registered); err != nil {
+		t.Fatal(err)
+	}
+	clientID, _ := registered["client_id"].(string)
+	verifier := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+	digest := sha256.Sum256([]byte(verifier))
+	form := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://client.example/callback"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(digest[:])},
+		"code_challenge_method": {"S256"},
+		"scope":                 {"ciradar.read"},
+		"resource":              {"http://ciradar.test/mcp"},
+		"state":                 {"state-2"},
+		"decision":              {"approve"},
+	}
+
+	get := httptest.NewRequest(http.MethodGet, "http://ciradar.test/oauth/authorize?"+form.Encode(), nil)
+	get.AddCookie(sessionCookie)
+	get.RemoteAddr = "203.0.113.10:1234"
+	getResult := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(getResult, get)
+	if getResult.Code != http.StatusOK || !strings.Contains(getResult.Body.String(), "External client") {
+		t.Fatalf("consent status=%d body=%s", getResult.Code, getResult.Body.String())
+	}
+	if strings.Contains(getResult.Body.String(), "cir_oauth_") || getResult.Header().Get("Location") != "" {
+		t.Fatal("GET authorization issued a code without consent")
+	}
+
+	crossSite := httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/authorize", strings.NewReader(form.Encode()))
+	crossSite.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	crossSite.Header.Set("Origin", "https://attacker.example")
+	crossSite.AddCookie(sessionCookie)
+	crossSite.RemoteAddr = "203.0.113.10:1234"
+	crossSiteResult := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(crossSiteResult, crossSite)
+	if crossSiteResult.Code != http.StatusForbidden {
+		t.Fatalf("cross-site approval status=%d body=%s", crossSiteResult.Code, crossSiteResult.Body.String())
+	}
+
+	form.Set("decision", "deny")
+	deny := httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/authorize", strings.NewReader(form.Encode()))
+	deny.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	deny.Header.Set("Origin", "http://ciradar.test")
+	deny.AddCookie(sessionCookie)
+	deny.RemoteAddr = "203.0.113.10:1234"
+	denyResult := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(denyResult, deny)
+	if denyResult.Code != http.StatusFound {
+		t.Fatalf("deny status=%d body=%s", denyResult.Code, denyResult.Body.String())
+	}
+	destination, err := url.Parse(denyResult.Header().Get("Location"))
+	if err != nil || destination.Query().Get("error") != "access_denied" || destination.Query().Get("state") != "state-2" {
+		t.Fatalf("deny redirect=%q err=%v", denyResult.Header().Get("Location"), err)
+	}
+}
+
 func TestOAuthMetadataAndRedirectValidation(t *testing.T) {
 	s, _, _ := testServer(t)
 	metadata := doReq(t, s, http.MethodGet, "/.well-known/oauth-authorization-server", "", "", nil)
@@ -125,6 +228,33 @@ func TestOAuthMetadataAndRedirectValidation(t *testing.T) {
 	s.http.Handler.ServeHTTP(result, bad)
 	if result.Code != http.StatusBadRequest {
 		t.Fatalf("bad redirect status=%d", result.Code)
+	}
+}
+
+func TestOAuthRejectsAmbiguousRedirectsAndResources(t *testing.T) {
+	for _, raw := range []string{
+		"https://user@example.com/callback",
+		"https://example.com/callback#fragment",
+	} {
+		if validOAuthRedirect(raw) {
+			t.Fatalf("redirect %q was accepted", raw)
+		}
+	}
+
+	s, _, _ := testServer(t)
+	r := httptest.NewRequest(http.MethodGet, "http://ciradar.test/oauth/authorize", nil)
+	for _, raw := range []string{
+		"http://user@ciradar.test/mcp",
+		"http://ciradar.test/mcp?tenant=other",
+		"http://ciradar.test/mcp#fragment",
+		"http://ciradar.test/%6dcp",
+	} {
+		if s.validOAuthResource(r, raw) {
+			t.Fatalf("resource %q was accepted", raw)
+		}
+	}
+	if !s.validOAuthResource(r, "http://ciradar.test/mcp") {
+		t.Fatal("canonical MCP resource was rejected")
 	}
 }
 
@@ -176,5 +306,30 @@ func TestOAuthReadScopeCannotWrite(t *testing.T) {
 	s.http.Handler.ServeHTTP(mcpWrite, writeRequest)
 	if mcpWrite.Code != http.StatusForbidden || !strings.Contains(mcpWrite.Body.String(), "ciradar.write") {
 		t.Fatalf("MCP write status=%d body=%s", mcpWrite.Code, mcpWrite.Body.String())
+	}
+}
+
+func TestOAuthRejectsUnsignedPlaintextToken(t *testing.T) {
+	s, _, _ := testServer(t)
+	now := time.Now().UTC()
+	forged, err := json.Marshal(oauthAccessToken{
+		ID:       "forged-token",
+		Resource: "http://ciradar.test/mcp",
+		Scope:    "ciradar.read ciradar.write",
+		Principal: model.Principal{
+			TenantID: model.DefaultTenantID,
+			Name:     "attacker",
+			Role:     model.RoleAdmin,
+		},
+		IssuedAt:  now,
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := "cir_oauth_" + base64.RawURLEncoding.EncodeToString(forged)
+	response := doReq(t, s, http.MethodGet, "/api/v1/status", token, "", nil)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unsigned OAuth token status=%d body=%s", response.Code, response.Body.String())
 	}
 }

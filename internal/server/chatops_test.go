@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
@@ -24,7 +25,7 @@ func TestPerformChatAction(t *testing.T) {
 	}
 	defer store.Close()
 	inc := model.Incident{TenantID: "default", Fingerprint: "fp", Title: "registry", State: "open", Severity: "major", FirstSeenAt: time.Now(), LastSeenAt: time.Now()}
-	if e := store.UpsertIncidentForTenant(nil, "default", inc); e != nil {
+	if e := store.UpsertIncidentForTenant(context.Background(), "default", inc); e != nil {
 		t.Fatal(e)
 	}
 	srv := &Server{cfg: config.Config{ChatOps: config.ChatOpsConfig{DefaultTenant: "default", AllowAcknowledge: true, AllowResolve: true, AllowQuarantine: true, QuarantineDuration: "1d"}}, store: store}
