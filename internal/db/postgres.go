@@ -157,6 +157,15 @@ func valueOf(value *string) string {
 	return *value
 }
 
+func parsePostgresInt(value *string, field string) (int, error) {
+	raw := strings.TrimSpace(valueOf(value))
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse postgres %s %q: %w", field, raw, err)
+	}
+	return n, nil
+}
+
 func (p *PostgresBackend) CompleteJob(ctx context.Context, id int64) error {
 	return p.exec(ctx, `UPDATE ciradar_jobs SET status='done',locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=`+strconv.FormatInt(id, 10))
 }
@@ -247,11 +256,26 @@ func (p *PostgresBackend) CorrelationForTenant(ctx context.Context, tenantID, fi
 	if err != nil {
 		return CorrelationStats{}, err
 	}
-	occurrences, _ := strconv.Atoi(valueOf(row[0]))
-	repositories, _ := strconv.Atoi(valueOf(row[1]))
-	organizations, _ := strconv.Atoi(valueOf(row[2]))
-	repositorySeen, _ := strconv.Atoi(valueOf(row[3]))
-	organizationSeen, _ := strconv.Atoi(valueOf(row[4]))
+	occurrences, err := parsePostgresInt(row[0], "correlation occurrence count")
+	if err != nil {
+		return CorrelationStats{}, err
+	}
+	repositories, err := parsePostgresInt(row[1], "correlation repository count")
+	if err != nil {
+		return CorrelationStats{}, err
+	}
+	organizations, err := parsePostgresInt(row[2], "correlation organization count")
+	if err != nil {
+		return CorrelationStats{}, err
+	}
+	repositorySeen, err := parsePostgresInt(row[3], "correlation repository membership")
+	if err != nil {
+		return CorrelationStats{}, err
+	}
+	organizationSeen, err := parsePostgresInt(row[4], "correlation organization membership")
+	if err != nil {
+		return CorrelationStats{}, err
+	}
 	if repository != "" || organization != "" {
 		occurrences++
 	}
@@ -522,8 +546,13 @@ func (p *PostgresBackend) StatsForTenant(ctx context.Context, tenantID string) (
 	if err != nil {
 		return Stats{}, err
 	}
-	if row, e := requireRow(rows, 1); e == nil {
-		stats.QueuedJobs, _ = strconv.Atoi(valueOf(row[0]))
+	row, err := requireRow(rows, 1)
+	if err != nil {
+		return Stats{}, err
+	}
+	stats.QueuedJobs, err = parsePostgresInt(row[0], "queued job count")
+	if err != nil {
+		return Stats{}, err
 	}
 	return stats, nil
 }

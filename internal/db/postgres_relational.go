@@ -227,7 +227,10 @@ func (p *PostgresBackend) migrateLegacyState(ctx context.Context, c *pgwire.Clie
 	if err != nil {
 		return err
 	}
-	count, _ := strconv.Atoi(valueOf(countRow[0]))
+	count, err := parsePostgresInt(countRow[0], "legacy object count")
+	if err != nil {
+		return err
+	}
 	if count > 0 {
 		return nil
 	}

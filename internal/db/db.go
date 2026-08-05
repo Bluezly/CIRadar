@@ -263,11 +263,14 @@ func (s *Store) Close() error {
 	if s.closed {
 		return nil
 	}
+	if err := s.persistLocked(); err != nil {
+		return err
+	}
 	s.closed = true
-	return s.persistLocked()
+	return nil
 }
 func (s *Store) Migrate(context.Context) error { return nil }
-func (s *Store) persistLocked() error {
+func (s *Store) persistLocked() (returnErr error) {
 	if s.path == "" {
 		return nil
 	}
@@ -276,6 +279,11 @@ func (s *Store) persistLocked() error {
 		return err
 	}
 	tmp := s.path + ".tmp"
+	defer func() {
+		if returnErr != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -292,15 +300,73 @@ func (s *Store) persistLocked() error {
 		return err
 	}
 	if current, err := os.ReadFile(s.path); err == nil && len(current) > 0 {
-		_ = os.WriteFile(s.path+".bak", current, 0o600)
+		backupTemp := s.path + ".bak.tmp"
+		if err := writeSyncedFile(backupTemp, current, 0o600); err != nil {
+			_ = os.Remove(backupTemp)
+			return fmt.Errorf("write state backup: %w", err)
+		}
+		if err := replacePersistedFile(backupTemp, s.path+".bak"); err != nil {
+			_ = os.Remove(backupTemp)
+			return fmt.Errorf("install state backup: %w", err)
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read current state for backup: %w", err)
 	}
-	if runtimeWindows() {
-		_ = os.Remove(s.path)
+	if err := replacePersistedFile(tmp, s.path); err != nil {
+		return fmt.Errorf("install persisted state: %w", err)
 	}
-	return os.Rename(tmp, s.path)
+	return nil
 }
 
 func runtimeWindows() bool { return filepath.Separator == '\\' }
+
+func writeSyncedFile(path string, body []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(body); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func replacePersistedFile(tempPath, targetPath string) error {
+	if !runtimeWindows() {
+		return os.Rename(tempPath, targetPath)
+	}
+	return replaceFileWithRollback(tempPath, targetPath)
+}
+
+func replaceFileWithRollback(tempPath, targetPath string) error {
+	if _, err := os.Lstat(targetPath); errors.Is(err, os.ErrNotExist) {
+		return os.Rename(tempPath, targetPath)
+	} else if err != nil {
+		return err
+	}
+	rollbackPath := targetPath + ".replace-old"
+	if err := os.Remove(rollbackPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(targetPath, rollbackPath); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		if rollbackErr := os.Rename(rollbackPath, targetPath); rollbackErr != nil {
+			return fmt.Errorf("replace failed: %v; rollback failed: %w", err, rollbackErr)
+		}
+		return err
+	}
+	if err := os.Remove(rollbackPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("replacement succeeded but rollback cleanup failed: %w", err)
+	}
+	return nil
+}
 
 func normalizeTenant(v string) string {
 	v = strings.TrimSpace(strings.ToLower(v))
