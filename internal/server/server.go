@@ -1426,9 +1426,11 @@ func (s *Server) providerIncident(ctx context.Context, provider string) bool {
 	return false
 }
 func (s *Server) maybeIncident(ctx context.Context, tenantID, repository string, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
-	repos := c.Repositories + 1
-	orgs := c.Organizations + 1
-	occ := c.Occurrences + 1
+	// CorrelationForTenant already includes the candidate analysis represented by r.
+	// Adding one here would double-count the current failure and trigger thresholds early.
+	repos := c.Repositories
+	orgs := c.Organizations
+	occ := c.Occurrences
 	if !r.ProviderIncident && repos < s.cfg.IncidentRepoThreshold && orgs < s.cfg.IncidentOrgThreshold {
 		return nil, false, nil
 	}
