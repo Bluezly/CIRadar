@@ -178,7 +178,11 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	body, err := readLimitedResponseBody(resp.Body, 2<<20)
+	if err != nil {
+		http.Error(w, "OIDC token response could not be read", http.StatusBadGateway)
+		return
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		http.Error(w, "OIDC token exchange rejected", http.StatusUnauthorized)
 		return
@@ -310,6 +314,20 @@ func (m *Manager) clearFlow(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: m.cfg.CookieName + "_oidc", Value: "", Path: "/auth", MaxAge: -1, HttpOnly: true, Secure: m.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
 }
 
+func readLimitedResponseBody(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, errors.New("response body limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("response body exceeds %d bytes", max)
+	}
+	return body, nil
+}
+
 func (m *Manager) getDiscovery(ctx context.Context) (discovery, error) {
 	m.mu.Lock()
 	if m.discovery.Issuer != "" && time.Since(m.discAt) < time.Hour {
@@ -331,8 +349,12 @@ func (m *Manager) getDiscovery(ctx context.Context) (discovery, error) {
 	if resp.StatusCode != http.StatusOK {
 		return discovery{}, fmt.Errorf("OIDC discovery HTTP %d", resp.StatusCode)
 	}
+	body, err := readLimitedResponseBody(resp.Body, 1<<20)
+	if err != nil {
+		return discovery{}, err
+	}
 	var d discovery
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&d); err != nil {
+	if err := json.Unmarshal(body, &d); err != nil {
 		return discovery{}, err
 	}
 	if d.Issuer == "" || d.AuthorizationEndpoint == "" || d.TokenEndpoint == "" || d.JWKSURI == "" {
@@ -373,10 +395,14 @@ func (m *Manager) getJWKS(ctx context.Context, uri string, force bool) (map[stri
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("JWKS HTTP %d", resp.StatusCode)
 	}
+	body, err := readLimitedResponseBody(resp.Body, 2<<20)
+	if err != nil {
+		return nil, err
+	}
 	var raw struct {
 		Keys []map[string]any `json:"keys"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&raw); err != nil {
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
 	keys := map[string]crypto.PublicKey{}
