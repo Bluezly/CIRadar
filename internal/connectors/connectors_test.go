@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"io"
 	"net/http"
@@ -37,6 +38,49 @@ func TestWebhookSignatures(t *testing.T) {
 	h = http.Header{"X-Gitlab-Token": []string{"secret"}}
 	if !VerifyWebhook("gitlab", "secret", h, body, now) {
 		t.Fatal("gitlab token")
+	}
+}
+
+func TestGitLabStandardWebhookRejectsReplay(t *testing.T) {
+	body := []byte(`{"object_kind":"build"}`)
+	now := time.Now().UTC().Truncate(time.Second)
+	key := []byte("a sufficiently random webhook key")
+	secret := "whsec_" + base64.StdEncoding.EncodeToString(key)
+
+	signedHeaders := func(id string, timestamp time.Time) http.Header {
+		ts := formatInt(timestamp.Unix())
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(id + "." + ts + "." + string(body)))
+		return http.Header{
+			"Webhook-Id":        []string{id},
+			"Webhook-Timestamp": []string{ts},
+			"Webhook-Signature": []string{"v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))},
+		}
+	}
+
+	if !VerifyWebhook("gitlab", secret, signedHeaders("delivery-1", now), body, now) {
+		t.Fatal("current signed webhook should be accepted")
+	}
+	if VerifyWebhook("gitlab", secret, signedHeaders("delivery-2", now.Add(-10*time.Minute)), body, now) {
+		t.Fatal("stale signed webhook should be rejected")
+	}
+	if VerifyWebhook("gitlab", secret, signedHeaders("delivery-3", now.Add(10*time.Minute)), body, now) {
+		t.Fatal("far-future signed webhook should be rejected")
+	}
+	if VerifyWebhook("gitlab", secret, signedHeaders("delivery-extreme", time.Unix(1<<62, 0)), body, now) {
+		t.Fatal("extreme future timestamp should be rejected")
+	}
+
+	missingID := signedHeaders("delivery-4", now)
+	missingID.Del("Webhook-Id")
+	if VerifyWebhook("gitlab", secret, missingID, body, now) {
+		t.Fatal("signed webhook without delivery ID should be rejected")
+	}
+
+	malformedTimestamp := signedHeaders("delivery-5", now)
+	malformedTimestamp.Set("Webhook-Timestamp", "not-a-timestamp")
+	if VerifyWebhook("gitlab", secret, malformedTimestamp, body, now) {
+		t.Fatal("signed webhook with malformed timestamp should be rejected")
 	}
 }
 func TestParseProviderPayloads(t *testing.T) {
@@ -122,10 +166,10 @@ func TestFetchLogs(t *testing.T) {
 		ev   model.CIEvent
 		want string
 	}{
-		{config.CIConnector{Provider: "gitlab", BaseURL: ts.URL, Token: "tok"}, model.CIEvent{ProjectID: "7", JobID: "42"}, "ECONNRESET"},
-		{config.CIConnector{Provider: "buildkite", BaseURL: ts.URL, Token: "tok"}, model.CIEvent{Metadata: map[string]string{"organization": "acme", "pipeline_slug": "api", "build_number": "3", "job_uuid": "j1"}}, "lost communication"},
-		{config.CIConnector{Provider: "circleci", BaseURL: ts.URL, Token: "tok"}, model.CIEvent{Metadata: map[string]string{"project_slug": "gh/acme/api", "job_number": "12"}}, "test failed"},
-		{config.CIConnector{Provider: "jenkins", BaseURL: ts.URL}, model.CIEvent{Metadata: map[string]string{"build_url": ts.URL + "/job/api/5/"}}, "No space"},
+		{config.CIConnector{Provider: "gitlab", BaseURL: ts.URL, AllowPrivateNetwork: true, Token: "tok"}, model.CIEvent{ProjectID: "7", JobID: "42"}, "ECONNRESET"},
+		{config.CIConnector{Provider: "buildkite", BaseURL: ts.URL, AllowPrivateNetwork: true, Token: "tok"}, model.CIEvent{Metadata: map[string]string{"organization": "acme", "pipeline_slug": "api", "build_number": "3", "job_uuid": "j1"}}, "lost communication"},
+		{config.CIConnector{Provider: "circleci", BaseURL: ts.URL, AllowPrivateNetwork: true, Token: "tok"}, model.CIEvent{Metadata: map[string]string{"project_slug": "gh/acme/api", "job_number": "12"}}, "test failed"},
+		{config.CIConnector{Provider: "jenkins", BaseURL: ts.URL, AllowPrivateNetwork: true}, model.CIEvent{Metadata: map[string]string{"build_url": ts.URL + "/job/api/5/"}}, "No space"},
 	}
 	for _, tc := range cases {
 		got, err := FetchLog(context.Background(), tc.co, tc.ev, 1<<20)
@@ -180,7 +224,7 @@ func TestUpsertGitLabMRCommentCreatesThenUpdates(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	co := config.CIConnector{Provider: "gitlab", BaseURL: srv.URL, Token: "token"}
+	co := config.CIConnector{Provider: "gitlab", BaseURL: srv.URL, AllowPrivateNetwork: true, Token: "token"}
 	ev := model.CIEvent{Provider: "gitlab", ProjectID: "12", MergeRequestIID: 3}
 	if err := UpsertGitLabMRComment(context.Background(), co, ev, "<!-- ci-radar-diagnosis -->", "new", true); err != nil {
 		t.Fatal(err)
@@ -273,6 +317,7 @@ func TestRetryKnownProviders(t *testing.T) {
 			co := tc.co
 			co.Provider = tc.provider
 			co.BaseURL = srv.URL
+			co.AllowPrivateNetwork = true
 			co.Token = "tok"
 			result, err := Retry(context.Background(), co, tc.ev)
 			if err != nil || result.HTTPStatus != http.StatusAccepted || result.RequestID != "r1" {
@@ -289,7 +334,7 @@ func TestRetryCustomEndpointStaysOnConfiguredBase(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
-	co := config.CIConnector{Provider: "jenkins", BaseURL: srv.URL, Token: "tok", Username: "ci", RetryURL: srv.URL + "/job/${job_id}/rebuild", RetryBody: `{"run":"${run_id}"}`}
+	co := config.CIConnector{Provider: "jenkins", BaseURL: srv.URL, AllowPrivateNetwork: true, Token: "tok", Username: "ci", RetryURL: srv.URL + "/job/${job_id}/rebuild", RetryBody: `{"run":"${run_id}"}`}
 	_, err := Retry(context.Background(), co, model.CIEvent{JobID: "22", RunID: 9})
 	if err != nil || got != "/job/22/rebuild" {
 		t.Fatalf("got=%q err=%v", got, err)
@@ -297,5 +342,43 @@ func TestRetryCustomEndpointStaysOnConfiguredBase(t *testing.T) {
 	co.RetryURL = "https://attacker.invalid/retry"
 	if _, err := Retry(context.Background(), co, model.CIEvent{}); err == nil {
 		t.Fatal("expected off-base retry endpoint rejection")
+	}
+}
+
+func TestFetchLogBlocksPrivateNetworkByDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("secret internal log"))
+	}))
+	defer srv.Close()
+	co := config.CIConnector{Provider: "gitlab", BaseURL: srv.URL, Token: "tok"}
+	_, err := FetchLog(context.Background(), co, model.CIEvent{ProjectID: "7", JobID: "42"}, 1024)
+	if err == nil || !strings.Contains(err.Error(), "not public") {
+		t.Fatalf("private connector endpoint was not blocked: %v", err)
+	}
+}
+
+func TestSameBaseRequiresPathBoundary(t *testing.T) {
+	if sameBase("https://ci.example/gitlab", "https://ci.example/gitlab-evil/jobs/1") {
+		t.Fatal("prefix-confusable path was accepted")
+	}
+	if !sameBase("https://ci.example/gitlab", "https://ci.example/gitlab/jobs/1") {
+		t.Fatal("child path was rejected")
+	}
+	if !sameBase("https://ci.example/gitlab", "https://ci.example:443/gitlab/jobs/1") {
+		t.Fatal("equivalent default HTTPS port was rejected")
+	}
+	for _, endpoint := range []string{
+		"https://user@ci.example/gitlab/jobs/1",
+		"http://ci.example/gitlab/jobs/1",
+		"https://ci.example:444/gitlab/jobs/1",
+		"https://ci.example/gitlab/%2e%2e/admin",
+		"https://ci.example/gitlab/%2E%2E/admin",
+		"https://ci.example/gitlab/%252e%252e/admin",
+		"https://ci.example/gitlab/%25252e%25252e/admin",
+		"https://ci.example/gitlab\\..\\admin",
+	} {
+		if sameBase("https://ci.example/gitlab", endpoint) {
+			t.Fatalf("encoded path traversal was accepted: %s", endpoint)
+		}
 	}
 }
