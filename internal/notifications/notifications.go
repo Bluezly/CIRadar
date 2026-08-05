@@ -56,7 +56,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev model.NotificationEvent) e
 	var retryable []error
 	routedChannels := append([]string(nil), ev.TargetChannels...)
 	if ev.Repository != "" {
-		if profile, _ := d.store.GetRepositoryProfile(ctx, ev.TenantID, ev.Repository); profile != nil {
+		profile, err := d.store.GetRepositoryProfile(ctx, ev.TenantID, ev.Repository)
+		if err != nil {
+			return fmt.Errorf("load repository notification profile: %w", err)
+		}
+		if profile != nil {
 			if len(routedChannels) == 0 {
 				routedChannels = profile.NotificationChannels
 			}
@@ -137,7 +141,10 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 		return d.recordFailure(ctx, ch, ev, attempt, 0, sanitizeError(err, ch, endpoint), false)
 	}
 	defer resp.Body.Close()
-	limited, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	limited, err := readResponseSnippet(resp.Body, 8<<10)
+	if err != nil {
+		return d.recordFailure(ctx, ch, ev, attempt, resp.StatusCode, sanitizeError(fmt.Errorf("read HTTP response: %w", err), ch, endpoint), false)
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if ch.Type == "telegram" {
 			var result struct {
@@ -163,6 +170,20 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 		}
 	}
 	return d.recordFailure(ctx, ch, ev, attempt, resp.StatusCode, msg, permanent)
+}
+
+func readResponseSnippet(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, errors.New("response body limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		body = body[:max]
+	}
+	return body, nil
 }
 
 func (d *Dispatcher) recordFailure(ctx context.Context, ch config.NotificationChannel, ev model.NotificationEvent, attempts, code int, err error, permanent bool) error {
