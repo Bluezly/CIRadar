@@ -204,7 +204,10 @@ func (c *Client) DownloadJobLog(ctx context.Context, installationID int64, owner
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		b, readErr := readLimitedBody(resp.Body, 1<<20)
+		if readErr != nil {
+			return "", fmt.Errorf("GitHub logs API %s: read error response: %w", resp.Status, readErr)
+		}
 		return "", fmt.Errorf("GitHub logs API %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	if maxBytes <= 0 {
@@ -284,17 +287,40 @@ func (c *Client) doJSON(ctx context.Context, method, path, token string, body an
 		return err
 	}
 	defer resp.Body.Close()
+	responseBody, readErr := readLimitedBody(resp.Body, 8<<20)
+	if readErr != nil {
+		return fmt.Errorf("GitHub API %s %s: read response: %w", method, path, readErr)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		return fmt.Errorf("GitHub API %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(b)))
+		if len(responseBody) > 2<<20 {
+			responseBody = responseBody[:2<<20]
+		}
+		return fmt.Errorf("GitHub API %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(responseBody)))
 	}
 	if out == nil {
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil && err != io.EOF {
+	if len(responseBody) == 0 {
+		return errors.New("GitHub API returned an empty JSON response")
+	}
+	if err := json.Unmarshal(responseBody, out); err != nil {
 		return err
 	}
 	return nil
+}
+
+func readLimitedBody(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, errors.New("response body limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("response body exceeds %d bytes", max)
+	}
+	return body, nil
 }
 
 func setHeaders(req *http.Request, token string) {
