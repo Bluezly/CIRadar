@@ -3,6 +3,7 @@ package similarity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -73,7 +74,7 @@ func TestRemoteEmbeddingsAndCache(t *testing.T) {
 	}))
 	defer server.Close()
 	semantic := config.SemanticConfig{Enabled: true, RemoteEmbeddings: true, VectorDimensions: 128, CandidateLimit: 100}
-	llmConfig := config.LLMConfig{EmbeddingsEndpoint: server.URL, APIKey: "key", EmbeddingModel: "test", Timeout: time.Second}
+	llmConfig := config.LLMConfig{EmbeddingsEndpoint: server.URL, AllowPrivateNetwork: true, APIKey: "key", EmbeddingModel: "test", Timeout: time.Second}
 	out, err := FindConfigured(ctx, store, "default", "a", 10, semantic, llmConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -86,5 +87,46 @@ func TestRemoteEmbeddingsAndCache(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("embedding requests=%d", requests)
+	}
+}
+
+func TestConfiguredSimilarityRejectsMissingAnalysis(t *testing.T) {
+	store, err := db.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	semantic := config.SemanticConfig{Enabled: true, RemoteEmbeddings: true, CandidateLimit: 10}
+	llmConfig := config.LLMConfig{EmbeddingsEndpoint: "https://embeddings.example/v1", APIKey: "key", EmbeddingModel: "test"}
+	if _, err := FindConfigured(context.Background(), store, "default", "missing", 10, semantic, llmConfig); !errors.Is(err, ErrAnalysisNotFound) {
+		t.Fatalf("missing analysis error=%v", err)
+	}
+}
+
+type failingEmbeddingCacheStore struct {
+	db.Backend
+	err error
+}
+
+func (s failingEmbeddingCacheStore) GetObject(context.Context, string, string, string, any) (bool, error) {
+	return false, s.err
+}
+
+func TestConfiguredSimilarityPropagatesCacheReadFailure(t *testing.T) {
+	store, err := db.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	analysis := model.AnalysisResult{ID: "a", TenantID: "default", Repository: "acme/api", Summary: "failure", CreatedAt: time.Now()}
+	if err := store.RecordAnalysisForTenant(context.Background(), "default", model.AnalysisInput{TenantID: "default", Repository: "acme/api"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("embedding cache unavailable")
+	semantic := config.SemanticConfig{Enabled: true, Mode: "remote", CandidateLimit: 10}
+	llmConfig := config.LLMConfig{EmbeddingsEndpoint: "https://embeddings.example/v1", APIKey: "key", EmbeddingModel: "test"}
+	_, err = FindConfigured(context.Background(), failingEmbeddingCacheStore{Backend: store, err: sentinel}, "default", "a", 10, semantic, llmConfig)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("cache read error=%v", err)
 	}
 }
