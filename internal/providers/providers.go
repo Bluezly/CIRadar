@@ -100,12 +100,19 @@ func (p *Poller) fetch(ctx context.Context, ep Endpoint) (model.ProviderStatus, 
 		return model.ProviderStatus{}, err
 	}
 	defer resp.Body.Close()
+	bodyBytes, err := readProviderBody(resp.Body, 1<<20)
+	if err != nil {
+		return model.ProviderStatus{}, fmt.Errorf("read provider status response: %w", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return model.ProviderStatus{}, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(b)))
+		message := bodyBytes
+		if len(message) > 2048 {
+			message = message[:2048]
+		}
+		return model.ProviderStatus{}, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(message)))
 	}
 	var body summaryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
 		return model.ProviderStatus{}, err
 	}
 
@@ -155,6 +162,20 @@ func (p *Poller) fetch(ctx context.Context, ep Endpoint) (model.ProviderStatus, 
 		CheckedAt:   time.Now().UTC(),
 		Source:      ep.URL,
 	}, nil
+}
+
+func readProviderBody(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, fmt.Errorf("provider response body limit must be positive")
+	}
+	body, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("provider response body exceeds %d bytes", max)
+	}
+	return body, nil
 }
 
 func statusRank(status string) int {
