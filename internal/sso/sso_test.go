@@ -1,6 +1,7 @@
 package sso
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -23,7 +24,7 @@ import (
 )
 
 func TestProxyPrincipal(t *testing.T) {
-	m, e := New(config.SSOConfig{Enabled: true, Mode: "saml_proxy", TrustedProxyCIDRs: []string{"127.0.0.0/8"}, ProxySecretHeader: "X-Secret", ProxySecret: "secret", ProxySubjectHeader: "X-User", ProxyEmailHeader: "X-Email", ProxyNameHeader: "X-Name", ProxyTenantHeader: "X-Tenant", ProxyRoleHeader: "X-Role", DefaultTenant: "default", DefaultRole: "viewer", SessionSecret: "01234567890123456789012345678901", CookieName: "session"})
+	m, e := New(config.SSOConfig{Enabled: true, Mode: "saml_proxy", TrustedProxyCIDRs: []string{"127.0.0.0/8"}, ProxySecretHeader: "X-Secret", ProxySecret: "secret", ProxySubjectHeader: "X-User", ProxyEmailHeader: "X-Email", ProxyNameHeader: "X-Name", ProxyTenantHeader: "X-Tenant", ProxyRoleHeader: "X-Role", DefaultTenant: "default", DefaultRole: "viewer", SessionSecret: "01234567890123456789012345678901", AllowPrivateNetwork: true, CookieName: "session"})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -44,7 +45,7 @@ func TestIdentityClaims(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	id, e := m.identityFromClaims(map[string]any{"sub": "1", "email": "a@example.com", "tenant": "acme", "role": "viewer", "groups": []any{"admins"}})
+	id, e := m.identityFromClaims(map[string]any{"sub": "1", "email": "a@example.com", "email_verified": true, "tenant": "acme", "role": "viewer", "groups": []any{"admins"}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -73,7 +74,7 @@ func TestOIDCAuthorizationCodePKCEFlow(t *testing.T) {
 			_ = r.ParseForm()
 			sawVerifier = r.Form.Get("code_verifier") != ""
 			header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "test", "typ": "JWT"})
-			claims, _ := json.Marshal(map[string]any{"iss": issuer.URL, "aud": "ciradar", "sub": "alice", "email": "alice@example.com", "tenant_id": "acme", "role": "operator", "nonce": expectedNonce, "exp": time.Now().Add(time.Hour).Unix()})
+			claims, _ := json.Marshal(map[string]any{"iss": issuer.URL, "aud": "ciradar", "sub": "alice", "email": "alice@example.com", "email_verified": true, "tenant_id": "acme", "role": "operator", "nonce": expectedNonce, "exp": time.Now().Add(time.Hour).Unix()})
 			h := base64.RawURLEncoding.EncodeToString(header)
 			c := base64.RawURLEncoding.EncodeToString(claims)
 			digest := sha256.Sum256([]byte(h + "." + c))
@@ -84,7 +85,7 @@ func TestOIDCAuthorizationCodePKCEFlow(t *testing.T) {
 		}
 	}))
 	defer issuer.Close()
-	m, err := New(config.SSOConfig{Enabled: true, Mode: "oidc", IssuerURL: issuer.URL, ClientID: "ciradar", RedirectURL: "http://ciradar.example/auth/callback", Scopes: []string{"openid", "email"}, AllowedDomains: []string{"example.com"}, TenantClaim: "tenant_id", RoleClaim: "role", GroupsClaim: "groups", DefaultTenant: "default", DefaultRole: "viewer", SessionSecret: "01234567890123456789012345678901", CookieName: "ciradar_session"})
+	m, err := New(config.SSOConfig{Enabled: true, Mode: "oidc", IssuerURL: issuer.URL, ClientID: "ciradar", RedirectURL: "http://ciradar.example/auth/callback", Scopes: []string{"openid", "email"}, AllowedDomains: []string{"example.com"}, TenantClaim: "tenant_id", RoleClaim: "role", GroupsClaim: "groups", DefaultTenant: "default", DefaultRole: "viewer", SessionSecret: "01234567890123456789012345678901", AllowPrivateNetwork: true, CookieName: "ciradar_session"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +150,7 @@ func TestNativeSAMLFlow(t *testing.T) {
 	if err := os.WriteFile(xmlsec, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.SSOConfig{Enabled: true, Mode: "saml", SessionSecret: "01234567890123456789012345678901", CookieName: "ciradar_session", SAMLEntityID: "https://ciradar.example/saml", SAMLIdPSSOURL: "https://idp.example/sso", SAMLIdPEntityID: "https://idp.example/metadata", SAMLIdPCertificate: "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", SAMLACSURL: "https://ciradar.example/auth/callback", SAMLXMLSecPath: xmlsec, SAMLEmailAttribute: "email", SAMLNameAttribute: "name", SAMLClockSkew: 2 * time.Minute, TenantClaim: "tenant_id", RoleClaim: "role", GroupsClaim: "groups", DefaultTenant: "default", DefaultRole: "viewer"}
+	cfg := config.SSOConfig{Enabled: true, Mode: "saml", SessionSecret: "01234567890123456789012345678901", AllowPrivateNetwork: true, CookieName: "ciradar_session", SAMLEntityID: "https://ciradar.example/saml", SAMLIdPSSOURL: "https://idp.example/sso", SAMLIdPEntityID: "https://idp.example/metadata", SAMLIdPCertificate: "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", SAMLACSURL: "https://ciradar.example/auth/callback", SAMLXMLSecPath: xmlsec, SAMLEmailAttribute: "email", SAMLNameAttribute: "name", SAMLClockSkew: 2 * time.Minute, TenantClaim: "tenant_id", RoleClaim: "role", GroupsClaim: "groups", DefaultTenant: "default", DefaultRole: "viewer"}
 	manager, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -231,5 +232,130 @@ func TestSAMLMetadata(t *testing.T) {
 	m.SAMLMetadata(rr, req)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `entityID="https://ciradar.example/saml"`) || !strings.Contains(rr.Body.String(), `WantAssertionsSigned="true"`) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestOIDCBlocksPrivateIssuerByDefault(t *testing.T) {
+	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer":                 "https://issuer.example",
+			"authorization_endpoint": "https://issuer.example/authorize",
+			"token_endpoint":         "https://issuer.example/token",
+			"jwks_uri":               "https://issuer.example/jwks",
+		})
+	}))
+	defer issuer.Close()
+	m, err := New(config.SSOConfig{Enabled: true, Mode: "oidc", IssuerURL: issuer.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.getDiscovery(context.Background()); err == nil || !strings.Contains(err.Error(), "not public") {
+		t.Fatalf("private issuer was not blocked: %v", err)
+	}
+}
+
+func TestOIDCDiscoveryIssuerMustMatchConfiguration(t *testing.T) {
+	issuer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"issuer":                 "https://attacker.example",
+			"authorization_endpoint": "https://attacker.example/authorize",
+			"token_endpoint":         "https://attacker.example/token",
+			"jwks_uri":               "https://attacker.example/jwks",
+		})
+	}))
+	defer issuer.Close()
+	m, err := New(config.SSOConfig{Enabled: true, Mode: "oidc", IssuerURL: issuer.URL, AllowPrivateNetwork: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.getDiscovery(context.Background()); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched issuer was accepted: %v", err)
+	}
+}
+
+func TestSafeReturnToRejectsExternalAndEncodedRedirects(t *testing.T) {
+	for _, value := range []string{
+		"https://evil.example/",
+		"//evil.example/path",
+		"/\\evil.example/path",
+		"/%2f%2fevil.example/path",
+		"/%252f%252fevil.example/path",
+		"/ok\r\nLocation: https://evil.example/",
+	} {
+		if got := safeReturnTo(value); got != "/" {
+			t.Errorf("safeReturnTo(%q)=%q, want /", value, got)
+		}
+	}
+	for _, value := range []string{"/", "/dashboard", "/incidents?id=123"} {
+		if got := safeReturnTo(value); got != value {
+			t.Errorf("safeReturnTo(%q)=%q", value, got)
+		}
+	}
+}
+
+func TestIdentityClaimsRequireStableSubjectAndVerifiedEmail(t *testing.T) {
+	m, err := New(config.SSOConfig{Enabled: true, Mode: "oidc", AllowedDomains: []string{"example.com"}, DefaultTenant: "default", DefaultRole: "viewer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.identityFromClaims(map[string]any{"email": "a@example.com"}); err == nil || !strings.Contains(err.Error(), "subject") {
+		t.Fatalf("identity without sub accepted: %v", err)
+	}
+	if _, err := m.identityFromClaims(map[string]any{"sub": "alice", "email": "a@example.com", "email_verified": false}); err == nil || !strings.Contains(err.Error(), "not verified") {
+		t.Fatalf("unverified email accepted: %v", err)
+	}
+	if _, err := m.identityFromClaims(map[string]any{"sub": "alice", "email": "a@example.com", "email_verified": "false"}); err == nil || !strings.Contains(err.Error(), "not verified") {
+		t.Fatalf("malformed email verification claim accepted: %v", err)
+	}
+	if _, err := m.identityFromClaims(map[string]any{"sub": "alice", "email": "a@example.com"}); err == nil || !strings.Contains(err.Error(), "verified email") {
+		t.Fatalf("unverified domain-gated email accepted: %v", err)
+	}
+	if _, err := m.identityFromClaims(map[string]any{"sub": "alice", "preferred_username": "a@example.com", "email_verified": true}); err == nil || !strings.Contains(err.Error(), "verified email") {
+		t.Fatalf("preferred_username bypassed allowed_domains: %v", err)
+	}
+	if _, err := m.identityFromClaims(map[string]any{"sub": "alice", "email": "a@example.com", "email_verified": true}); err != nil {
+		t.Fatalf("verified identity rejected: %v", err)
+	}
+}
+
+func TestOIDCMultipleAudiencesRequireAuthorizedParty(t *testing.T) {
+	audiences := []any{"ciradar", "another-client"}
+	if validAudienceClaims(audiences, "", "ciradar") {
+		t.Fatal("multiple audiences accepted without azp")
+	}
+	if validAudienceClaims(audiences, "another-client", "ciradar") {
+		t.Fatal("multiple audiences accepted with mismatched azp")
+	}
+	if !validAudienceClaims(audiences, "ciradar", "ciradar") {
+		t.Fatal("matching azp was rejected")
+	}
+	if !validAudienceClaims("ciradar", "", "ciradar") {
+		t.Fatal("single matching audience was rejected")
+	}
+	if validAudienceClaims("ciradar", "another-client", "ciradar") {
+		t.Fatal("single audience accepted with mismatched azp")
+	}
+	if validAudienceClaims([]any{"ciradar", 7}, "ciradar", "ciradar") {
+		t.Fatal("malformed audience array was accepted")
+	}
+}
+
+func TestParseJWKRejectsWeakAndInvalidKeys(t *testing.T) {
+	weakRSA := map[string]any{
+		"kty": "RSA",
+		"n":   base64.RawURLEncoding.EncodeToString(big.NewInt(17).Bytes()),
+		"e":   base64.RawURLEncoding.EncodeToString([]byte{3}),
+	}
+	if _, err := parseJWK(weakRSA); err == nil {
+		t.Fatal("weak RSA JWK accepted")
+	}
+	invalidEC := map[string]any{
+		"kty": "EC",
+		"crv": "P-256",
+		"x":   base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		"y":   base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	}
+	if _, err := parseJWK(invalidEC); err == nil {
+		t.Fatal("off-curve EC JWK accepted")
 	}
 }
