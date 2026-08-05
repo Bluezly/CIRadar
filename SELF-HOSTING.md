@@ -16,6 +16,8 @@ load balancer or reverse proxy
 - trust only exact load-balancer networks in `trusted_proxy_cidrs`
 - use PostgreSQL `sslmode=verify-full` and the expected CA
 - use environment references or encrypted configuration values for secrets
+- generate `CIRADAR_MASTER_KEY` with `ciradar secret key`; do not use a human passphrase
+- set a dedicated persistent `CIRADAR_DASHBOARD_SESSION_SECRET` on every replica
 - enable OIDC or native SAML and secure cookies
 - install `xmlsec1` on every replica when native SAML is enabled
 - keep raw logs off unless retention and access policy are explicit
@@ -24,8 +26,21 @@ load balancer or reverse proxy
 - monitor `/readyz`, `/metrics`, queue age, database latency, and failed notifications
 - set `source_url` to the corresponding AGPL source revision
 - validate every enabled CI connector against a non-production repository
+- leave `allow_private_network` false for public webhooks and providers; enable it only on the exact integration that must reach a trusted internal SMTP, Jenkins, TeamCity, OIDC, or webhook endpoint
 
 The embedded backend is intended for evaluation and small single-process use.
+
+## Outbound network policy
+
+Notification webhooks, SMTP, CI connectors, provider-status polling, GitHub API, LLM/embedding endpoints, and OIDC discovery/token/JWKS requests reject private, loopback, link-local, metadata-service, multicast, unspecified, and other reserved address ranges by default. DNS answers and redirects are checked at request time. Secret-bearing and write requests refuse cross-origin redirects. Read-only CI log downloads may follow a public cross-origin redirect only after CI Radar removes authorization, cookie, webhook, and custom headers.
+
+Set `allow_private_network: true` only inside the specific notification channel, connector, or SSO block that must reach a trusted internal service. This opt-in disables address-range blocking for that integration; it does not allow non-HTTP schemes or URL-embedded credentials. Guarded outbound HTTP clients deliberately ignore `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; route them explicitly at the network layer when an egress proxy is mandatory.
+
+## Secret migration
+
+Generated 32-byte CI Radar master keys continue to decrypt existing `enc:v1:` values. A legacy human passphrase used directly as `CIRADAR_MASTER_KEY` is now rejected. Before upgrading such an installation, use the prior release to decrypt the values, generate a new key with `ciradar secret key`, and encrypt the plaintext values again.
+
+Older configurations that relied on `admin_token`, `fingerprint_hmac_key`, or `master_key` as an implicit dashboard session key no longer do so. The service now refuses to load a configuration without a dedicated `dashboard_session_secret`; set the same persistent value on every replica before upgrading.
 
 ## Multi-platform binaries
 

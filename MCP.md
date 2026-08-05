@@ -22,7 +22,7 @@ stdout is reserved for JSON-RPC messages.
 - protocol versions are validated
 - server notifications are emitted to active sessions
 
-CI Radar publishes OAuth protected-resource and authorization-server metadata, dynamic client registration, Authorization Code with PKCE, token issuance, and token revocation for MCP clients.
+CI Radar publishes OAuth protected-resource and authorization-server metadata, dynamic client registration, Authorization Code with PKCE, explicit user consent, token issuance, and token revocation for MCP clients. The authorization endpoint displays the client name, redirect destination, tenant, and requested scopes; a same-origin POST approval is required before a code is issued.
 
 ## Read tools
 

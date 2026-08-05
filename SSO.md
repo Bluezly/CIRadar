@@ -6,6 +6,8 @@ CI Radar supports native OIDC, native SAML 2.0 SP mode, and a trusted identity-p
 
 OIDC uses Authorization Code with PKCE, discovery, rotating JWKS, issuer and audience checks, nonce validation, domain allowlists, and group-to-role mapping.
 
+Discovery, token, and JWKS requests reject non-public network destinations by default. Set `allow_private_network: true` in the SSO block only when the IdP is intentionally hosted on a trusted internal network. Discovery must return the configured issuer, and login return paths remain local to CI Radar even when encoded more than once.
+
 ```json
 {
   "sso": {
@@ -16,6 +18,7 @@ OIDC uses Authorization Code with PKCE, discovery, rotating JWKS, issuer and aud
     "client_secret": "env:CIRADAR_SSO_CLIENT_SECRET",
     "redirect_url": "https://ci-radar.example.com/auth/callback",
     "session_secret": "env:CIRADAR_SSO_SESSION_SECRET",
+    "allow_private_network": false,
     "cookie_secure": true,
     "allowed_domains": ["example.com"],
     "admin_groups": ["ci-radar-admins"],

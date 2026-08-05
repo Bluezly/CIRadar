@@ -46,7 +46,9 @@ POST /webhooks/cloudbuild
 
 ## Authentication and SSRF boundary
 
-Each connector has its own token or webhook secret. Provider log and retry requests use the configured provider base URL or a provider-defined host. Arbitrary log URLs from webhook payloads are not fetched unless they match the trusted connector boundary.
+Each connector has its own token or webhook secret. Provider log and retry requests use the configured provider base URL or a provider-defined host. Arbitrary log URLs from webhook payloads are not fetched unless they match the trusted connector boundary. Boundary checks use normalized path segments and reject encoded path traversal and prefix-confusable paths.
+
+Outbound connector requests reject non-public address ranges by default and refuse cross-origin redirects. For an internal Jenkins, TeamCity, GitLab, or adapter endpoint, set `allow_private_network: true` only on that connector after reviewing the target and its DNS. This is an explicit trust override, not a global switch.
 
 Keep connector tokens in environment references or encrypted secret values. Assign each connector to one tenant.
 
