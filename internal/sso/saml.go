@@ -86,8 +86,17 @@ func (m *Manager) SAMLMetadata(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) samlLogin(w http.ResponseWriter, r *http.Request) {
-	requestID := "_" + randomText(24)
-	state := randomText(24)
+	randomID, err := randomText(24)
+	if err != nil {
+		http.Error(w, "SAML request ID creation failed", http.StatusInternalServerError)
+		return
+	}
+	requestID := "_" + randomID
+	state, err := randomText(24)
+	if err != nil {
+		http.Error(w, "SAML state creation failed", http.StatusInternalServerError)
+		return
+	}
 	flow := flowState{State: state, RequestID: requestID, ReturnTo: safeReturnTo(r.URL.Query().Get("return_to")), Expires: time.Now().Add(10 * time.Minute)}
 	if err := m.writeFlow(w, flow); err != nil {
 		http.Error(w, "SAML state creation failed", http.StatusInternalServerError)
@@ -95,9 +104,20 @@ func (m *Manager) samlLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	request := fmt.Sprintf(`<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="%s" Version="2.0" IssueInstant="%s" Destination="%s" AssertionConsumerServiceURL="%s" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"><saml:Issuer>%s</saml:Issuer><samlp:NameIDPolicy AllowCreate="true" Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"/></samlp:AuthnRequest>`, html.EscapeString(requestID), time.Now().UTC().Format(time.RFC3339Nano), html.EscapeString(m.cfg.SAMLIdPSSOURL), html.EscapeString(m.cfg.SAMLACSURL), html.EscapeString(m.cfg.SAMLEntityID))
 	var compressed bytes.Buffer
-	writer, _ := flate.NewWriter(&compressed, flate.DefaultCompression)
-	_, _ = writer.Write([]byte(request))
-	_ = writer.Close()
+	writer, err := flate.NewWriter(&compressed, flate.DefaultCompression)
+	if err != nil {
+		http.Error(w, "SAML request compression failed", http.StatusInternalServerError)
+		return
+	}
+	if _, err := writer.Write([]byte(request)); err != nil {
+		_ = writer.Close()
+		http.Error(w, "SAML request compression failed", http.StatusInternalServerError)
+		return
+	}
+	if err := writer.Close(); err != nil {
+		http.Error(w, "SAML request compression failed", http.StatusInternalServerError)
+		return
+	}
 	q := url.Values{}
 	q.Set("SAMLRequest", base64.StdEncoding.EncodeToString(compressed.Bytes()))
 	q.Set("RelayState", state)
@@ -105,6 +125,7 @@ func (m *Manager) samlLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) samlCallback(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 6<<20)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "invalid SAML form", http.StatusBadRequest)
 		return
@@ -332,6 +353,9 @@ func (m *Manager) parseSAMLIdentity(data []byte, requestID string) (model.SSOIde
 	}
 	email := firstNonEmpty(stringClaim(claims, m.cfg.SAMLEmailAttribute), stringClaim(claims, "email"), strings.TrimSpace(response.Assertion.Subject.NameID))
 	claims["email"] = email
+	// The email attribute is covered by the validated SAML signature. Mark it as
+	// verified so the shared identity policy can safely enforce allowed_domains.
+	claims["email_verified"] = true
 	claims["name"] = firstNonEmpty(stringClaim(claims, m.cfg.SAMLNameAttribute), stringClaim(claims, "name"), email)
 	return m.identityFromClaims(claims)
 }

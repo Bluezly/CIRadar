@@ -7,13 +7,11 @@ import (
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +26,7 @@ import (
 	"time"
 
 	"ciradar/internal/config"
+	"ciradar/internal/httpguard"
 	"ciradar/internal/model"
 )
 
@@ -60,7 +59,7 @@ type Manager struct {
 }
 
 func New(cfg config.SSOConfig) (*Manager, error) {
-	m := &Manager{cfg: cfg, http: &http.Client{Timeout: 20 * time.Second}, jwks: map[string]crypto.PublicKey{}}
+	m := &Manager{cfg: cfg, http: httpguard.NewClient(20*time.Second, cfg.AllowPrivateNetwork), jwks: map[string]crypto.PublicKey{}}
 	for _, raw := range cfg.TrustedProxyCIDRs {
 		_, n, err := net.ParseCIDR(raw)
 		if err != nil {
@@ -93,9 +92,21 @@ func (m *Manager) Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "OIDC discovery failed", http.StatusBadGateway)
 		return
 	}
-	state := randomText(32)
-	nonce := randomText(32)
-	verifier := randomText(48)
+	state, err := randomText(32)
+	if err != nil {
+		http.Error(w, "OIDC state creation failed", http.StatusInternalServerError)
+		return
+	}
+	nonce, err := randomText(32)
+	if err != nil {
+		http.Error(w, "OIDC nonce creation failed", http.StatusInternalServerError)
+		return
+	}
+	verifier, err := randomText(48)
+	if err != nil {
+		http.Error(w, "OIDC verifier creation failed", http.StatusInternalServerError)
+		return
+	}
 	challengeRaw := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(challengeRaw[:])
 	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
@@ -155,7 +166,11 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 	if m.cfg.ClientSecret != "" {
 		form.Set("client_secret", m.cfg.ClientSecret)
 	}
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, d.TokenEndpoint, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, d.TokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		http.Error(w, "OIDC token endpoint is invalid", http.StatusBadGateway)
+		return
+	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := m.http.Do(req)
 	if err != nil {
@@ -304,7 +319,10 @@ func (m *Manager) getDiscovery(ctx context.Context) (discovery, error) {
 	}
 	m.mu.Unlock()
 	endpoint := strings.TrimRight(m.cfg.IssuerURL, "/") + "/.well-known/openid-configuration"
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return discovery{}, err
+	}
 	resp, err := m.http.Do(req)
 	if err != nil {
 		return discovery{}, err
@@ -319,6 +337,14 @@ func (m *Manager) getDiscovery(ctx context.Context) (discovery, error) {
 	}
 	if d.Issuer == "" || d.AuthorizationEndpoint == "" || d.TokenEndpoint == "" || d.JWKSURI == "" {
 		return discovery{}, errors.New("incomplete OIDC discovery document")
+	}
+	if strings.TrimRight(d.Issuer, "/") != strings.TrimRight(m.cfg.IssuerURL, "/") {
+		return discovery{}, errors.New("OIDC discovery issuer does not match configured issuer_url")
+	}
+	for _, raw := range []string{d.AuthorizationEndpoint, d.TokenEndpoint, d.JWKSURI} {
+		if err := httpguard.ValidateURL(raw, m.cfg.AllowPrivateNetwork); err != nil {
+			return discovery{}, fmt.Errorf("invalid OIDC discovery endpoint: %w", err)
+		}
 	}
 	m.mu.Lock()
 	m.discovery = d
@@ -335,7 +361,10 @@ func (m *Manager) getJWKS(ctx context.Context, uri string, force bool) (map[stri
 		return keys, nil
 	}
 	m.mu.Unlock()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := m.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -437,8 +466,8 @@ func (m *Manager) verifyIDToken(ctx context.Context, raw string, d discovery, no
 	if issuer != d.Issuer && issuer != strings.TrimRight(m.cfg.IssuerURL, "/") {
 		return nil, errors.New("JWT issuer mismatch")
 	}
-	if !audienceContains(claims["aud"], m.cfg.ClientID) {
-		return nil, errors.New("JWT audience mismatch")
+	if !validAudienceClaims(claims["aud"], stringClaim(claims, "azp"), m.cfg.ClientID) {
+		return nil, errors.New("JWT audience or authorized party mismatch")
 	}
 	claimNonce, _ := claims["nonce"].(string)
 	if nonce != "" && subtle.ConstantTimeCompare([]byte(claimNonce), []byte(nonce)) != 1 {
@@ -448,15 +477,31 @@ func (m *Manager) verifyIDToken(ctx context.Context, raw string, d discovery, no
 }
 
 func (m *Manager) identityFromClaims(claims map[string]any) (model.SSOIdentity, error) {
-	email := stringClaim(claims, "email")
-	if email == "" {
-		email = stringClaim(claims, "preferred_username")
+	subject := stringClaim(claims, "sub")
+	if subject == "" {
+		return model.SSOIdentity{}, errors.New("identity subject is missing")
+	}
+	emailClaim := stringClaim(claims, "email")
+	verifiedEmail := false
+	if rawVerified, present := claims["email_verified"]; present {
+		verified, ok := rawVerified.(bool)
+		if !ok || !verified {
+			return model.SSOIdentity{}, errors.New("email address is not verified")
+		}
+		verifiedEmail = true
 	}
 	if len(m.cfg.AllowedDomains) > 0 {
-		parts := strings.Split(strings.ToLower(email), "@")
+		if emailClaim == "" || !verifiedEmail {
+			return model.SSOIdentity{}, errors.New("a verified email claim is required for allowed_domains")
+		}
+		parts := strings.Split(strings.ToLower(emailClaim), "@")
 		if len(parts) != 2 || !containsFold(m.cfg.AllowedDomains, parts[1]) {
 			return model.SSOIdentity{}, errors.New("email domain is not allowed")
 		}
+	}
+	email := emailClaim
+	if email == "" {
+		email = stringClaim(claims, "preferred_username")
 	}
 	groups := stringSliceClaim(claims[m.cfg.GroupsClaim])
 	role := parseRole(stringClaim(claims, m.cfg.RoleClaim), m.cfg.DefaultRole)
@@ -468,7 +513,7 @@ func (m *Manager) identityFromClaims(claims map[string]any) (model.SSOIdentity, 
 		role = model.RoleViewer
 	}
 	tenant := cleanTenant(firstNonEmpty(stringClaim(claims, m.cfg.TenantClaim), m.cfg.DefaultTenant))
-	return model.SSOIdentity{Subject: stringClaim(claims, "sub"), Email: email, Name: firstNonEmpty(stringClaim(claims, "name"), email), TenantID: tenant, Role: role, Groups: groups, Issuer: stringClaim(claims, "iss")}, nil
+	return model.SSOIdentity{Subject: subject, Email: email, Name: firstNonEmpty(stringClaim(claims, "name"), email, subject), TenantID: tenant, Role: role, Groups: groups, Issuer: stringClaim(claims, "iss")}, nil
 }
 
 func (m *Manager) writeSession(w http.ResponseWriter, identity model.SSOIdentity, duration time.Duration) error {
@@ -517,11 +562,18 @@ func parseJWK(j map[string]any) (crypto.PublicKey, error) {
 		if err != nil {
 			return nil, err
 		}
+		if len(nBytes) == 0 || len(eBytes) == 0 || len(eBytes) > 4 {
+			return nil, errors.New("invalid RSA JWK")
+		}
 		e := 0
 		for _, b := range eBytes {
 			e = e<<8 + int(b)
 		}
-		return &rsa.PublicKey{N: new(big.Int).SetBytes(nBytes), E: e}, nil
+		n := new(big.Int).SetBytes(nBytes)
+		if n.BitLen() < 2048 || e < 3 || e%2 == 0 {
+			return nil, errors.New("invalid RSA JWK")
+		}
+		return &rsa.PublicKey{N: n, E: e}, nil
 	case "EC":
 		if crv, _ := j["crv"].(string); crv != "P-256" {
 			return nil, errors.New("unsupported EC curve")
@@ -536,7 +588,16 @@ func parseJWK(j map[string]any) (crypto.PublicKey, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(xBytes), Y: new(big.Int).SetBytes(yBytes)}, nil
+		if len(xBytes) != 32 || len(yBytes) != 32 {
+			return nil, errors.New("invalid EC JWK coordinates")
+		}
+		x := new(big.Int).SetBytes(xBytes)
+		y := new(big.Int).SetBytes(yBytes)
+		curve := elliptic.P256()
+		if !curve.IsOnCurve(x, y) {
+			return nil, errors.New("invalid EC JWK point")
+		}
+		return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
 	default:
 		return nil, errors.New("unsupported JWK type")
 	}
@@ -583,21 +644,32 @@ func openCookie(secret, purpose, value string) ([]byte, error) {
 	return g.Open(nil, raw[:g.NonceSize()], raw[g.NonceSize():], []byte("ci-radar:"+purpose))
 }
 
-func sign(secret, value string) string {
-	key := sha256.Sum256([]byte(secret))
-	mac := hmac.New(sha256.New, key[:])
-	_, _ = mac.Write([]byte(value))
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
-}
-
-func randomText(n int) string {
+func randomText(n int) (string, error) {
 	b := make([]byte, n)
-	_, _ = rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func safeReturnTo(v string) string {
-	if v == "" || !strings.HasPrefix(v, "/") || strings.HasPrefix(v, "//") {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.ContainsAny(v, "\\\r\n") {
+		return "/"
+	}
+	decoded := v
+	for range 4 {
+		next, err := url.PathUnescape(decoded)
+		if err != nil || strings.ContainsAny(next, "\\\r\n") {
+			return "/"
+		}
+		if next == decoded {
+			break
+		}
+		decoded = next
+	}
+	parsed, err := url.Parse(decoded)
+	if err != nil || parsed.IsAbs() || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(parsed.Path, "//") {
 		return "/"
 	}
 	return v
@@ -615,6 +687,39 @@ func numberClaim(v any) int64 {
 		return i
 	default:
 		return 0
+	}
+}
+
+func validAudienceClaims(audience any, authorizedParty, clientID string) bool {
+	count, valid := audienceCount(audience)
+	if !valid || !audienceContains(audience, clientID) {
+		return false
+	}
+	if authorizedParty != "" && authorizedParty != clientID {
+		return false
+	}
+	return count <= 1 || authorizedParty == clientID
+}
+
+func audienceCount(v any) (int, bool) {
+	switch a := v.(type) {
+	case string:
+		return 1, a != ""
+	case []any:
+		if len(a) == 0 {
+			return 0, false
+		}
+		seen := make(map[string]struct{}, len(a))
+		for _, value := range a {
+			s, ok := value.(string)
+			if !ok || s == "" {
+				return 0, false
+			}
+			seen[s] = struct{}{}
+		}
+		return len(seen), true
+	default:
+		return 0, false
 	}
 }
 
@@ -711,10 +816,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func uintBytes(v uint64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, v)
-	return b
 }
