@@ -91,7 +91,7 @@ func TestRemoteEmbeddingsAndCache(t *testing.T) {
 }
 
 func TestConfiguredSimilarityRejectsMissingAnalysis(t *testing.T) {
-	store, err := db.Open("")
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func (s failingEmbeddingCacheStore) GetObject(context.Context, string, string, s
 }
 
 func TestConfiguredSimilarityPropagatesCacheReadFailure(t *testing.T) {
-	store, err := db.Open("")
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,5 +128,55 @@ func TestConfiguredSimilarityPropagatesCacheReadFailure(t *testing.T) {
 	_, err = FindConfigured(context.Background(), failingEmbeddingCacheStore{Backend: store, err: sentinel}, "default", "a", 10, semantic, llmConfig)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("cache read error=%v", err)
+	}
+}
+
+type failingEmbeddingCacheWriteStore struct {
+	db.Backend
+	err error
+}
+
+func (s failingEmbeddingCacheWriteStore) PutObject(context.Context, string, string, string, any) error {
+	return s.err
+}
+
+func TestConfiguredSimilarityPropagatesCacheWriteFailure(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	analysis := model.AnalysisResult{ID: "a", TenantID: "default", Repository: "acme/api", Summary: "failure", CreatedAt: time.Now()}
+	if err := store.RecordAnalysisForTenant(context.Background(), "default", model.AnalysisInput{TenantID: "default", Repository: "acme/api"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		data := make([]map[string]any, len(body.Input))
+		for i := range body.Input {
+			data[i] = map[string]any{"index": i, "embedding": []float64{1, 0}}
+		}
+		if err := json.NewEncoder(w).Encode(map[string]any{"data": data}); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+	sentinel := errors.New("embedding cache write failed")
+	semantic := config.SemanticConfig{Enabled: true, Mode: "remote", CandidateLimit: 10}
+	llmConfig := config.LLMConfig{EmbeddingsEndpoint: server.URL, AllowPrivateNetwork: true, APIKey: "key", EmbeddingModel: "test"}
+	_, err = FindConfigured(context.Background(), failingEmbeddingCacheWriteStore{Backend: store, err: sentinel}, "default", "a", 10, semantic, llmConfig)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("cache write error=%v", err)
+	}
+}
+
+func TestReadResponseBodyRejectsOversizedPayload(t *testing.T) {
+	if _, err := readResponseBody(strings.NewReader("12345"), 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err=%v", err)
 	}
 }
