@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -126,5 +127,24 @@ func TestPrepareRejectsUnsupportedWriteAction(t *testing.T) {
 	_, _, err := NewRuntime().Prepare(model.Principal{TenantID: model.DefaultTenantID, Name: "operator", Role: model.RoleOperator}, "retry_everything", "target", "")
 	if err == nil {
 		t.Fatal("unsupported action was accepted")
+	}
+}
+
+type failingRepositoryHealthStore struct {
+	db.Backend
+	err error
+}
+
+func (s failingRepositoryHealthStore) ListIncidentsForTenant(context.Context, string, int, string) ([]model.Incident, error) {
+	return nil, s.err
+}
+
+func TestRepositoryHealthPropagatesRelatedStoreFailure(t *testing.T) {
+	store := mcpStore(t)
+	sentinel := errors.New("incidents unavailable")
+	srv := &Server{Store: failingRepositoryHealthStore{Backend: store, err: sentinel}}
+	_, err := srv.repositoryHealth(context.Background(), "default", "acme/api")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("repository health error=%v", err)
 	}
 }
