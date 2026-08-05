@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ciradar
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-now}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: ciradar
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
     volumes:
@@ -18,7 +18,7 @@ services:
     build:
       context: .
       args:
-        VERSION: 1.3.2-oss-rc.6
+        VERSION: 1.3.2-oss-rc.6-hardening-fix.3
     restart: unless-stopped
     depends_on:
       postgres:
@@ -27,8 +27,9 @@ services:
       - "8787:8787"
     environment:
       CIRADAR_DATABASE_DRIVER: postgres
-      CIRADAR_DATABASE_URL: postgres://ciradar:${POSTGRES_PASSWORD:-change-me-now}@postgres:5432/ciradar?sslmode=disable
-      CIRADAR_MASTER_KEY: ${CIRADAR_MASTER_KEY}
+      CIRADAR_DATABASE_URL: postgres://ciradar:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/ciradar?sslmode=disable
+      CIRADAR_MASTER_KEY: ${CIRADAR_MASTER_KEY:?set CIRADAR_MASTER_KEY from ciradar secret key}
+      CIRADAR_DASHBOARD_SESSION_SECRET: ${CIRADAR_DASHBOARD_SESSION_SECRET:?set a dedicated dashboard session secret}
     volumes:
       - ./ciradar.json:/app/ciradar.json:ro
       - ./rules:/app/rules:ro
