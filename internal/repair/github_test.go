@@ -66,7 +66,7 @@ func TestCreateGitHubDraftRepairPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = file.Close()
-	client, err := gh.New(1, keyPath, server.URL)
+	client, err := gh.New(1, keyPath, server.URL, true)
 	if err != nil {
 		t.Fatal(err)
 	}
