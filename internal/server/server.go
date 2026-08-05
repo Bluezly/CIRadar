@@ -957,7 +957,7 @@ func (s *Server) changeIncidentState(w http.ResponseWriter, r *http.Request, sta
 
 func (s *Server) upsertRepositoryProfile(w http.ResponseWriter, r *http.Request) {
 	var p model.RepositoryProfile
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p); err != nil {
+	if err := decodeJSONBody(w, r, 1<<20, &p, false); err != nil {
 		writeError(w, 400, "invalid JSON")
 		return
 	}
@@ -994,7 +994,7 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		Name string     `json:"name"`
 		Role model.Role `json:"role"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 64<<10, &body, false); err != nil {
 		writeError(w, 400, "invalid JSON")
 		return
 	}
@@ -1029,7 +1029,7 @@ func (s *Server) createTenant(w http.ResponseWriter, r *http.Request) {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 64<<10, &body, false); err != nil {
 		writeError(w, 400, "invalid JSON")
 		return
 	}
@@ -1045,7 +1045,7 @@ func (s *Server) updateTenant(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Enabled *bool `json:"enabled"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil || body.Enabled == nil {
+	if err := decodeJSONBody(w, r, 64<<10, &body, false); err != nil || body.Enabled == nil {
 		writeError(w, 400, "enabled is required")
 		return
 	}
@@ -1079,7 +1079,7 @@ func (s *Server) bindInstallation(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		TenantID string `json:"tenant_id"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 64<<10, &body, false); err != nil {
 		writeError(w, 400, "invalid JSON")
 		return
 	}
@@ -1410,8 +1410,20 @@ func (s *Server) githubMarketplaceWebhook(w http.ResponseWriter, r *http.Request
 	}
 	subscription, err := s.marketplace.Handle(r.Context(), body)
 	if err != nil {
+		var postCommitErr *marketplace.PostCommitError
+		if errors.As(err, &postCommitErr) {
+			s.log.Error("marketplace webhook applied with warning", "delivery_id", delivery, "tenant_id", subscription.TenantID, "error", postCommitErr)
+			s.updateDeliveryStatus(r.Context(), delivery, "processed", "audit event was not recorded")
+			writeJSON(w, http.StatusOK, map[string]any{"status": "processed", "tenant_id": subscription.TenantID, "plan": subscription.PlanName, "subscription_status": subscription.Status, "audit_recorded": false, "warning": "subscription updated, but its audit event could not be recorded"})
+			return
+		}
 		s.updateDeliveryStatus(r.Context(), delivery, "error", err.Error())
-		writeError(w, http.StatusBadRequest, err.Error())
+		var payloadErr *marketplace.PayloadError
+		if errors.As(err, &payloadErr) {
+			writeError(w, http.StatusBadRequest, payloadErr.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "marketplace processing failed")
 		return
 	}
 	s.updateDeliveryStatus(r.Context(), delivery, "processed", "")
@@ -1846,6 +1858,25 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst any, allowEmpty bool) error {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes))
+	if err := decoder.Decode(dst); err != nil {
+		if allowEmpty && errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return err
+	}
+	return nil
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]any{"error": msg, "status": status})
 }
