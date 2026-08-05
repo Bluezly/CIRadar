@@ -209,7 +209,7 @@ func (s failingLLMObjectStore) GetObject(context.Context, string, string, string
 }
 
 func TestEnhancePropagatesCacheReadFailure(t *testing.T) {
-	store, err := db.Open("")
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,5 +220,11 @@ func TestEnhancePropagatesCacheReadFailure(t *testing.T) {
 	_, err = enhancer.Enhance(context.Background(), model.AnalysisResult{ID: "a", TenantID: "default", Summary: "failure"}, nil)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("cache read error=%v", err)
+	}
+}
+
+func TestReadLLMResponseBodyRejectsOversizedPayload(t *testing.T) {
+	if _, err := readLLMResponseBody(strings.NewReader("12345"), 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err=%v", err)
 	}
 }
