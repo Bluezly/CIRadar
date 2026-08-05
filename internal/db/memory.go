@@ -15,10 +15,3 @@ func newMemoryStore(payload []byte) (*Store, error) {
 	s.normalize()
 	return s, nil
 }
-
-func (s *Store) snapshotJSON() ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.normalize()
-	return json.Marshal(s.state)
-}

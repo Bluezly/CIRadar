@@ -256,7 +256,10 @@ func (s *Store) RecordAudit(ctx context.Context, event model.AuditEvent) error {
 		event.CreatedAt = time.Now().UTC()
 	}
 	if event.ID == "" {
-		r, _ := randomText(12)
+		r, err := randomText(12)
+		if err != nil {
+			return fmt.Errorf("generate audit event ID: %w", err)
+		}
 		event.ID = "audit_" + r
 	}
 	s.mu.Lock()

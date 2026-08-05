@@ -53,7 +53,10 @@ func (s *Store) UpsertDiagnosisFeedback(ctx context.Context, f model.DiagnosisFe
 		f.ID = old.ID
 		f.CreatedAt = old.CreatedAt
 	} else {
-		id, _ := randomText(12)
+		id, err := randomText(12)
+		if err != nil {
+			return model.DiagnosisFeedback{}, fmt.Errorf("generate feedback ID: %w", err)
+		}
 		f.ID = "feedback_" + id
 		f.CreatedAt = now
 	}
@@ -138,7 +141,10 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 			o.OccurredAt = time.Now().UTC()
 		}
 		if o.ID == "" {
-			id, _ := randomText(12)
+			id, err := randomText(12)
+			if err != nil {
+				return nil, fmt.Errorf("generate test observation ID: %w", err)
+			}
 			o.ID = "testobs_" + id
 		}
 		key := TestKey(o)
