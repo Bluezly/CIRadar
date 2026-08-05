@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -671,6 +672,99 @@ func TestMarketplacePurchaseUsesPrimaryGitHubWebhook(t *testing.T) {
 	}
 }
 
+type marketplaceFailureStore struct {
+	db.Backend
+	getErr   error
+	auditErr error
+}
+
+func (s marketplaceFailureStore) GetObject(ctx context.Context, tenantID, kind, id string, out any) (bool, error) {
+	if s.getErr != nil && kind == "marketplace_account_index" {
+		return false, s.getErr
+	}
+	return s.Backend.GetObject(ctx, tenantID, kind, id, out)
+}
+
+func (s marketplaceFailureStore) RecordAudit(ctx context.Context, event model.AuditEvent) error {
+	if s.auditErr != nil && strings.HasPrefix(event.Action, "marketplace.") {
+		return s.auditErr
+	}
+	return s.Backend.RecordAudit(ctx, event)
+}
+
+func marketplaceRequest(t *testing.T, handler http.Handler, secret, delivery string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	request := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
+	request.RemoteAddr = "203.0.113.10:1234"
+	request.Header.Set("X-GitHub-Event", "marketplace_purchase")
+	request.Header.Set("X-GitHub-Delivery", delivery)
+	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+func TestMarketplaceWebhookReturnsServerErrorForStoreFailure(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	cfg.GitHubMarketplace.Enabled = true
+	cfg.GitHubMarketplace.WebhookSecret = "market-secret"
+	cfg.GitHubMarketplace.AutoCreateTenant = true
+	base, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	sentinel := errors.New("store unavailable")
+	store := marketplaceFailureStore{Backend: base, getErr: sentinel}
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{"action":"purchased","marketplace_purchase":{"account":{"id":42,"login":"Acme","type":"Organization"},"plan":{"id":1,"name":"community"}}}`)
+	response := marketplaceRequest(t, s.http.Handler, cfg.GitHubMarketplace.WebhookSecret, "marketplace-store-failure", body)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), sentinel.Error()) {
+		t.Fatalf("internal storage error leaked to caller: %s", response.Body.String())
+	}
+}
+
+func TestMarketplaceWebhookAcknowledgesPostCommitAuditFailure(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	cfg.GitHubMarketplace.Enabled = true
+	cfg.GitHubMarketplace.WebhookSecret = "market-secret"
+	cfg.GitHubMarketplace.AutoCreateTenant = true
+	base, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	store := marketplaceFailureStore{Backend: base, auditErr: errors.New("audit unavailable")}
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{"action":"purchased","marketplace_purchase":{"account":{"id":43,"login":"Acme","type":"Organization"},"plan":{"id":1,"name":"community"}}}`)
+	response := marketplaceRequest(t, s.http.Handler, cfg.GitHubMarketplace.WebhookSecret, "marketplace-audit-failure", body)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"audit_recorded":false`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var stored any
+	found, getErr := base.GetObject(context.Background(), model.DefaultTenantID, "marketplace_account_index", "43", &stored)
+	if getErr != nil || !found {
+		t.Fatalf("subscription not persisted: found=%v err=%v", found, getErr)
+	}
+}
+
 func TestRepairAPIQueuesDraftPullRequest(t *testing.T) {
 	cfg := config.Default()
 	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
@@ -747,5 +841,26 @@ func TestRequestIDRejectsUnsafeOrOversizedValues(t *testing.T) {
 	handler.ServeHTTP(rr, req)
 	if rr.Header().Get("X-Request-ID") != valid {
 		t.Fatalf("valid request ID was replaced: %q", rr.Header().Get("X-Request-ID"))
+	}
+}
+
+func TestDecodeJSONBodyRejectsTrailingAndOversizedInput(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body  string
+		limit int64
+	}{
+		"trailing":  {body: `{"name":"one"}{"name":"two"}`, limit: 1024},
+		"oversized": {body: `{"name":"` + strings.Repeat("x", 128) + `"}`, limit: 32},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.body))
+			recorder := httptest.NewRecorder()
+			var value struct {
+				Name string `json:"name"`
+			}
+			if err := decodeJSONBody(recorder, req, tc.limit, &value, false); err == nil {
+				t.Fatal("invalid request body was accepted")
+			}
+		})
 	}
 }
