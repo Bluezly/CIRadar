@@ -414,7 +414,10 @@ func (s *Server) repositoryHealth(ctx context.Context, tenant, repo string) (any
 			}
 		}
 	}
-	incidents, _ := s.Store.ListIncidentsForTenant(ctx, tenant, 100, "open")
+	incidents, err := s.Store.ListIncidentsForTenant(ctx, tenant, 100, "open")
+	if err != nil {
+		return nil, err
+	}
 	fingerprints := map[string]bool{}
 	for _, a := range filtered {
 		fingerprints[a.Fingerprint] = true
@@ -425,8 +428,14 @@ func (s *Server) repositoryHealth(ctx context.Context, tenant, repo string) (any
 			active = append(active, i)
 		}
 	}
-	tests, _ := s.Store.ListTestCaseStats(ctx, tenant, repo, "", 100)
-	profile, _ := s.Store.GetRepositoryProfile(ctx, tenant, repo)
+	tests, err := s.Store.ListTestCaseStats(ctx, tenant, repo, "", 100)
+	if err != nil {
+		return nil, err
+	}
+	profile, err := s.Store.GetRepositoryProfile(ctx, tenant, repo)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"repository": repo, "diagnoses": len(filtered), "external": external, "code": code, "active_incidents": active, "recent_analyses": limitAnalyses(filtered, 20), "test_cases": tests, "profile": profile}, nil
 }
 

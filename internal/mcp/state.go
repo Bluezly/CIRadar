@@ -40,13 +40,16 @@ func NewRuntime() *Runtime {
 	return &Runtime{sessions: map[string]*session{}, confirmations: map[string]confirmation{}}
 }
 
-func (r *Runtime) CreateSession(principal model.Principal) string {
+func (r *Runtime) CreateSession(principal model.Principal) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cleanupLocked()
-	id := randomToken(24)
+	id, err := randomToken(24)
+	if err != nil {
+		return "", err
+	}
 	r.sessions[id] = &session{ID: id, TenantID: principal.TenantID, Actor: principal.Name, Role: principal.Role, ExpiresAt: time.Now().Add(8 * time.Hour), Events: make(chan []byte, 32)}
-	return id
+	return id, nil
 }
 
 func (r *Runtime) Session(id string, principal model.Principal) (*session, bool) {
@@ -98,7 +101,10 @@ func (r *Runtime) Prepare(principal model.Principal, action, target, reason stri
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cleanupLocked()
-	token := randomToken(32)
+	token, err := randomToken(32)
+	if err != nil {
+		return "", time.Time{}, err
+	}
 	expires := time.Now().Add(5 * time.Minute)
 	r.confirmations[token] = confirmation{Token: token, TenantID: principal.TenantID, Actor: principal.Name, Action: action, Target: target, Reason: reason, ExpiresAt: expires}
 	return token, expires, nil
@@ -144,10 +150,12 @@ func operatorOrHigher(principal model.Principal) bool {
 	return principal.Root || principal.Role == model.RoleOperator || principal.Role == model.RoleAdmin
 }
 
-func randomToken(size int) string {
+func randomToken(size int) (string, error) {
 	value := make([]byte, size)
-	_, _ = rand.Read(value)
-	return base64.RawURLEncoding.EncodeToString(value)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
 func WaitEvent(ctx context.Context, value *session) ([]byte, bool) {
