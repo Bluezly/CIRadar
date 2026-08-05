@@ -217,3 +217,21 @@ func TestDownloadJobLogFollowsSanitizedSignedRedirect(t *testing.T) {
 		t.Fatalf("log=%q", log)
 	}
 }
+
+func TestDoJSONRejectsEmptyResponseWhenOutputIsRequired(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := &Client{baseURL: server.URL, http: server.Client()}
+	var out map[string]any
+	if err := client.doJSON(context.Background(), http.MethodGet, "/empty", "", nil, &out); err == nil || !strings.Contains(err.Error(), "empty JSON") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReadLimitedBodyRejectsOversizedResponse(t *testing.T) {
+	if _, err := readLimitedBody(strings.NewReader("12345"), 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err=%v", err)
+	}
+}
