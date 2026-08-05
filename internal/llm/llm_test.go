@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -30,7 +31,7 @@ func TestEnhanceOpenAICompatible(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer store.Close()
-	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, APIKey: "key", Model: "test", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200, SendRedactedExcerpt: true}
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, AllowPrivateNetwork: true, APIKey: "key", Model: "test", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200, SendRedactedExcerpt: true}
 	x := New(cfg, store)
 	r := model.AnalysisResult{ID: "a", TenantID: "default", Repository: "acme/api", Summary: "npm reset", Category: model.CategoryDependencyRegistry, Attribution: model.AttributionExternal, Score: 80, CreatedAt: time.Now(), RedactedExcerpt: "ECONNRESET"}
 	out, e := x.Enhance(context.Background(), r, nil)
@@ -61,7 +62,7 @@ func TestManualEnhancementDoesNotUseAutomaticThreshold(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, APIKey: "key", Model: "qwen", MinimumScore: 99, Timeout: time.Second, MaxInputCharacters: 4000, MaxOutputTokens: 200}
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, AllowPrivateNetwork: true, APIKey: "key", Model: "qwen", MinimumScore: 99, Timeout: time.Second, MaxInputCharacters: 4000, MaxOutputTokens: 200}
 	r := model.AnalysisResult{ID: "code", TenantID: "default", Category: model.CategoryCodeFailure, Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -62, ExternalityScore: -62, EvidenceStrength: 62, CodeEvidenceScore: 62, Summary: "Go assertion failed", RedactedExcerpt: "expected 4, got 5"}
 	out, err := New(cfg, store).Enhance(context.Background(), r, nil)
 	if err != nil {
@@ -94,7 +95,7 @@ func TestLocalEnhancementAllowsEmptyAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, Model: "qwen-local", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200}
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, AllowPrivateNetwork: true, Model: "qwen-local", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200}
 	if _, err := New(cfg, store).Enhance(context.Background(), model.AnalysisResult{ID: "local", TenantID: "default", Summary: "failure"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,7 @@ func TestResponseFormatFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, Model: "qwen", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200}
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, AllowPrivateNetwork: true, Model: "qwen", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200}
 	if _, err := New(cfg, store).Enhance(context.Background(), model.AnalysisResult{ID: "fallback", TenantID: "default", Summary: "failure"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +159,7 @@ func TestCacheSeparatesEndpoints(t *testing.T) {
 	}
 	defer store.Close()
 	r := model.AnalysisResult{ID: "same-analysis", TenantID: "default", Summary: "failure"}
-	base := config.LLMConfig{Enabled: true, Model: "same-model", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200}
+	base := config.LLMConfig{Enabled: true, AllowPrivateNetwork: true, Model: "same-model", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200}
 	base.Endpoint = first.URL
 	one, err := New(base, store).Enhance(context.Background(), r, nil)
 	if err != nil {
@@ -178,5 +179,46 @@ func TestTrimKeepsUTF8Valid(t *testing.T) {
 	out := trim("شرح عربي كامل", 7)
 	if !utf8.ValidString(out) {
 		t.Fatalf("invalid UTF-8: %q", out)
+	}
+}
+
+func TestEnhancerBlocksPrivateEndpointByDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, Model: "test", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200}
+	_, err = New(cfg, store).Enhance(context.Background(), model.AnalysisResult{ID: "private", TenantID: "default", Summary: "failure"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "not public") {
+		t.Fatalf("private LLM endpoint was not blocked: %v", err)
+	}
+}
+
+type failingLLMObjectStore struct {
+	db.Backend
+	err error
+}
+
+func (s failingLLMObjectStore) GetObject(context.Context, string, string, string, any) (bool, error) {
+	return false, s.err
+}
+
+func TestEnhancePropagatesCacheReadFailure(t *testing.T) {
+	store, err := db.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sentinel := errors.New("cache unavailable")
+	cfg := config.LLMConfig{Enabled: true, Endpoint: "https://llm.example/v1", APIKey: "key", Model: "test"}
+	enhancer := New(cfg, failingLLMObjectStore{Backend: store, err: sentinel})
+	_, err = enhancer.Enhance(context.Background(), model.AnalysisResult{ID: "a", TenantID: "default", Summary: "failure"}, nil)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("cache read error=%v", err)
 	}
 }
