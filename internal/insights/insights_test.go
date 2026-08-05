@@ -2,6 +2,7 @@ package insights
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,5 +34,27 @@ func TestDORAAndUsage(t *testing.T) {
 	u, e := Usage(ctx, store, "default", now.Add(-24*time.Hour), now.Add(time.Minute))
 	if e != nil || u.Runs != 1 || u.EstimatedCost <= 0 {
 		t.Fatalf("%#v %v", u, e)
+	}
+}
+
+type failingIncidentStore struct {
+	db.Backend
+	err error
+}
+
+func (s failingIncidentStore) ListIncidentsForTenant(context.Context, string, int, string) ([]model.Incident, error) {
+	return nil, s.err
+}
+
+func TestDORAFailsWhenIncidentHistoryCannotBeRead(t *testing.T) {
+	base, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	sentinel := errors.New("incident storage unavailable")
+	_, err = DORA(context.Background(), failingIncidentStore{Backend: base, err: sentinel}, "default", "production", time.Now().Add(-time.Hour), time.Now())
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
 	}
 }
