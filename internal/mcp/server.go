@@ -366,8 +366,14 @@ func (s *Server) callTool(ctx context.Context, principal model.Principal, p Call
 		if err := s.Store.EnqueueForTenant(ctx, tenant, "repair.draft_pr", map[string]any{"tenant_id": tenant, "analysis_id": target}, time.Now().UTC()); err != nil {
 			return nil, err
 		}
-		_ = s.Store.RecordAudit(ctx, model.AuditEvent{TenantID: tenant, Actor: principal.Name, Role: principal.Role, Action: "repair.draft_pr_requested", Resource: "analysis", ResourceID: target, CreatedAt: time.Now().UTC()})
-		return map[string]any{"status": "queued", "analysis_id": target, "review_required": true}, nil
+		auditErr := s.Store.RecordAudit(ctx, model.AuditEvent{TenantID: tenant, Actor: principal.Name, Role: principal.Role, Action: "repair.draft_pr_requested", Resource: "analysis", ResourceID: target, CreatedAt: time.Now().UTC()})
+		result := map[string]any{"status": "queued", "analysis_id": target, "review_required": true, "audit_recorded": auditErr == nil}
+		if auditErr != nil {
+			// The external action is already queued. Returning an RPC error here
+			// would encourage a retry and could enqueue a duplicate repair PR.
+			result["warning"] = "repair was queued, but its audit event could not be recorded"
+		}
+		return result, nil
 	default:
 		return nil, fmt.Errorf("unknown tool %q", p.Name)
 	}
