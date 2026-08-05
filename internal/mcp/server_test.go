@@ -148,3 +148,45 @@ func TestRepositoryHealthPropagatesRelatedStoreFailure(t *testing.T) {
 		t.Fatalf("repository health error=%v", err)
 	}
 }
+
+type failingMCPAuditStore struct {
+	db.Backend
+	err error
+}
+
+func (s failingMCPAuditStore) RecordAudit(context.Context, model.AuditEvent) error {
+	return s.err
+}
+
+func TestDraftRepairQueueReportsAuditFailureWithoutReturningRetryableError(t *testing.T) {
+	base := mcpStore(t)
+	ctx := context.Background()
+	analysis := model.AnalysisResult{ID: "repair-audit-failure", TenantID: model.DefaultTenantID, Repository: "acme/api", Attribution: model.AttributionCode, CreatedAt: time.Now().UTC()}
+	if err := base.RecordAnalysisForTenant(ctx, model.DefaultTenantID, model.AnalysisInput{TenantID: model.DefaultTenantID, Repository: "acme/api"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := base.PutObject(ctx, model.DefaultTenantID, "llm_enhancement", analysis.ID, model.LLMEnhancement{AnalysisID: analysis.ID, TenantID: model.DefaultTenantID, Patch: "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-old\n+new\n"}); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("audit unavailable")
+	runtime := NewRuntime()
+	srv := &Server{Store: failingMCPAuditStore{Backend: base, err: sentinel}, Runtime: runtime, Repair: config.RepairConfig{Enabled: true}}
+	principal := model.Principal{TenantID: model.DefaultTenantID, Name: "operator", Role: model.RoleOperator}
+	prepared, err := srv.callTool(ctx, principal, CallParams{Name: "prepare_action", Arguments: map[string]any{"action": "create_draft_repair_pr", "target": analysis.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmation := prepared.(map[string]any)["confirmation_token"].(string)
+	queued, err := srv.callTool(ctx, principal, CallParams{Name: "create_draft_repair_pr", Arguments: map[string]any{"target": analysis.ID, "confirmation_token": confirmation}})
+	if err != nil {
+		t.Fatalf("queued operation should not become retryable after audit failure: %v", err)
+	}
+	result := queued.(map[string]any)
+	if result["status"] != "queued" || result["audit_recorded"] != false || result["warning"] == "" {
+		t.Fatalf("result=%#v", result)
+	}
+	job, err := base.ClaimJob(ctx, "audit-failure-test")
+	if err != nil || job == nil || job.Type != "repair.draft_pr" {
+		t.Fatalf("job=%#v err=%v", job, err)
+	}
+}
