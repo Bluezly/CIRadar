@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -91,7 +92,10 @@ func DORA(ctx context.Context, store db.Backend, tenant, environment string, sin
 		return model.DORAMetrics{}, err
 	}
 	m := model.DORAMetrics{TenantID: tenant, Environment: environment, Since: since, Until: until, GeneratedAt: time.Now().UTC()}
-	incidents, _ := store.ListIncidentsForTenant(ctx, tenant, 5000, "")
+	incidents, err := store.ListIncidentsForTenant(ctx, tenant, 5000, "")
+	if err != nil {
+		return model.DORAMetrics{}, fmt.Errorf("list incidents for DORA metrics: %w", err)
+	}
 	incidentIndex := map[string]model.Incident{}
 	for _, incident := range incidents {
 		incidentIndex[incident.ID] = incident
