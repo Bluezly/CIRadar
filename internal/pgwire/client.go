@@ -35,10 +35,9 @@ type Config struct {
 }
 
 type Client struct {
-	conn                    net.Conn
-	r                       *bufio.Reader
-	cfg                     Config
-	expectedServerSignature []byte
+	conn net.Conn
+	r    *bufio.Reader
+	cfg  Config
 }
 
 type Rows struct {
