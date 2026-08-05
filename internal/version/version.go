@@ -1,7 +1,7 @@
 package version
 
 var (
-	Version   = "1.3.2-oss-rc.6-hardening-fix.3"
+	Version   = "1.3.2-oss-rc.6-hardening-fix.4"
 	Commit    = "development"
 	BuildDate = "unknown"
 )
