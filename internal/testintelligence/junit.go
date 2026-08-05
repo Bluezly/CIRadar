@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -119,9 +120,20 @@ func toObservation(m Metadata, suite string, t testCaseXML) model.TestObservatio
 	if details == "" {
 		details = first(t.SystemErr, t.SystemOut)
 	}
-	secs, _ := strconv.ParseFloat(strings.TrimSpace(t.Time), 64)
 	name, params := splitParameters(t.Name)
-	return model.TestObservation{TenantID: m.TenantID, Repository: m.Repository, Workflow: m.Workflow, Job: m.Job, RunID: m.RunID, CommitSHA: m.CommitSHA, Branch: m.Branch, Framework: m.Framework, Suite: suite, ClassName: t.ClassName, File: t.File, Name: name, Parameters: params, Status: status, DurationMS: int64(secs * 1000), Message: truncate(message, 1000), Details: truncate(strings.TrimSpace(details), 8000), Environment: m.Environment, OccurredAt: m.OccurredAt}
+	return model.TestObservation{TenantID: m.TenantID, Repository: m.Repository, Workflow: m.Workflow, Job: m.Job, RunID: m.RunID, CommitSHA: m.CommitSHA, Branch: m.Branch, Framework: m.Framework, Suite: suite, ClassName: t.ClassName, File: t.File, Name: name, Parameters: params, Status: status, DurationMS: parseDurationMS(t.Time), Message: truncate(message, 1000), Details: truncate(strings.TrimSpace(details), 8000), Environment: m.Environment, OccurredAt: m.OccurredAt}
+}
+
+func parseDurationMS(raw string) int64 {
+	seconds, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 {
+		return 0
+	}
+	milliseconds := seconds * 1000
+	if milliseconds >= float64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(milliseconds)
 }
 func splitParameters(v string) (string, string) {
 	v = strings.TrimSpace(v)
