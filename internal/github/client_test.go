@@ -118,7 +118,7 @@ func TestGitHubClientFlowAgainstMockAPI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(12345, keyFile.Name(), server.URL)
+	client, err := New(12345, keyFile.Name(), server.URL, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,5 +140,80 @@ func TestGitHubClientFlowAgainstMockAPI(t *testing.T) {
 	}
 	if !checkReceived {
 		t.Fatal("check run was not received")
+	}
+}
+
+func TestGitHubClientBlocksPrivateAPIByDefault(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyFile, err := os.CreateTemp(t.TempDir(), "key-*.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	if _, err := New(12345, keyFile.Name(), server.URL); err == nil || !strings.Contains(err.Error(), "not public") {
+		t.Fatalf("private GitHub API was not blocked: %v", err)
+	}
+}
+
+func TestDownloadJobLogFollowsSanitizedSignedRedirect(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyFile, err := os.CreateTemp(t.TempDir(), "key-*.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := keyFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("authorization leaked to signed URL: %q", got)
+		}
+		_, _ = w.Write([]byte("redirected log"))
+	}))
+	defer target.Close()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations/1/access_tokens":
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "installation-token", "expires_at": time.Now().Add(time.Hour)})
+		case "/repos/o/r/actions/jobs/2/logs":
+			if got := r.Header.Get("Authorization"); got != "Bearer installation-token" {
+				t.Fatalf("missing API authorization: %q", got)
+			}
+			w.Header().Set("Location", target.URL)
+			w.WriteHeader(http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+
+	client, err := New(123, keyFile.Name(), api.URL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := client.DownloadJobLog(context.Background(), 1, "o", "r", 2, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if log != "redirected log" {
+		t.Fatalf("log=%q", log)
 	}
 }
