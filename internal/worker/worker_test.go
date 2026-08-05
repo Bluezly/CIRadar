@@ -41,7 +41,7 @@ func testGitHubClient(t *testing.T, handler http.Handler) (*gh.Client, *httptest
 	}
 	_ = keyFile.Close()
 	server := httptest.NewServer(handler)
-	client, err := gh.New(123, keyFile.Name(), server.URL)
+	client, err := gh.New(123, keyFile.Name(), server.URL, true)
 	if err != nil {
 		server.Close()
 		t.Fatal(err)
@@ -55,13 +55,13 @@ func TestWorkflowRunEndToEndUsesTenantAndCriticality(t *testing.T) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/77/access_tokens":
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "install-token", "expires_at": time.Now().Add(time.Hour)})
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/actions/runs/100/jobs":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/") && strings.HasSuffix(r.URL.Path, "/jobs"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"jobs": []map[string]any{{"id": 200, "name": "test", "status": "completed", "conclusion": "failure"}}})
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/actions/jobs/200/logs":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/") && strings.HasSuffix(r.URL.Path, "/actions/jobs/200/logs"):
 			_, _ = io.WriteString(w, "npm ERR! code ECONNRESET\nnpm ERR! request to https://registry.npmjs.org/pkg failed")
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/actions/runs":
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/") && strings.HasSuffix(r.URL.Path, "/actions/runs"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 1, "workflow_runs": []map[string]any{{"id": 99, "head_sha": "abc", "status": "completed", "conclusion": "success"}}})
-		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/check-runs":
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/repos/acme/") && strings.HasSuffix(r.URL.Path, "/check-runs"):
 			if err := json.NewDecoder(r.Body).Decode(&checkBody); err != nil {
 				t.Fatal(err)
 			}
@@ -96,32 +96,45 @@ func TestWorkflowRunEndToEndUsesTenantAndCriticality(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	wkr := New(cfg, store, analyzer.New("test-key"), client, nil, log)
 
-	var ev model.GitHubWorkflowRunEvent
-	ev.TenantID = "alpha"
-	ev.Installation.ID = 77
-	ev.Repository.FullName = "acme/api"
-	ev.WorkflowRun.ID = 100
-	ev.WorkflowRun.Name = "CI"
-	ev.WorkflowRun.HeadSHA = "abc"
-	ev.WorkflowRun.Status = "completed"
-	ev.WorkflowRun.Conclusion = "failure"
-	ev.WorkflowRun.RunAttempt = 1
-	if err := wkr.processWorkflowRun(context.Background(), ev); err != nil {
+	newEvent := func(repository string, runID int64) model.GitHubWorkflowRunEvent {
+		var ev model.GitHubWorkflowRunEvent
+		ev.TenantID = "alpha"
+		ev.Installation.ID = 77
+		ev.Repository.FullName = repository
+		ev.WorkflowRun.ID = runID
+		ev.WorkflowRun.Name = "CI"
+		ev.WorkflowRun.HeadSHA = "abc"
+		ev.WorkflowRun.Status = "completed"
+		ev.WorkflowRun.Conclusion = "failure"
+		ev.WorkflowRun.RunAttempt = 1
+		return ev
+	}
+	if err := wkr.processWorkflowRun(context.Background(), newEvent("acme/other", 99)); err != nil {
+		t.Fatal(err)
+	}
+	if err := wkr.processWorkflowRun(context.Background(), newEvent("acme/api", 100)); err != nil {
 		t.Fatal(err)
 	}
 
 	analyses, err := store.ListAnalysesForTenant(context.Background(), "alpha", 10)
-	if err != nil || len(analyses) != 1 {
+	if err != nil || len(analyses) != 2 {
 		t.Fatalf("analyses=%+v err=%v", analyses, err)
 	}
-	if analyses[0].TenantID != "alpha" || analyses[0].Attribution != model.AttributionExternal {
-		t.Fatalf("analysis=%+v", analyses[0])
+	var analysis model.AnalysisResult
+	for _, item := range analyses {
+		if item.Repository == "acme/api" {
+			analysis = item
+			break
+		}
 	}
-	incident, err := store.GetIncidentForTenant(context.Background(), "alpha", analyses[0].Fingerprint)
+	if analysis.Repository == "" || analysis.TenantID != "alpha" || analysis.Attribution != model.AttributionExternal {
+		t.Fatalf("analysis=%+v", analysis)
+	}
+	incident, err := store.GetIncidentForTenant(context.Background(), "alpha", analysis.Fingerprint)
 	if err != nil || incident == nil {
 		t.Fatalf("incident=%+v err=%v", incident, err)
 	}
-	if incident.Severity != "critical" || incident.Category != analyses[0].Category || incident.Attribution != analyses[0].Attribution {
+	if incident.Severity != "critical" || incident.Category != analysis.Category || incident.Attribution != analysis.Attribution {
 		t.Fatalf("incident fields=%+v", incident)
 	}
 	if checkBody == nil || !strings.Contains(checkBody["name"].(string), "test") {
@@ -221,20 +234,31 @@ func TestGenericCIEventEndToEnd(t *testing.T) {
 	cfg := config.Default()
 	cfg.IncidentRepoThreshold = 1
 	cfg.ProviderPolling = false
-	cfg.Connectors = []config.CIConnector{{Name: "gitlab", Provider: "gitlab", Enabled: true, TenantID: "alpha", BaseURL: api.URL, Token: "token", WebhookSecret: "secret"}}
+	cfg.Connectors = []config.CIConnector{{Name: "gitlab", Provider: "gitlab", Enabled: true, TenantID: "alpha", BaseURL: api.URL, AllowPrivateNetwork: true, Token: "token", WebhookSecret: "secret"}}
 	wkr := New(cfg, store, analyzer.New("test-key"), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	first := model.CIEvent{TenantID: "alpha", Provider: "gitlab", Repository: "acme/other", Organization: "acme", Workflow: "pipeline", Job: "test", RunID: 8, JobID: "42", CommitSHA: "abc", Conclusion: "failure", ProjectID: "7", RunURL: "https://gitlab/acme/other/-/pipelines/8"}
+	if err := wkr.processCIEvent(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
 	ev := model.CIEvent{TenantID: "alpha", Provider: "gitlab", Repository: "acme/api", Organization: "acme", Workflow: "pipeline", Job: "test", RunID: 9, JobID: "42", CommitSHA: "abc", Conclusion: "failure", ProjectID: "7", RunURL: "https://gitlab/acme/api/-/pipelines/9"}
 	if err := wkr.processCIEvent(context.Background(), ev); err != nil {
 		t.Fatal(err)
 	}
 	items, err := store.ListAnalysesForTenant(context.Background(), "alpha", 10)
-	if err != nil || len(items) != 1 {
+	if err != nil || len(items) != 2 {
 		t.Fatalf("items=%#v err=%v", items, err)
 	}
-	if items[0].Repository != "acme/api" || items[0].SourceProvider != "gitlab" || items[0].Attribution != model.AttributionExternal {
-		t.Fatalf("analysis=%#v", items[0])
+	var analysis model.AnalysisResult
+	for _, item := range items {
+		if item.Repository == "acme/api" {
+			analysis = item
+			break
+		}
 	}
-	inc, err := store.GetIncidentForTenant(context.Background(), "alpha", items[0].Fingerprint)
+	if analysis.Repository != "acme/api" || analysis.SourceProvider != "gitlab" || analysis.Attribution != model.AttributionExternal {
+		t.Fatalf("analysis=%#v", analysis)
+	}
+	inc, err := store.GetIncidentForTenant(context.Background(), "alpha", analysis.Fingerprint)
 	if err != nil || inc == nil {
 		t.Fatalf("incident=%#v err=%v", inc, err)
 	}
@@ -267,7 +291,7 @@ func TestGenericCIEventRequestsOneSafeRetry(t *testing.T) {
 	cfg.ProviderPolling = false
 	cfg.AutomaticRetryEnabled = true
 	cfg.AutomaticRetryMinScore = 0
-	cfg.Connectors = []config.CIConnector{{Name: "gitlab", Provider: "gitlab", Enabled: true, TenantID: "alpha", BaseURL: api.URL, Token: "token", WebhookSecret: "secret"}}
+	cfg.Connectors = []config.CIConnector{{Name: "gitlab", Provider: "gitlab", Enabled: true, TenantID: "alpha", BaseURL: api.URL, AllowPrivateNetwork: true, Token: "token", WebhookSecret: "secret"}}
 	wkr := New(cfg, store, analyzer.New("test-key"), nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ev := model.CIEvent{TenantID: "alpha", Provider: "gitlab", Repository: "acme/api", Organization: "acme", Workflow: "pipeline", Job: "test", RunID: 9, JobID: "42", CommitSHA: "abc", Conclusion: "failure", ProjectID: "7", PipelineID: "9"}
 	if err := wkr.processCIEvent(context.Background(), ev); err != nil {
