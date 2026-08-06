@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -289,7 +290,7 @@ func TestWebhookRequiresTenantBinding(t *testing.T) {
 
 	req = httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
 	req.Header.Set("X-Hub-Signature-256", sig)
-	req.Header.Set("X-GitHub-Delivery", "delivery-bound")
+	req.Header.Set("X-GitHub-Delivery", "delivery-unbound")
 	req.Header.Set("X-GitHub-Event", "workflow_run")
 	rr = httptest.NewRecorder()
 	s.http.Handler.ServeHTTP(rr, req)
@@ -367,9 +368,21 @@ func TestGitLabWebhookQueuesTenantScopedCIEvent(t *testing.T) {
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	duplicate := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", bytes.NewReader(body))
+	duplicate.Header.Set("X-Gitlab-Token", "hook")
+	duplicate.Header.Set("X-Gitlab-Webhook-UUID", "gl-1")
+	duplicateResponse := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(duplicateResponse, duplicate)
+	if duplicateResponse.Code != http.StatusAccepted || !strings.Contains(duplicateResponse.Body.String(), `"status":"duplicate_ignored"`) {
+		t.Fatalf("duplicate status=%d body=%s", duplicateResponse.Code, duplicateResponse.Body.String())
+	}
 	job, err := store.ClaimJob(context.Background(), "test")
 	if err != nil || job == nil || job.Type != "ci.event" || job.TenantID != "alpha" {
 		t.Fatalf("job=%#v err=%v", job, err)
+	}
+	second, err := store.ClaimJob(context.Background(), "test-2")
+	if err != nil || second != nil {
+		t.Fatalf("duplicate webhook queued another job: job=%#v err=%v", second, err)
 	}
 }
 
@@ -774,6 +787,53 @@ func TestMarketplaceWebhookReturnsServerErrorForStoreFailure(t *testing.T) {
 	}
 }
 
+type marketplaceTransientFailureStore struct {
+	db.Backend
+	failNext atomic.Bool
+}
+
+func (s *marketplaceTransientFailureStore) GetObject(ctx context.Context, tenantID, kind, id string, out any) (bool, error) {
+	if kind == "marketplace_account_index" && s.failNext.CompareAndSwap(true, false) {
+		return false, errors.New("temporary storage failure")
+	}
+	return s.Backend.GetObject(ctx, tenantID, kind, id, out)
+}
+
+func TestMarketplaceWebhookRetriesSameDeliveryAfterTransientFailure(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	cfg.GitHubMarketplace.Enabled = true
+	cfg.GitHubMarketplace.WebhookSecret = "market-secret"
+	cfg.GitHubMarketplace.AutoCreateTenant = true
+	base, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+	store := &marketplaceTransientFailureStore{Backend: base}
+	store.failNext.Store(true)
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	body := []byte(`{"action":"purchased","marketplace_purchase":{"account":{"id":44,"login":"Acme","type":"Organization"},"plan":{"id":1,"name":"community"}}}`)
+	first := marketplaceRequest(t, s.http.Handler, cfg.GitHubMarketplace.WebhookSecret, "marketplace-retry-same-id", body)
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	second := marketplaceRequest(t, s.http.Handler, cfg.GitHubMarketplace.WebhookSecret, "marketplace-retry-same-id", body)
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"status":"processed"`) {
+		t.Fatalf("retry status=%d body=%s", second.Code, second.Body.String())
+	}
+	var stored any
+	found, err := base.GetObject(context.Background(), model.DefaultTenantID, "marketplace_account_index", "44", &stored)
+	if err != nil || !found {
+		t.Fatalf("subscription not persisted after retry: found=%v err=%v", found, err)
+	}
+}
+
 func TestMarketplaceWebhookAcknowledgesPostCommitAuditFailure(t *testing.T) {
 	cfg := config.Default()
 	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
@@ -1063,5 +1123,36 @@ func TestCriticalTestsAreNeverAutomaticallyQuarantined(t *testing.T) {
 	loaded, err := store.GetTestCaseStats(context.Background(), model.DefaultTenantID, stats[0].TestKey)
 	if err != nil || loaded == nil || !loaded.Critical || loaded.Classification != "flaky" {
 		t.Fatalf("critical flaky stats=%#v err=%v", loaded, err)
+	}
+}
+
+func TestMetricRangeRejectsInvalidAndExcessiveRanges(t *testing.T) {
+	for _, rawURL := range []string{
+		"/api/v1/metrics/dora?since=not-a-date",
+		"/api/v1/metrics/dora?since=2026-02-01T00:00:00Z&until=2026-01-01T00:00:00Z",
+		"/api/v1/metrics/dora?since=2024-01-01T00:00:00Z&until=2026-01-01T00:00:00Z",
+	} {
+		req := httptest.NewRequest(http.MethodGet, rawURL, nil)
+		if _, _, err := metricRange(req); err == nil {
+			t.Fatalf("invalid metric range accepted: %s", rawURL)
+		}
+	}
+}
+
+func TestMetricEndpointsReturnBadRequestForInvalidRange(t *testing.T) {
+	s, store, _ := testServer(t)
+	_, token, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "viewer", model.RoleViewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		"/api/v1/metrics/dora?since=bad",
+		"/api/v1/metrics/usage?until=bad",
+		"/api/v1/metrics/trends?since=2026-02-01T00:00:00Z&until=2026-01-01T00:00:00Z",
+	} {
+		rr := doReq(t, s, http.MethodGet, path, token, "", nil)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("path=%s status=%d body=%s", path, rr.Code, rr.Body.String())
+		}
 	}
 }
