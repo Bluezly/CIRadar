@@ -27,8 +27,35 @@ jobs:
       - name: Configuration syntax
         run: python3 -m json.tool ciradar.example.json >/dev/null
 
+  postgres-integration:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: ciradar
+          POSTGRES_PASSWORD: ciradar_test_password
+          POSTGRES_DB: ciradar_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ciradar -d ciradar_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: PostgreSQL integration and migration test
+        env:
+          CIRADAR_TEST_POSTGRES_DSN: postgres://ciradar:ciradar_test_password@127.0.0.1:5432/ciradar_test?sslmode=disable&pool_max_conns=4
+        run: go test -count=1 -run TestPostgresIntegration ./internal/db
+
   build:
-    needs: verify
+    needs: [verify, postgres-integration]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -65,7 +92,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: >-
           go build -buildvcs=false -trimpath
-          -ldflags "-s -w -X ciradar/internal/version.Version=1.3.2-oss-rc.6-hardening-fix.5
+          -ldflags "-s -w -X ciradar/internal/version.Version=1.3.2-oss-rc.6-hardening-fix.6
           -X ciradar/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           -X ciradar/internal/version.Commit=${GITHUB_SHA::12}"
           -o "${{ matrix.output }}" ./cmd/ciradar
