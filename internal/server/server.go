@@ -71,7 +71,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 		}
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", s.dashboardPage)
+	mux.HandleFunc("GET /{$}", s.dashboardPage)
 	mux.HandleFunc("GET /assets/dashboard.css", s.dashboardCSS)
 	mux.HandleFunc("GET /assets/dashboard.js", s.dashboardJS)
 	mux.HandleFunc("GET /source", s.sourcePage)
@@ -83,6 +83,8 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /auth/logout", s.authLogout)
 	mux.HandleFunc("POST /auth/token", s.authToken)
 	mux.HandleFunc("GET /api/v1/auth/me", s.require(model.RoleViewer, s.authMe))
+	mux.HandleFunc("/api", s.apiNotFound)
+	mux.HandleFunc("/api/", s.apiNotFound)
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("GET /api/v1/status", s.require(model.RoleViewer, s.status))
 	mux.HandleFunc("GET /api/v1/dashboard", s.require(model.RoleViewer, s.dashboardData))
@@ -162,9 +164,13 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /webhooks/cloudbuild", s.ciWebhook("cloudbuild"))
 	mux.HandleFunc("POST /chatops/slack", s.slackChatOps)
 	mux.HandleFunc("POST /chatops/teams", s.teamsChatOps)
-	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, s.ipResolver, logging(log, rateLimit(newRateLimiter(600, time.Minute), s.ipResolver, mux)))))
+	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, s.ipResolver, logging(log, rateLimit(newRateLimiter(600, time.Minute), s.ipResolver, authFailureRateLimit(newAuthFailureLimiter(defaultAuthFailureThreshold, defaultAuthFailureWindow, defaultAuthFailureBaseDelay, defaultAuthFailureMaxDelay), s.ipResolver, mux))))))
 	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
 	return s
+}
+
+func (s *Server) apiNotFound(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotFound, "API route not found")
 }
 
 func (s *Server) sourcePage(w http.ResponseWriter, r *http.Request) {

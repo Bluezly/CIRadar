@@ -3,9 +3,17 @@ package server
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	defaultAuthFailureThreshold = 10
+	defaultAuthFailureWindow    = 5 * time.Minute
+	defaultAuthFailureBaseDelay = 5 * time.Second
+	defaultAuthFailureMaxDelay  = 15 * time.Minute
 )
 
 type rateEntry struct {
@@ -145,5 +153,202 @@ func rateLimit(l *rateLimiter, resolver *clientIPResolver, next http.Handler) ht
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+type authFailureEntry struct {
+	windowStart  time.Time
+	failures     int
+	blockedUntil time.Time
+	lastSeen     time.Time
+}
+
+type authFailureLimiter struct {
+	mu        sync.Mutex
+	entries   map[string]authFailureEntry
+	threshold int
+	window    time.Duration
+	baseDelay time.Duration
+	maxDelay  time.Duration
+}
+
+type statusCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+type statusCaptureFlusher struct {
+	*statusCapture
+	flusher http.Flusher
+}
+
+func newAuthFailureLimiter(threshold int, window, baseDelay, maxDelay time.Duration) *authFailureLimiter {
+	if threshold < 1 {
+		threshold = 1
+	}
+	if window <= 0 {
+		window = time.Minute
+	}
+	if baseDelay <= 0 {
+		baseDelay = time.Second
+	}
+	if maxDelay < baseDelay {
+		maxDelay = baseDelay
+	}
+	return &authFailureLimiter{
+		entries:   map[string]authFailureEntry{},
+		threshold: threshold,
+		window:    window,
+		baseDelay: baseDelay,
+		maxDelay:  maxDelay,
+	}
+}
+
+func (l *authFailureLimiter) retryAfter(key string, now time.Time) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.entries[key]
+	if !ok {
+		return 0
+	}
+	if now.Sub(e.windowStart) >= l.window && !now.Before(e.blockedUntil) {
+		delete(l.entries, key)
+		return 0
+	}
+	if now.Before(e.blockedUntil) {
+		return e.blockedUntil.Sub(now)
+	}
+	return 0
+}
+
+func (l *authFailureLimiter) recordFailure(key string, now time.Time) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e := l.entries[key]
+	if e.windowStart.IsZero() || now.Sub(e.windowStart) >= l.window {
+		e = authFailureEntry{windowStart: now}
+	}
+	e.failures++
+	e.lastSeen = now
+	var delay time.Duration
+	if e.failures >= l.threshold {
+		delay = l.baseDelay
+		for i := l.threshold; i < e.failures && delay < l.maxDelay; i++ {
+			if delay > l.maxDelay/2 {
+				delay = l.maxDelay
+				break
+			}
+			delay *= 2
+		}
+		if delay > l.maxDelay {
+			delay = l.maxDelay
+		}
+		e.blockedUntil = now.Add(delay)
+	}
+	l.entries[key] = e
+	l.pruneLocked(now)
+	return delay
+}
+
+func (l *authFailureLimiter) reset(key string) {
+	l.mu.Lock()
+	delete(l.entries, key)
+	l.mu.Unlock()
+}
+
+func (l *authFailureLimiter) pruneLocked(now time.Time) {
+	if len(l.entries) <= 10000 {
+		return
+	}
+	for key, entry := range l.entries {
+		if now.Sub(entry.lastSeen) >= 2*l.window && !now.Before(entry.blockedUntil) {
+			delete(l.entries, key)
+		}
+	}
+	for len(l.entries) > 20000 {
+		oldestKey := ""
+		oldest := now
+		for key, entry := range l.entries {
+			if oldestKey == "" || entry.lastSeen.Before(oldest) {
+				oldestKey = key
+				oldest = entry.lastSeen
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(l.entries, oldestKey)
+	}
+}
+
+func (w *statusCapture) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusCapture) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *statusCaptureFlusher) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.flusher.Flush()
+}
+
+func captureStatus(w http.ResponseWriter) (http.ResponseWriter, *statusCapture) {
+	capture := &statusCapture{ResponseWriter: w}
+	if flusher, ok := w.(http.Flusher); ok {
+		return &statusCaptureFlusher{statusCapture: capture, flusher: flusher}, capture
+	}
+	return capture, capture
+}
+
+func hasBearerCredential(r *http.Request) bool {
+	parts := strings.Fields(strings.TrimSpace(r.Header.Get("Authorization")))
+	return len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && strings.TrimSpace(parts[1]) != ""
+}
+
+func isAuthenticationAttempt(r *http.Request) bool {
+	return r.Method == http.MethodPost && r.URL.Path == "/auth/token" || hasBearerCredential(r)
+}
+
+func retryAfterSeconds(delay time.Duration) int {
+	seconds := int((delay + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
+}
+
+func authFailureRateLimit(l *authFailureLimiter, resolver *clientIPResolver, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAuthenticationAttempt(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := resolver.resolve(r)
+		now := time.Now().UTC()
+		if delay := l.retryAfter(key, now); delay > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(delay)))
+			writeError(w, http.StatusTooManyRequests, "too many failed authentication attempts")
+			return
+		}
+		wrapped, capture := captureStatus(w)
+		next.ServeHTTP(wrapped, r)
+		if capture.status == http.StatusUnauthorized {
+			l.recordFailure(key, time.Now().UTC())
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/auth/token" && capture.status >= 200 && capture.status < 300 {
+			l.reset(key)
+		}
 	})
 }
