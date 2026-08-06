@@ -330,11 +330,15 @@ func DisplayName(st model.TestCaseStats) string {
 	if len(parts) == 0 {
 		return st.TestKey
 	}
-	return strings.Join(parts, "/")
+	name := strings.Join(parts, "/")
+	if variant := strings.TrimSpace(st.Variant); variant != "" {
+		name += " [" + variant + "]"
+	}
+	return name
 }
 
 func TestAliases(st model.TestCaseStats) []string {
-	values := []string{st.TestKey, st.Name, DisplayName(st), st.Suite + "::" + st.Name, st.ClassName + "::" + st.Name, st.Suite + "/" + st.Name, st.ClassName + "/" + st.Name, st.Suite + "/" + st.ClassName + "/" + st.Name, st.Suite + "/" + st.ClassName + "::" + st.Name, norm(st.File), norm(st.File) + "::" + st.Name}
+	values := []string{st.TestKey, st.Name, DisplayName(st), st.Suite + "::" + st.Name, st.ClassName + "::" + st.Name, st.Suite + "/" + st.Name, st.ClassName + "/" + st.Name, st.Suite + "/" + st.ClassName + "/" + st.Name, st.Suite + "/" + st.ClassName + "::" + st.Name, norm(st.File), norm(st.File) + "::" + st.Name, st.Name + " [" + st.Variant + "]"}
 	out := []string{}
 	seen := map[string]bool{}
 	for _, value := range values {
