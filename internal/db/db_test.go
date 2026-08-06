@@ -649,3 +649,332 @@ func TestQuarantinedFailuresAreCountedOnlyDuringActiveWindow(t *testing.T) {
 		t.Fatalf("quarantined failures=%d", stats[0].QuarantinedFailures)
 	}
 }
+
+func TestStaleWorkerCannotCompleteReclaimedJob(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Enqueue(ctx, "test", map[string]string{"value": "x"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.ClaimJob(ctx, "worker-a")
+	if err != nil || first == nil {
+		t.Fatalf("first claim=%#v err=%v", first, err)
+	}
+	store.mu.Lock()
+	for i := range store.state.Jobs {
+		if store.state.Jobs[i].ID == first.ID {
+			store.state.Jobs[i].LockedAt = time.Now().UTC().Add(-time.Hour)
+		}
+	}
+	if err := store.persistLocked(); err != nil {
+		store.mu.Unlock()
+		t.Fatal(err)
+	}
+	store.mu.Unlock()
+	if err := store.RequeueStaleJobs(ctx, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.ClaimJob(ctx, "worker-b")
+	if err != nil || second == nil {
+		t.Fatalf("second claim=%#v err=%v", second, err)
+	}
+	if first.LeaseToken == second.LeaseToken {
+		t.Fatal("reclaimed job reused its old lease")
+	}
+	if err := store.CompleteJob(ctx, first.ID, first.LeaseToken); !errors.Is(err, ErrJobLeaseLost) {
+		t.Fatalf("stale worker completion error=%v", err)
+	}
+	if err := store.CompleteJob(ctx, second.ID, second.LeaseToken); err != nil {
+		t.Fatalf("current worker completion failed: %v", err)
+	}
+}
+
+func TestDeliveryAndJobAreEnqueuedAtomicallyAndIdempotently(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	fresh, err := store.EnqueueDeliveryForTenant(ctx, "delivery-1", "github", model.DefaultTenantID, "github.workflow_run", map[string]string{"run": "1"}, time.Now())
+	if err != nil || !fresh {
+		t.Fatalf("first enqueue fresh=%v err=%v", fresh, err)
+	}
+	fresh, err = store.EnqueueDeliveryForTenant(ctx, "delivery-1", "github", model.DefaultTenantID, "github.workflow_run", map[string]string{"run": "1"}, time.Now())
+	if err != nil || fresh {
+		t.Fatalf("duplicate enqueue fresh=%v err=%v", fresh, err)
+	}
+	stats, err := store.StatsForTenant(ctx, model.DefaultTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.QueuedJobs != 1 {
+		t.Fatalf("queued jobs=%d, want 1", stats.QueuedJobs)
+	}
+}
+
+func TestErroredDeliveryCanBeRetried(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	claimed, err := store.ClaimDelivery(ctx, "marketplace-retry", "github.marketplace", time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("first claim=%v err=%v", claimed, err)
+	}
+	claimed, err = store.ClaimDelivery(ctx, "marketplace-retry", "github.marketplace", time.Minute)
+	if err != nil || claimed {
+		t.Fatalf("concurrent claim=%v err=%v", claimed, err)
+	}
+	if err := store.UpdateDelivery(ctx, "marketplace-retry", "error", "temporary"); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = store.ClaimDelivery(ctx, "marketplace-retry", "github.marketplace", time.Minute)
+	if err != nil || !claimed {
+		t.Fatalf("retry claim=%v err=%v", claimed, err)
+	}
+}
+
+func TestJobLeaseRenewalPreventsStaleRequeue(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Enqueue(ctx, "test", nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	job, err := store.ClaimJob(ctx, "worker")
+	if err != nil || job == nil {
+		t.Fatalf("claim=%#v err=%v", job, err)
+	}
+	store.mu.Lock()
+	for i := range store.state.Jobs {
+		if store.state.Jobs[i].ID == job.ID {
+			store.state.Jobs[i].LockedAt = time.Now().UTC().Add(-time.Hour)
+		}
+	}
+	store.mu.Unlock()
+	if err := store.RenewJobLease(ctx, job.ID, job.LeaseToken); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequeueStaleJobs(ctx, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteJob(ctx, job.ID, job.LeaseToken); err != nil {
+		t.Fatalf("renewed job was requeued: %v", err)
+	}
+}
+
+func TestEmbeddedStoreRollsBackCriticalMutationsWhenPersistenceFails(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := store.path
+	badPath := filepath.Join(t.TempDir(), "state-directory")
+	if err := os.Mkdir(badPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store.path = badPath
+	ctx := context.Background()
+	analysis := model.AnalysisResult{ID: "must-rollback", CreatedAt: time.Now().UTC()}
+	if err := store.RecordAnalysisForTenant(ctx, model.DefaultTenantID, model.AnalysisInput{Repository: "acme/api"}, analysis, false, false); err == nil {
+		t.Fatal("analysis persistence failure was not reported")
+	}
+	if got, err := store.GetAnalysisForTenant(ctx, model.DefaultTenantID, analysis.ID); err != nil || got != nil {
+		t.Fatalf("failed analysis remained in memory: got=%#v err=%v", got, err)
+	}
+	decision, _, err := store.BeginNotificationDeliveryForTenant(ctx, model.DefaultTenantID, "event", "slack", "slack", "dedupe", time.Minute, 3)
+	if err == nil || decision != "" {
+		t.Fatalf("notification persistence decision=%q err=%v", decision, err)
+	}
+	if delivery, err := store.GetNotificationDeliveryForTenant(ctx, model.DefaultTenantID, "event", "slack"); err != nil || delivery != nil {
+		t.Fatalf("failed notification remained in memory: delivery=%#v err=%v", delivery, err)
+	}
+	store.path = originalPath
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackupRecoveryPreservesGoodBackupAndQuarantinesCorruption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := model.AnalysisResult{ID: "recoverable", CreatedAt: time.Now().UTC()}
+	if err := store.RecordAnalysis(context.Background(), model.AnalysisInput{Repository: "acme/api"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	goodBackup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := recovered.GetAnalysis(context.Background(), "recoverable")
+	if err != nil || loaded == nil {
+		t.Fatalf("analysis was not recovered: loaded=%#v err=%v", loaded, err)
+	}
+	if _, err := os.Stat(path + ".corrupt"); err != nil {
+		t.Fatalf("corrupt state was not quarantined: %v", err)
+	}
+	backupAfterRecovery, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backupAfterRecovery) != string(goodBackup) {
+		t.Fatal("successful recovery overwrote the known-good backup")
+	}
+	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{broken-again"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recoveredAgain, err := Open(path)
+	if err != nil {
+		t.Fatalf("second recovery failed: %v", err)
+	}
+	defer recoveredAgain.Close()
+	loaded, err = recoveredAgain.GetAnalysis(context.Background(), "recoverable")
+	if err != nil || loaded == nil {
+		t.Fatalf("backup was not reusable: loaded=%#v err=%v", loaded, err)
+	}
+}
+
+func TestMissingMainStateRecoversFromBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := model.AnalysisResult{ID: "backup-only", CreatedAt: time.Now().UTC()}
+	if err := store.RecordAnalysis(context.Background(), model.AnalysisInput{Repository: "acme/api"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	loaded, err := recovered.GetAnalysis(context.Background(), "backup-only")
+	if err != nil || loaded == nil {
+		t.Fatalf("backup-only recovery failed: loaded=%#v err=%v", loaded, err)
+	}
+}
+
+func TestEmptyMainStateRecoversFromBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := model.AnalysisResult{ID: "empty-main-recovery", CreatedAt: time.Now().UTC()}
+	if err := store.RecordAnalysis(context.Background(), model.AnalysisInput{Repository: "acme/api"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	loaded, err := recovered.GetAnalysis(context.Background(), analysis.ID)
+	if err != nil || loaded == nil {
+		t.Fatalf("empty main did not recover from backup: loaded=%#v err=%v", loaded, err)
+	}
+}
+
+func TestMissingMainWithCorruptBackupFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path+".bak", []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil {
+		t.Fatal("corrupt backup was ignored and a new empty state was created")
+	}
+}
+
+func TestTerminalDeliveryIsPersistedAtomically(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fresh, err := store.RecordTerminalDelivery(context.Background(), "terminal-1", "github", "invalid", "bad payload")
+	if err != nil || !fresh {
+		t.Fatalf("fresh=%v err=%v", fresh, err)
+	}
+	store.mu.Lock()
+	record := store.state.Deliveries["terminal-1"]
+	store.mu.Unlock()
+	if record.Status != "invalid" || record.Error != "bad payload" {
+		t.Fatalf("record=%#v", record)
+	}
+	fresh, err = store.RecordTerminalDelivery(context.Background(), "terminal-1", "github", "ignored", "changed")
+	if err != nil || fresh {
+		t.Fatalf("duplicate fresh=%v err=%v", fresh, err)
+	}
+}
+
+func TestStatsExposeRunningAndFailedJobs(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.Enqueue(ctx, "running", nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := store.ClaimJob(ctx, "worker-running")
+	if err != nil || running == nil {
+		t.Fatalf("running claim=%#v err=%v", running, err)
+	}
+	if err := store.Enqueue(ctx, "failed", nil, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := store.ClaimJob(ctx, "worker-failed")
+	if err != nil || failed == nil {
+		t.Fatalf("failed claim=%#v err=%v", failed, err)
+	}
+	if err := store.FailJob(ctx, failed.ID, failed.LeaseToken, 8, "permanent"); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RunningJobs != 1 || stats.FailedJobs != 1 || stats.QueuedJobs != 0 {
+		t.Fatalf("stats=%#v", stats)
+	}
+}
