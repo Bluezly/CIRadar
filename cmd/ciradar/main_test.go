@@ -139,3 +139,44 @@ func TestParseOptionalRFC3339RejectsInvalidInput(t *testing.T) {
 		t.Fatalf("value=%v err=%v", value, err)
 	}
 }
+
+func TestTestsCriticalCLI(t *testing.T) {
+	dir := t.TempDir()
+	configPath := writeTestConfig(t, dir)
+	store, err := db.Open(filepath.Join(dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := model.TestObservation{TenantID: "default", Repository: "acme/api", Suite: "unit", ClassName: "Payments", Name: "refund", Status: "failed", OccurredAt: time.Now().UTC()}
+	stats, err := store.RecordTestObservations(context.Background(), "default", []model.TestObservation{observation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	runErr := cmdTests([]string{"critical", "--config", configPath, "--key", stats[0].TestKey})
+	_ = w.Close()
+	os.Stdout = old
+	body, readErr := io.ReadAll(r)
+	_ = r.Close()
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var updated model.TestCaseStats
+	if err := json.Unmarshal(body, &updated); err != nil {
+		t.Fatalf("decode %q: %v", string(body), err)
+	}
+	if !updated.Critical {
+		t.Fatalf("critical=%v", updated.Critical)
+	}
+}
