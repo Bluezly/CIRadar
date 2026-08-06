@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -38,5 +39,24 @@ func TestProviderPollerRejectsOversizedResponse(t *testing.T) {
 	_, err := poller.fetch(context.Background(), Endpoint{Name: "test", URL: target.URL})
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestProviderPollerSuppressesRepeatedWarningsAndLogsRecovery(t *testing.T) {
+	var output bytes.Buffer
+	poller := &Poller{log: slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	poller.reportPollFailures([]string{"npm"}, []string{"npm: unavailable"})
+	if first := output.String(); !strings.Contains(first, "provider status polling incomplete") {
+		t.Fatalf("first warning missing: %s", first)
+	}
+	output.Reset()
+	poller.reportPollFailures([]string{"npm"}, []string{"npm: unavailable"})
+	if repeated := output.String(); strings.Contains(repeated, "provider status polling incomplete") || !strings.Contains(repeated, "provider status poll detail") {
+		t.Fatalf("repeated logging=%s", repeated)
+	}
+	output.Reset()
+	poller.reportPollFailures(nil, nil)
+	if recovered := output.String(); !strings.Contains(recovered, "provider status polling recovered") {
+		t.Fatalf("recovery log missing: %s", recovered)
 	}
 }
