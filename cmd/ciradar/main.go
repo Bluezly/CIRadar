@@ -366,6 +366,7 @@ func cmdDatabase(args []string) error {
 	sub := strings.ToLower(strings.TrimSpace(args[0]))
 	fs := flag.NewFlagSet("database "+sub, flag.ContinueOnError)
 	path := fs.String("config", "ciradar.json", "configuration file path")
+	jsonOut := fs.Bool("json", false, "print JSON health report")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -386,7 +387,26 @@ func cmdDatabase(args []string) error {
 	}
 	switch sub {
 	case "check", "migrate":
+		result := map[string]any{"operation": sub, "driver": cfg.DatabaseDriver, "stats": stats}
+		if postgres, ok := store.(*db.PostgresBackend); ok {
+			health, healthErr := postgres.Health(ctx)
+			if healthErr != nil {
+				return healthErr
+			}
+			result["postgres"] = health
+		}
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(result)
+		}
 		fmt.Printf("Database %s OK: driver=%s analyses=%d incidents=%d queued_jobs=%d\n", sub, cfg.DatabaseDriver, stats.Analyses, stats.Incidents, stats.QueuedJobs)
+		if health, ok := result["postgres"].(db.PostgresHealthReport); ok {
+			fmt.Printf("PostgreSQL %s schema=%d partitions=%d default_rows=%d pool=%d/%d database_bytes=%d telemetry_bytes=%d recovery=%t\n", health.ServerVersion, health.SchemaVersion, health.ObservationPartitions, health.DefaultPartitionRows, health.PoolOpenConnections, health.PoolMaximumConnections, health.DatabaseSizeBytes, health.ObservationTableBytes, health.InRecovery)
+			for _, warning := range health.Warnings {
+				fmt.Println("WARNING:", warning)
+			}
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown database command %q", sub)
