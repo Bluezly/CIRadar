@@ -392,23 +392,37 @@ func (s *Server) recordDeployment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, out)
 }
 
-func metricRange(r *http.Request) (time.Time, time.Time) {
+func metricRange(r *http.Request) (time.Time, time.Time, error) {
 	until := time.Now().UTC()
-	if v := r.URL.Query().Get("until"); v != "" {
-		if t, e := time.Parse(time.RFC3339, v); e == nil {
-			until = t
+	if v := strings.TrimSpace(r.URL.Query().Get("until")); v != "" {
+		parsed, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return time.Time{}, time.Time{}, errors.New("until must be an RFC3339 timestamp")
 		}
+		until = parsed.UTC()
 	}
 	since := until.Add(-30 * 24 * time.Hour)
-	if v := r.URL.Query().Get("since"); v != "" {
-		if t, e := time.Parse(time.RFC3339, v); e == nil {
-			since = t
+	if v := strings.TrimSpace(r.URL.Query().Get("since")); v != "" {
+		parsed, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return time.Time{}, time.Time{}, errors.New("since must be an RFC3339 timestamp")
 		}
+		since = parsed.UTC()
 	}
-	return since, until
+	if !since.Before(until) {
+		return time.Time{}, time.Time{}, errors.New("since must be earlier than until")
+	}
+	if until.Sub(since) > 366*24*time.Hour {
+		return time.Time{}, time.Time{}, errors.New("metric range cannot exceed 366 days")
+	}
+	return since, until, nil
 }
 func (s *Server) doraMetrics(w http.ResponseWriter, r *http.Request) {
-	since, until := metricRange(r)
+	since, until, rangeErr := metricRange(r)
+	if rangeErr != nil {
+		writeError(w, http.StatusBadRequest, rangeErr.Error())
+		return
+	}
 	m, e := insights.DORA(r.Context(), s.store, principal(r).TenantID, r.URL.Query().Get("environment"), since, until)
 	if e != nil {
 		writeError(w, 500, e.Error())
@@ -417,7 +431,11 @@ func (s *Server) doraMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, m)
 }
 func (s *Server) usageMetrics(w http.ResponseWriter, r *http.Request) {
-	since, until := metricRange(r)
+	since, until, rangeErr := metricRange(r)
+	if rangeErr != nil {
+		writeError(w, http.StatusBadRequest, rangeErr.Error())
+		return
+	}
 	m, e := insights.Usage(r.Context(), s.store, principal(r).TenantID, since, until)
 	if e != nil {
 		writeError(w, 500, e.Error())
@@ -426,7 +444,11 @@ func (s *Server) usageMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, m)
 }
 func (s *Server) trendMetrics(w http.ResponseWriter, r *http.Request) {
-	since, until := metricRange(r)
+	since, until, rangeErr := metricRange(r)
+	if rangeErr != nil {
+		writeError(w, http.StatusBadRequest, rangeErr.Error())
+		return
+	}
 	m, e := insights.Trends(r.Context(), s.store, principal(r).TenantID, since, until)
 	if e != nil {
 		writeError(w, 500, e.Error())
@@ -1275,7 +1297,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintf(w, "ciradar_analyses_total %d\nciradar_incidents_open %d\nciradar_jobs_queued %d\nciradar_repositories %d\nciradar_notification_failures_total %d\nciradar_feedback_total %d\nciradar_feedback_precision_percent %.2f\nciradar_tests_tracked %d\nciradar_tests_flaky %d\nciradar_tests_quarantined %d\n", st.Analyses, st.OpenIncidents, st.QueuedJobs, st.Repositories, st.NotificationFailures, feedback.Total, feedback.PrecisionPercent, len(tests), flaky, quarantined)
+	fmt.Fprintf(w, "ciradar_analyses_total %d\nciradar_incidents_open %d\nciradar_jobs_queued %d\nciradar_jobs_running %d\nciradar_jobs_failed %d\nciradar_repositories %d\nciradar_notification_failures_total %d\nciradar_feedback_total %d\nciradar_feedback_precision_percent %.2f\nciradar_tests_tracked %d\nciradar_tests_flaky %d\nciradar_tests_quarantined %d\n", st.Analyses, st.OpenIncidents, st.QueuedJobs, st.RunningJobs, st.FailedJobs, st.Repositories, st.NotificationFailures, feedback.Total, feedback.PrecisionPercent, len(tests), flaky, quarantined)
 }
 
 func (s *Server) mcpGet(w http.ResponseWriter, r *http.Request) {
@@ -1459,33 +1481,33 @@ func (s *Server) ciWebhook(provider string) http.HandlerFunc {
 			delivery = r.Header.Get("X-Buildkite-Event") + ":" + shortBodyHash(body)
 		}
 		delivery = provider + ":" + delivery
-		fresh, err := s.store.RecordDelivery(r.Context(), delivery, provider)
+		ev, err := connectors.ParseWebhook(provider, co.TenantID, delivery, body)
 		if err != nil {
-			writeError(w, 500, err.Error())
+			s.recordTerminalDelivery(r.Context(), delivery, provider, "invalid", err.Error())
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if ev.Conclusion == "" || (ev.Conclusion != "success" && !failedCIConclusion(ev.Conclusion)) {
+			s.recordTerminalDelivery(r.Context(), delivery, provider, "ignored", "not terminal")
+			writeJSON(w, http.StatusAccepted, map[string]any{"status": "ignored"})
+			return
+		}
+		fresh, err := s.store.EnqueueDeliveryForTenant(r.Context(), delivery, provider, ev.TenantID, "ci.event", ev, time.Now().UTC())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if !fresh {
 			writeJSON(w, http.StatusAccepted, map[string]any{"status": "duplicate_ignored"})
 			return
 		}
-		ev, err := connectors.ParseWebhook(provider, co.TenantID, delivery, body)
-		if err != nil {
-			s.updateDeliveryStatus(r.Context(), delivery, "invalid", err.Error())
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if ev.Conclusion == "" || (ev.Conclusion != "success" && !failedCIConclusion(ev.Conclusion)) {
-			s.updateDeliveryStatus(r.Context(), delivery, "ignored", "not terminal")
-			writeJSON(w, http.StatusAccepted, map[string]any{"status": "ignored"})
-			return
-		}
-		if err := s.store.EnqueueForTenant(r.Context(), ev.TenantID, "ci.event", ev, time.Now().UTC()); err != nil {
-			s.updateDeliveryStatus(r.Context(), delivery, "error", err.Error())
-			writeError(w, 500, err.Error())
-			return
-		}
-		s.updateDeliveryStatus(r.Context(), delivery, "queued", "")
 		writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "provider": provider, "repository": ev.Repository, "job": ev.Job})
+	}
+}
+
+func (s *Server) recordTerminalDelivery(ctx context.Context, deliveryID, eventType, status, detail string) {
+	if _, err := s.store.RecordTerminalDelivery(ctx, deliveryID, eventType, status, detail); err != nil {
+		s.log.Error("record webhook delivery failed", "delivery_id", deliveryID, "event_type", eventType, "error", err)
 	}
 }
 
@@ -1543,7 +1565,7 @@ func (s *Server) githubMarketplaceWebhook(w http.ResponseWriter, r *http.Request
 		hash := sha256.Sum256(body)
 		delivery = "marketplace-" + hex.EncodeToString(hash[:16])
 	}
-	fresh, err := s.store.RecordDelivery(r.Context(), delivery, "github.marketplace_purchase")
+	fresh, err := s.store.ClaimDelivery(r.Context(), delivery, "github.marketplace_purchase", 5*time.Minute)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1580,71 +1602,64 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.cfg.GitHubConfigured() {
-		writeError(w, 503, "GitHub App and webhook are not fully configured")
+		writeError(w, http.StatusServiceUnavailable, "GitHub App and webhook are not fully configured")
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 5<<20))
 	if err != nil {
-		writeError(w, 400, "could not read webhook")
+		writeError(w, http.StatusBadRequest, "could not read webhook")
 		return
 	}
 	if !gh.VerifyWebhook(s.cfg.GitHubWebhookSecret, body, r.Header.Get("X-Hub-Signature-256")) {
-		writeError(w, 401, "invalid webhook signature")
+		writeError(w, http.StatusUnauthorized, "invalid webhook signature")
 		return
 	}
-	delivery := r.Header.Get("X-GitHub-Delivery")
-	eventType := r.Header.Get("X-GitHub-Event")
+	delivery := strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
+	eventType := strings.TrimSpace(r.Header.Get("X-GitHub-Event"))
 	if delivery == "" {
-		writeError(w, 400, "missing X-GitHub-Delivery")
-		return
-	}
-	fresh, err := s.store.RecordDelivery(r.Context(), delivery, eventType)
-	if err != nil {
-		writeError(w, 500, err.Error())
-		return
-	}
-	if !fresh {
-		writeJSON(w, 202, map[string]any{"status": "duplicate_ignored"})
+		writeError(w, http.StatusBadRequest, "missing X-GitHub-Delivery")
 		return
 	}
 	if eventType != "workflow_run" {
-		s.updateDeliveryStatus(r.Context(), delivery, "ignored", "")
-		writeJSON(w, 202, map[string]any{"status": "ignored", "event": eventType})
+		s.recordTerminalDelivery(r.Context(), delivery, eventType, "ignored", "")
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "ignored", "event": eventType})
 		return
 	}
 	var ev model.GitHubWorkflowRunEvent
 	if err := json.Unmarshal(body, &ev); err != nil {
-		s.updateDeliveryStatus(r.Context(), delivery, "invalid", err.Error())
-		writeError(w, 400, "invalid workflow_run payload")
+		s.recordTerminalDelivery(r.Context(), delivery, eventType, "invalid", err.Error())
+		writeError(w, http.StatusBadRequest, "invalid workflow_run payload")
 		return
 	}
 	var bound bool
 	ev.TenantID, bound = s.store.ResolveInstallationTenant(r.Context(), ev.Installation.ID)
 	if s.cfg.RequireInstallationBinding && !bound {
-		s.updateDeliveryStatus(r.Context(), delivery, "unbound", "GitHub installation is not assigned to a tenant")
 		writeError(w, http.StatusConflict, "GitHub installation is not assigned to a tenant; use `ciradar github-installation bind`")
 		return
 	}
 	ev.DeliveryID = delivery
 	if ev.Action != "completed" || ev.WorkflowRun.Status != "completed" {
-		s.updateDeliveryStatus(r.Context(), delivery, "ignored", "")
-		writeJSON(w, 202, map[string]any{"status": "ignored", "reason": "not completed"})
+		s.recordTerminalDelivery(r.Context(), delivery, eventType, "ignored", "not completed")
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "ignored", "reason": "not completed"})
 		return
 	}
 	switch ev.WorkflowRun.Conclusion {
 	case "success", "failure", "timed_out", "cancelled", "startup_failure", "stale":
 	default:
-		s.updateDeliveryStatus(r.Context(), delivery, "ignored", "")
-		writeJSON(w, 202, map[string]any{"status": "ignored", "reason": "unsupported conclusion"})
+		s.recordTerminalDelivery(r.Context(), delivery, eventType, "ignored", "unsupported conclusion")
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "ignored", "reason": "unsupported conclusion"})
 		return
 	}
-	if err := s.store.EnqueueForTenant(r.Context(), ev.TenantID, "github.workflow_run", ev, time.Now().UTC()); err != nil {
-		s.updateDeliveryStatus(r.Context(), delivery, "error", err.Error())
-		writeError(w, 500, err.Error())
+	fresh, err := s.store.EnqueueDeliveryForTenant(r.Context(), delivery, eventType, ev.TenantID, "github.workflow_run", ev, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.updateDeliveryStatus(r.Context(), delivery, "queued", "")
-	writeJSON(w, 202, map[string]any{"status": "queued", "tenant_id": ev.TenantID, "run_id": ev.WorkflowRun.ID, "conclusion": ev.WorkflowRun.Conclusion})
+	if !fresh {
+		writeJSON(w, http.StatusAccepted, map[string]any{"status": "duplicate_ignored"})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "tenant_id": ev.TenantID, "run_id": ev.WorkflowRun.ID, "conclusion": ev.WorkflowRun.Conclusion})
 }
 
 func (s *Server) updateDeliveryStatus(ctx context.Context, deliveryID, status, detail string) {

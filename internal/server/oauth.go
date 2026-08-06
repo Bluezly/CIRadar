@@ -287,15 +287,6 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 		return
 	}
-	fresh, err := s.store.RecordDelivery(r.Context(), "oauth-code-"+code.ID, "oauth.authorization_code")
-	if err != nil {
-		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not redeem authorization code")
-		return
-	}
-	if !fresh {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code was already used")
-		return
-	}
 	now := time.Now().UTC()
 	accessID, err := randomOpaque(24)
 	if err != nil {
@@ -307,6 +298,15 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 	token, err := sealOAuthValue(s.dashboardSecret(), "access", access)
 	if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not issue access token")
+		return
+	}
+	fresh, err := s.store.RecordDelivery(r.Context(), "oauth-code-"+code.ID, "oauth.authorization_code")
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not redeem authorization code")
+		return
+	}
+	if !fresh {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code was already used")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": token, "token_type": "Bearer", "expires_in": 3600, "scope": access.Scope, "resource": access.Resource})
