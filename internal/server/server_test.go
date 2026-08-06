@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -533,7 +534,7 @@ func TestDashboardUsesStrictCSPWithoutInlineCode(t *testing.T) {
 			t.Fatalf("dashboard CSS contains %q", forbidden)
 		}
 	}
-	for _, forbidden := range []string{`class="logo"`, ">C<"} {
+	for _, forbidden := range []string{`class="logo"`, ">C<", `connection-state`, `sidebar-foot`, `>Connected<`, `href="/source"`} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("dashboard HTML contains %q", forbidden)
 		}
@@ -541,9 +542,22 @@ func TestDashboardUsesStrictCSPWithoutInlineCode(t *testing.T) {
 	if strings.Contains(dashboardJS, "prompt(") {
 		t.Fatal("dashboard uses browser prompts")
 	}
-	for _, required := range []string{`id="action-dialog"`, `id="session-panel"`, `class="sidebar"`} {
+	if !strings.Contains(dashboardJS, "function safeHTTPURL") || strings.Contains(dashboardJS, `href="${esc(item.run_url)}"`) {
+		t.Fatal("dashboard does not guard externally supplied links")
+	}
+	for _, required := range []string{`id="action-dialog"`, `id="session-dialog"`, `class="sidebar"`} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("dashboard missing %q", required)
+		}
+	}
+}
+
+func TestDashboardJavaScriptReferencesExistingElements(t *testing.T) {
+	pattern := regexp.MustCompile(`\$\(['"]([^'"]+)['"]\)`)
+	for _, match := range pattern.FindAllStringSubmatch(dashboardJS, -1) {
+		id := match[1]
+		if !strings.Contains(dashboardHTML, `id="`+id+`"`) {
+			t.Fatalf("dashboard JavaScript references missing element %q", id)
 		}
 	}
 }
@@ -931,5 +945,123 @@ func TestServerBlocksRepeatedFailedTokenAttempts(t *testing.T) {
 	}
 	if blocked.Header().Get("Retry-After") == "" {
 		t.Fatal("missing Retry-After")
+	}
+}
+
+func TestTestDetailAndCriticalPolicyEndpoints(t *testing.T) {
+	s, store, _ := testServer(t)
+	_, viewer, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "viewer", model.RoleViewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, operator, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "operator", model.RoleOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	observations := []model.TestObservation{
+		{ID: "detail-fail-1", Repository: "acme/api", Framework: "go", Name: "TestCheckout", Status: "failed", PullRequestNumber: 17, RunURL: "https://ci.example/runs/1", Message: "timeout request 12345 at checkout.go:41", OccurredAt: now},
+		{ID: "detail-fail-2", Repository: "acme/api", Framework: "go", Name: "TestCheckout", Status: "failed", PullRequestNumber: 18, RunURL: "https://ci.example/runs/2", Message: "timeout request 67890 at checkout.go:99", OccurredAt: now.Add(time.Minute)},
+	}
+	stats, err := store.RecordTestObservations(context.Background(), model.DefaultTenantID, observations)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
+	}
+	key := stats[0].TestKey
+
+	rr := doReq(t, s, http.MethodGet, "/api/v1/tests/"+key+"?limit=10", viewer, "", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("detail=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var detail struct {
+		Test         model.TestCaseStats     `json:"test"`
+		History      []model.TestObservation `json:"history"`
+		FailureTypes []model.TestFailureType `json:"failure_types"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.History) != 2 || len(detail.FailureTypes) != 1 || detail.Test.PullRequestsImpacted != 2 {
+		t.Fatalf("detail=%#v", detail)
+	}
+
+	rr = doReq(t, s, http.MethodPut, "/api/v1/tests/"+key+"/critical", viewer, "", map[string]bool{"critical": true})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("viewer critical status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = doReq(t, s, http.MethodPut, "/api/v1/tests/"+key+"/critical", operator, "", map[string]bool{"critical": true})
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"critical":true`) {
+		t.Fatalf("operator critical status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = doReq(t, s, http.MethodGet, "/api/v1/tests/"+key+"?limit=10", viewer, "", nil)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"action":"test.critical.enable"`) {
+		t.Fatalf("detail audit status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	for _, sensitive := range []string{`"remote_ip"`, `"request_id"`, `"metadata"`, `"resource_id"`} {
+		if strings.Contains(rr.Body.String(), sensitive) {
+			t.Fatalf("viewer test detail leaked %s: %s", sensitive, rr.Body.String())
+		}
+	}
+	rr = doReq(t, s, http.MethodGet, "/api/v1/tests/not-found", viewer, "", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing detail status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCriticalTestsAreNeverAutomaticallyQuarantined(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root"
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	cfg.AllowUnauthenticatedLocalhost = false
+	cfg.Notifications.Enabled = false
+	cfg.ProviderPolling = false
+	cfg.TestIntelligence.Enabled = true
+	cfg.TestIntelligence.AutoQuarantine = true
+	cfg.TestIntelligence.AutoQuarantineMinRuns = 3
+	cfg.TestIntelligence.AutoQuarantineMinScore = 25
+	cfg.TestIntelligence.AutoQuarantineDuration = 48 * time.Hour
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	_, token, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "operator", model.RoleOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := model.TestObservation{ID: "critical-seed", Repository: "acme/api", Framework: "junit", Suite: "unit", ClassName: "Calc", Name: "critical", Status: "passed", OccurredAt: time.Now().UTC()}
+	stats, err := store.RecordTestObservations(context.Background(), model.DefaultTenantID, []model.TestObservation{seed})
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("seed=%#v err=%v", stats, err)
+	}
+	if _, err := store.SetTestCritical(context.Background(), model.DefaultTenantID, stats[0].TestKey, true); err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for i := 0; i < 10; i++ {
+		body := `<testsuite name="unit"><testcase classname="Calc" name="critical"/></testsuite>`
+		if i%2 == 0 {
+			body = `<testsuite name="unit"><testcase classname="Calc" name="critical"><failure message="boom">stack</failure></testcase></testsuite>`
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/tests/junit?repository=acme/api&workflow=ci&job=test&run_id="+strconv.Itoa(i+10), strings.NewReader(body))
+		req.RemoteAddr = "203.0.113.30:1234"
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		s.http.Handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("ingest %d status=%d body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+	quarantines, err := store.ListTestQuarantines(context.Background(), model.DefaultTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantines) != 0 {
+		t.Fatalf("critical test was auto-quarantined: %#v", quarantines)
+	}
+	loaded, err := store.GetTestCaseStats(context.Background(), model.DefaultTenantID, stats[0].TestKey)
+	if err != nil || loaded == nil || !loaded.Critical || loaded.Classification != "flaky" {
+		t.Fatalf("critical flaky stats=%#v err=%v", loaded, err)
 	}
 }
