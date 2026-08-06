@@ -10,8 +10,6 @@ import (
 	"time"
 )
 
-// Issue is the subset of the GitHub Issues representation CI Radar needs to
-// persist links, refresh state, and expose a stable API to integrations.
 type Issue struct {
 	ID          int64     `json:"id"`
 	Number      int       `json:"number"`
@@ -48,9 +46,6 @@ type CreateIssueRequest struct {
 	IssueFieldValues []IssueFieldValue `json:"issue_field_values,omitempty"`
 }
 
-// UpdateIssueRequest uses pointer fields so callers can intentionally clear
-// labels, assignees, body, issue type, or custom fields. MilestoneSet allows a
-// JSON null to remove a milestone without conflating it with an omitted field.
 type UpdateIssueRequest struct {
 	Title            *string            `json:"title,omitempty"`
 	Body             *string            `json:"body,omitempty"`
