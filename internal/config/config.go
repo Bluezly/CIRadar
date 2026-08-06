@@ -197,7 +197,7 @@ func Default() Config {
 		PRComments:                    PRCommentConfig{Enabled: true, Mode: "external_or_strong", MinimumScore: 60, UpdateExisting: true},
 		TestIntelligence:              TestIntelligenceConfig{Enabled: true, AutoQuarantine: false, AutoQuarantineMinRuns: 5, AutoQuarantineMinScore: 65, AutoQuarantineDurationText: "7d"},
 		SSO:                           SSOConfig{Enabled: false, Mode: "oidc", DefaultTenant: "default", DefaultRole: "viewer", CookieName: "ciradar_session", CookieSecure: true},
-		LLM:                           LLMConfig{Enabled: false, Provider: "openai-compatible", Model: "gpt-5-mini", MinimumScore: 60, MaxInputCharacters: 24000, MaxOutputTokens: 1200, TimeoutText: "45s", SendRedactedExcerpt: true},
+		LLM:                           LLMConfig{Enabled: false, Provider: "openai-compatible", Model: "gpt-5-mini", MinimumScore: 60, MaxInputCharacters: 24000, MaxOutputTokens: 1200, TimeoutText: "45s", SendRedactedExcerpt: true, SendChangedFiles: true, SendSourceCode: true, MaxSourceFiles: 8, MaxSourceFileCharacters: 32000, DataPolicy: "local_only", BlockOnResidualSecret: true},
 		Repair:                        RepairConfig{Enabled: false, AutoDraftPR: false, MinimumScore: 60, BranchPrefix: "ciradar/repair-", MaximumFiles: 10, MaximumLines: 1000},
 		ChatOps:                       ChatOpsConfig{Enabled: false, DefaultTenant: "default", AllowAcknowledge: true, AllowResolve: true, AllowQuarantine: true, QuarantineDuration: "7d"},
 		Costs:                         CostConfig{Enabled: true, Currency: "USD", DefaultRates: map[string]float64{}, RunnerRates: map[string]float64{}, BillingRounds: map[string]int{}},
@@ -827,6 +827,11 @@ func applyEnv(c *Config) {
 	setString(&c.LLM.Endpoint, "CIRADAR_LLM_ENDPOINT")
 	setString(&c.LLM.APIKey, "CIRADAR_LLM_API_KEY")
 	setString(&c.LLM.Model, "CIRADAR_LLM_MODEL")
+	setString(&c.LLM.DataPolicy, "CIRADAR_LLM_DATA_POLICY")
+	setBool(&c.LLM.SendSourceCode, "CIRADAR_LLM_SEND_SOURCE_CODE")
+	setInt(&c.LLM.MaxSourceFiles, "CIRADAR_LLM_MAX_SOURCE_FILES")
+	setInt(&c.LLM.MaxSourceFileCharacters, "CIRADAR_LLM_MAX_SOURCE_FILE_CHARACTERS")
+	setBool(&c.LLM.BlockOnResidualSecret, "CIRADAR_LLM_BLOCK_ON_REDACTION_RISK")
 	setBool(&c.LLM.AllowPrivateNetwork, "CIRADAR_LLM_ALLOW_PRIVATE_NETWORK")
 	setBool(&c.ChatOps.Enabled, "CIRADAR_CHATOPS_ENABLED")
 	setString(&c.ChatOps.SlackSigningSecret, "CIRADAR_SLACK_SIGNING_SECRET")

@@ -52,22 +52,27 @@ type SSOConfig struct {
 }
 
 type LLMConfig struct {
-	Enabled             bool          `json:"enabled"`
-	Provider            string        `json:"provider,omitempty"`
-	Endpoint            string        `json:"endpoint,omitempty"`
-	APIKey              string        `json:"api_key,omitempty"`
-	Model               string        `json:"model,omitempty"`
-	EmbeddingsEndpoint  string        `json:"embeddings_endpoint,omitempty"`
-	EmbeddingModel      string        `json:"embedding_model,omitempty"`
-	AutoEnhance         bool          `json:"auto_enhance"`
-	MinimumScore        int           `json:"minimum_score,omitempty"`
-	MaxInputCharacters  int           `json:"max_input_characters,omitempty"`
-	MaxOutputTokens     int           `json:"max_output_tokens,omitempty"`
-	TimeoutText         string        `json:"timeout,omitempty"`
-	Timeout             time.Duration `json:"-"`
-	SendRedactedExcerpt bool          `json:"send_redacted_excerpt"`
-	SendChangedFiles    bool          `json:"send_changed_files"`
-	AllowPrivateNetwork bool          `json:"allow_private_network,omitempty"`
+	Enabled                 bool          `json:"enabled"`
+	Provider                string        `json:"provider,omitempty"`
+	Endpoint                string        `json:"endpoint,omitempty"`
+	APIKey                  string        `json:"api_key,omitempty"`
+	Model                   string        `json:"model,omitempty"`
+	EmbeddingsEndpoint      string        `json:"embeddings_endpoint,omitempty"`
+	EmbeddingModel          string        `json:"embedding_model,omitempty"`
+	AutoEnhance             bool          `json:"auto_enhance"`
+	MinimumScore            int           `json:"minimum_score,omitempty"`
+	MaxInputCharacters      int           `json:"max_input_characters,omitempty"`
+	MaxOutputTokens         int           `json:"max_output_tokens,omitempty"`
+	TimeoutText             string        `json:"timeout,omitempty"`
+	Timeout                 time.Duration `json:"-"`
+	SendRedactedExcerpt     bool          `json:"send_redacted_excerpt"`
+	SendChangedFiles        bool          `json:"send_changed_files"`
+	SendSourceCode          bool          `json:"send_source_code"`
+	MaxSourceFiles          int           `json:"max_source_files,omitempty"`
+	MaxSourceFileCharacters int           `json:"max_source_file_characters,omitempty"`
+	DataPolicy              string        `json:"data_policy,omitempty"`
+	BlockOnResidualSecret   bool          `json:"block_on_residual_secret"`
+	AllowPrivateNetwork     bool          `json:"allow_private_network,omitempty"`
 }
 
 type RepairConfig struct {
@@ -214,6 +219,15 @@ func (c *Config) normalizeEnterprise() error {
 			return fmt.Errorf("unsupported sso mode %q", c.SSO.Mode)
 		}
 	}
+	c.LLM.DataPolicy = strings.ToLower(strings.TrimSpace(c.LLM.DataPolicy))
+	if c.LLM.DataPolicy == "" {
+		c.LLM.DataPolicy = "local_only"
+	}
+	switch c.LLM.DataPolicy {
+	case "local_only", "redacted_remote", "metadata_only":
+	default:
+		return fmt.Errorf("unsupported llm data_policy %q", c.LLM.DataPolicy)
+	}
 	if c.LLM.Provider == "" {
 		c.LLM.Provider = "openai-compatible"
 	}
@@ -232,6 +246,12 @@ func (c *Config) normalizeEnterprise() error {
 	if c.LLM.MaxOutputTokens < 128 {
 		c.LLM.MaxOutputTokens = 1200
 	}
+	if c.LLM.MaxSourceFiles < 1 || c.LLM.MaxSourceFiles > 20 {
+		c.LLM.MaxSourceFiles = 8
+	}
+	if c.LLM.MaxSourceFileCharacters < 1000 || c.LLM.MaxSourceFileCharacters > 100000 {
+		c.LLM.MaxSourceFileCharacters = 32000
+	}
 	if c.LLM.TimeoutText == "" {
 		c.LLM.TimeoutText = "45s"
 	}
@@ -242,6 +262,9 @@ func (c *Config) normalizeEnterprise() error {
 	c.LLM.Timeout = d
 	if c.LLM.Enabled && c.LLM.Endpoint == "" {
 		return errors.New("llm requires endpoint")
+	}
+	if c.LLM.Enabled && c.LLM.DataPolicy == "local_only" && !isLoopbackEndpoint(c.LLM.Endpoint) {
+		return errors.New("llm data_policy local_only requires a loopback endpoint; use redacted_remote or metadata_only only after an explicit data review")
 	}
 	if c.Repair.MinimumScore < 0 || c.Repair.MinimumScore > 100 {
 		c.Repair.MinimumScore = 60
@@ -345,4 +368,17 @@ func (c *Config) normalizeEnterprise() error {
 		c.PredictiveTests.MinimumScore = 20
 	}
 	return nil
+}
+
+func isLoopbackEndpoint(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
