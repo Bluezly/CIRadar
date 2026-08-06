@@ -17,6 +17,26 @@ type LLMEnhancement struct {
 	CreatedAt        time.Time         `json:"created_at"`
 }
 
+// ExternalIssueLink records the issue tracker object created from a CI Radar
+// analysis. It is stored as an extension object so existing database backends
+// remain backward compatible while the API can refresh the remote state.
+type ExternalIssueLink struct {
+	TenantID       string    `json:"tenant_id"`
+	AnalysisID     string    `json:"analysis_id"`
+	Provider       string    `json:"provider"`
+	Repository     string    `json:"repository"`
+	InstallationID int64     `json:"installation_id,omitempty"`
+	Number         int       `json:"number"`
+	URL            string    `json:"url"`
+	State          string    `json:"state"`
+	StateReason    string    `json:"state_reason,omitempty"`
+	Title          string    `json:"title"`
+	Locked         bool      `json:"locked"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	LastSyncedAt   time.Time `json:"last_synced_at"`
+}
+
 type DeploymentEvent struct {
 	ID             string    `json:"id"`
 	TenantID       string    `json:"tenant_id"`
@@ -95,12 +115,13 @@ type SimilarAnalysis struct {
 }
 
 type TestSelectionRequest struct {
-	Repository   string   `json:"repository"`
-	ChangedFiles []string `json:"changed_files"`
-	Framework    string   `json:"framework,omitempty"`
-	Limit        int      `json:"limit,omitempty"`
-	IncludeFlaky bool     `json:"include_flaky,omitempty"`
-	MinimumScore float64  `json:"minimum_score,omitempty"`
+	Repository         string   `json:"repository"`
+	ChangedFiles       []string `json:"changed_files"`
+	Framework          string   `json:"framework,omitempty"`
+	Limit              int      `json:"limit,omitempty"`
+	IncludeFlaky       bool     `json:"include_flaky,omitempty"`
+	MinimumScore       float64  `json:"minimum_score,omitempty"`
+	AllowUnsafePartial bool     `json:"allow_unsafe_partial,omitempty"`
 }
 
 type ImpactGraph struct {
@@ -139,15 +160,21 @@ type SelectedTest struct {
 }
 
 type TestSelection struct {
-	Repository          string         `json:"repository"`
-	ChangedFiles        []string       `json:"changed_files"`
-	Selected            []SelectedTest `json:"selected"`
-	Skipped             int            `json:"skipped"`
-	CandidatesEvaluated int            `json:"candidates_evaluated"`
-	GraphAvailable      bool           `json:"graph_available"`
-	CoverageIdentities  int            `json:"coverage_identities"`
-	Diagnostics         []string       `json:"diagnostics,omitempty"`
-	GeneratedAt         time.Time      `json:"generated_at"`
+	Repository            string         `json:"repository"`
+	ChangedFiles          []string       `json:"changed_files"`
+	Selected              []SelectedTest `json:"selected"`
+	Skipped               int            `json:"skipped"`
+	CandidatesEvaluated   int            `json:"candidates_evaluated"`
+	GraphAvailable        bool           `json:"graph_available"`
+	CoverageIdentities    int            `json:"coverage_identities"`
+	FullSuiteRequired     bool           `json:"full_suite_required"`
+	SelectionSafe         bool           `json:"selection_safe"`
+	UnsafeOverrideApplied bool           `json:"unsafe_override_applied,omitempty"`
+	RiskLevel             string         `json:"risk_level"`
+	RiskReasons           []string       `json:"risk_reasons,omitempty"`
+	Recommendation        string         `json:"recommendation"`
+	Diagnostics           []string       `json:"diagnostics,omitempty"`
+	GeneratedAt           time.Time      `json:"generated_at"`
 }
 
 type SSOIdentity struct {
