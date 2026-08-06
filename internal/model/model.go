@@ -369,26 +369,29 @@ type FeedbackMetrics struct {
 }
 
 type TestObservation struct {
-	ID          string      `json:"id"`
-	TenantID    string      `json:"tenant_id"`
-	Repository  string      `json:"repository"`
-	Workflow    string      `json:"workflow,omitempty"`
-	Job         string      `json:"job,omitempty"`
-	RunID       int64       `json:"run_id,omitempty"`
-	CommitSHA   string      `json:"commit_sha,omitempty"`
-	Branch      string      `json:"branch,omitempty"`
-	Framework   string      `json:"framework,omitempty"`
-	Suite       string      `json:"suite,omitempty"`
-	ClassName   string      `json:"class_name,omitempty"`
-	Name        string      `json:"name"`
-	Parameters  string      `json:"parameters,omitempty"`
-	File        string      `json:"file,omitempty"`
-	Status      string      `json:"status"`
-	DurationMS  int64       `json:"duration_ms,omitempty"`
-	Message     string      `json:"message,omitempty"`
-	Details     string      `json:"details,omitempty"`
-	Environment Environment `json:"environment,omitempty"`
-	OccurredAt  time.Time   `json:"occurred_at"`
+	ID                string      `json:"id"`
+	TenantID          string      `json:"tenant_id"`
+	Repository        string      `json:"repository"`
+	Workflow          string      `json:"workflow,omitempty"`
+	Job               string      `json:"job,omitempty"`
+	RunID             int64       `json:"run_id,omitempty"`
+	CommitSHA         string      `json:"commit_sha,omitempty"`
+	Branch            string      `json:"branch,omitempty"`
+	PullRequestNumber int         `json:"pull_request_number,omitempty"`
+	RunURL            string      `json:"run_url,omitempty"`
+	Variant           string      `json:"variant,omitempty"`
+	Framework         string      `json:"framework,omitempty"`
+	Suite             string      `json:"suite,omitempty"`
+	ClassName         string      `json:"class_name,omitempty"`
+	Name              string      `json:"name"`
+	Parameters        string      `json:"parameters,omitempty"`
+	File              string      `json:"file,omitempty"`
+	Status            string      `json:"status"`
+	DurationMS        int64       `json:"duration_ms,omitempty"`
+	Message           string      `json:"message,omitempty"`
+	Details           string      `json:"details,omitempty"`
+	Environment       Environment `json:"environment,omitempty"`
+	OccurredAt        time.Time   `json:"occurred_at"`
 }
 
 type TestCaseStats struct {
@@ -396,6 +399,7 @@ type TestCaseStats struct {
 	TestKey                         string         `json:"test_key"`
 	Repository                      string         `json:"repository"`
 	Framework                       string         `json:"framework,omitempty"`
+	Variant                         string         `json:"variant,omitempty"`
 	Suite                           string         `json:"suite,omitempty"`
 	ClassName                       string         `json:"class_name,omitempty"`
 	Name                            string         `json:"name"`
@@ -420,6 +424,10 @@ type TestCaseStats struct {
 	AverageDurationMS               int64          `json:"average_duration_ms"`
 	EstimatedComputeMinutesLost     float64        `json:"estimated_compute_minutes_lost"`
 	EstimatedEngineeringMinutesLost float64        `json:"estimated_engineering_minutes_lost"`
+	PullRequestsImpacted            int            `json:"pull_requests_impacted"`
+	ImpactedPullRequests            []int          `json:"impacted_pull_requests,omitempty"`
+	QuarantinedFailures             int            `json:"quarantined_failures"`
+	Critical                        bool           `json:"critical"`
 	LastCommitSHA                   string         `json:"last_commit_sha,omitempty"`
 	LastRunID                       int64          `json:"last_run_id,omitempty"`
 	LastDurationMS                  int64          `json:"last_duration_ms,omitempty"`
@@ -435,6 +443,15 @@ type TestCaseStats struct {
 	Owner                           string         `json:"owner,omitempty"`
 	DisplayName                     string         `json:"display_name,omitempty"`
 	Aliases                         []string       `json:"aliases,omitempty"`
+}
+
+type TestFailureType struct {
+	Signature      string    `json:"signature"`
+	Message        string    `json:"message"`
+	Count          int       `json:"count"`
+	FirstSeenAt    time.Time `json:"first_seen_at"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+	ExampleDetails string    `json:"example_details,omitempty"`
 }
 
 type TestQuarantine struct {
