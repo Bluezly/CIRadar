@@ -9,7 +9,7 @@ Current release notes: `RELEASE-NOTES-OSS-RC6-HARDENING-FIX-5.md`.
 ## What RC.6 includes
 
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
-- GitHub Checks, sticky GitHub Pull Request comments, and sticky GitLab Merge Request comments
+- GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
 - relational tenant-scoped PostgreSQL storage or portable embedded storage
 - tenant isolation, RBAC, API keys, encrypted secrets, retention, audit events, trusted proxies, CSP, OIDC, and native SAML SP flow
 - Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie, and signed generic webhooks
@@ -20,7 +20,7 @@ Current release notes: `RELEASE-NOTES-OSS-RC6-HARDENING-FIX-5.md`.
 - lexical similarity fallback, local static vectors, local neural embeddings through Ollama, or BYOK remote embeddings
 - MCP over stdio and Streamable HTTP with OAuth discovery, PKCE, sessions, SSE, server notifications, and confirmation-gated write tools
 - safe automatic rerun for external failures, disabled by default
-- repair plan and confirmation-gated local patch application, plus optional GitHub draft repair Pull Requests
+- source-grounded LLM repair suggestions with exact patch validation, confirmation-gated local patch application, and optional GitHub draft repair Pull Requests
 - Windows, Linux, and macOS builds for amd64 and arm64
 
 ## Quick start

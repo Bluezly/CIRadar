@@ -54,9 +54,24 @@ Coverage identities may use the test hash, test name, `suite::name`, `class::nam
 
 The impact graph is a static import graph, not a whole-program dynamic call graph. Coverage data is the strongest available signal. Reflection, runtime code generation, framework routing, and native calls may require explicit coverage mappings or always-run suites.
 
+
+### Fail-safe behavior
+
+Partial selection is rejected by default when CI Radar cannot prove adequate impact coverage. The response sets `full_suite_required=true` and returns every test known to repository history when any of these conditions apply:
+
+- no dependency graph is available, or a changed file is absent from the graph
+- coverage identities are missing or only partially resolve to known tests
+- configuration, environment, migration/schema, dependency manifest/lockfile, CI, container, or build-system files changed
+- changed files are empty or otherwise insufficient to establish impact
+
+`allow_unsafe_partial=true` is an explicit escape hatch. It is reported as `unsafe_override_applied=true`, with risk reasons and diagnostics. “Full known suite” means all tests CIRadar has observed; a runner must still define a canonical full-suite command so brand-new tests are not omitted.
+
 ## Flake classification
 
 CI Radar can classify likely causes such as timing, selector, network, environment, resource pressure, order/state, concurrency, and data. These labels are evidence-based hints, not proof of a root cause.
+
+Flake statistics distinguish total observations from executed runs. `skipped` observations do not increase history confidence or dilute the failure rate. Replayed observation IDs are idempotent, out-of-order history cannot overwrite the latest execution, and classification uses a warm-up period before confirming `flaky`. Responses include a Wilson 95% failure-rate interval, history confidence, transition rate, same-context rerun recoveries, average duration, estimated compute minutes lost, and a conservative engineering-minutes-lost estimate. These estimates are operational indicators, not payroll accounting.
+
 
 ## Quarantine and gate
 

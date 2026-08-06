@@ -75,3 +75,22 @@ pg_restore --clean --if-exists --dbname="$CIRADAR_DATABASE_URL" ciradar.dump
 ```
 
 Back up the database, configuration, GitHub App private key, master encryption key, dashboard and SSO session keys, and fingerprint HMAC key. Losing encryption keys makes encrypted configuration values unrecoverable. Changing the fingerprint key starts a new correlation namespace.
+
+## Test telemetry partitions and idempotency
+
+`ciradar_test_observations` is range-partitioned by month and has tenant/repository/time, tenant/test/time, status/time, and BRIN time indexes. Startup and cleanup maintain nearby monthly partitions, while a default partition protects ingestion outside the prepared window. Observation IDs are idempotency keys: duplicate deliveries are filtered before compact test statistics are updated, so a retried webhook cannot inflate flake confidence or time-lost estimates.
+
+PostgreSQL remains the transactional system of record, not an unlimited log warehouse. Keep raw build logs in object storage or the CI provider and retain compact CIRadar telemetry. At sustained high ingest or long analytical retention, export observations to a columnar/time-series system such as ClickHouse or TimescaleDB rather than forcing all exploratory log analytics through the primary OLTP database.
+
+## Production readiness checklist
+
+Before calling a deployment production-ready, operators should complete and record:
+
+1. a representative load test covering expected test-result and analysis ingest, dashboard reads, cleanup, and concurrent workers
+2. automated `pg_dump`/physical backup plus a restore drill into an isolated database
+3. replication/failover testing, including client reconnect behavior and recovery-point/recovery-time objectives
+4. migration rehearsal on a copy of production data and a documented rollback point
+5. autovacuum, WAL, connection, disk-I/O, partition growth, default-partition growth, and query-latency alerts
+6. retention sizing and deletion/partition-drop verification
+
+The repository does not claim that these operator-specific exercises have been completed for an arbitrary installation. Passing unit and integration tests is not a substitute for them.

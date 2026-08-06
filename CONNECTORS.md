@@ -63,3 +63,14 @@ Automatic rerun is disabled by default. It can run only when:
 - no provider-wide incident suppresses individual reruns
 
 Every attempt is idempotently recorded and audited. Safe rerun does not modify source code or workflow configuration.
+
+## GitHub Issues linked to analyses
+
+Authenticated operators can create and manage a GitHub Issue directly from an analysis:
+
+- `POST /api/v1/analyses/{id}/github-issue`
+- `GET /api/v1/analyses/{id}/github-issue`
+- `PATCH /api/v1/analyses/{id}/github-issue`
+- `POST /api/v1/analyses/{id}/github-issue/comments`
+
+Create/update supports labels, assignees, milestone, issue type and issue fields when the installed GitHub App and repository permit them. Update also supports open/closed state, state reason, duplicate issue linkage, lock/unlock and lock reason. The stored link is tenant-scoped and refreshed from GitHub.
