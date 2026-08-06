@@ -135,7 +135,7 @@ Usage:
   ciradar repository set|list [options]
   ciradar incident acknowledge|resolve|reopen [options]
   ciradar secret key|encrypt [value]
-  ciradar tests ingest|list|gate|select|index|coverage|quarantine|unquarantine [options]
+  ciradar tests ingest|list|gate|select|index|coverage|quarantine|unquarantine|critical|noncritical [options]
   ciradar deployment record [options]
   ciradar metrics dora|usage [options]
   ciradar similar --analysis ID [options]
@@ -1200,7 +1200,7 @@ func evaluateTestGate(observations []model.TestObservation, quarantines []model.
 
 func cmdTests(args []string) error {
 	if len(args) < 1 {
-		return errors.New("usage: ciradar tests ingest|list|gate|select|index|coverage|quarantine|unquarantine")
+		return errors.New("usage: ciradar tests ingest|list|gate|select|index|coverage|quarantine|unquarantine|critical|noncritical")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("tests "+sub, flag.ContinueOnError)
@@ -1214,6 +1214,9 @@ func cmdTests(args []string) error {
 	runID := fs.Int64("run-id", 0, "run id")
 	sha := fs.String("sha", "", "commit SHA")
 	branch := fs.String("branch", "", "branch")
+	pullRequestNumber := fs.Int("pr", 0, "pull request number")
+	runURL := fs.String("run-url", "", "CI run URL")
+	variant := fs.String("variant", "", "execution variant such as operating system or runtime")
 	classification := fs.String("classification", "", "classification filter")
 	key := fs.String("key", "", "test key")
 	testSelector := fs.String("test", "", "readable test identity")
@@ -1246,7 +1249,7 @@ func cmdTests(args []string) error {
 		if err != nil {
 			return err
 		}
-		obs, err := testintelligence.ParseReport(*format, strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: firstNonEmptyCLI(*framework, *format), OccurredAt: time.Now().UTC()})
+		obs, err := testintelligence.ParseReport(*format, strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, PullRequestNumber: *pullRequestNumber, RunURL: *runURL, Variant: *variant, Framework: firstNonEmptyCLI(*framework, *format), OccurredAt: time.Now().UTC()})
 		if err != nil {
 			return err
 		}
@@ -1272,7 +1275,7 @@ func cmdTests(args []string) error {
 		if err != nil {
 			return err
 		}
-		obs, err := testintelligence.ParseReport(*format, strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, Framework: firstNonEmptyCLI(*framework, *format), OccurredAt: time.Now().UTC()})
+		obs, err := testintelligence.ParseReport(*format, strings.NewReader(string(b)), testintelligence.Metadata{TenantID: tenantID, Repository: *repo, Workflow: *workflow, Job: *job, RunID: *runID, CommitSHA: *sha, Branch: *branch, PullRequestNumber: *pullRequestNumber, RunURL: *runURL, Variant: *variant, Framework: firstNonEmptyCLI(*framework, *format), OccurredAt: time.Now().UTC()})
 		if err != nil {
 			return err
 		}
@@ -1355,6 +1358,21 @@ func cmdTests(args []string) error {
 			return err
 		}
 		return store.RemoveTestQuarantine(context.Background(), tenantID, resolvedKey)
+	case "critical", "noncritical":
+		resolvedKey, err := resolveTestKey(context.Background(), store, tenantID, *repo, *key, *testSelector)
+		if err != nil {
+			return err
+		}
+		stats, err := store.SetTestCritical(context.Background(), tenantID, resolvedKey, sub == "critical")
+		if err != nil {
+			return err
+		}
+		if stats == nil {
+			return errors.New("test case not found")
+		}
+		stats.DisplayName = testselection.DisplayName(*stats)
+		stats.Aliases = testselection.TestAliases(*stats)
+		return printJSON(stats)
 	default:
 		return fmt.Errorf("unknown tests command %q", sub)
 	}
