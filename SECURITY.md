@@ -44,6 +44,18 @@ Webhook bodies are size-limited, signatures or configured secrets are verified, 
 
 MCP OAuth authorization codes and access tokens are purpose-separated AES-GCM values; plaintext or unsigned token payloads are rejected. Authorization requires an explicit same-origin consent POST, so merely opening an authorization URL cannot issue a code. OAuth tokens and API keys remain tenant-scoped, and revocation checks fail closed on storage errors. Stateful mutations require a prepared confirmation token bound to the actor, action, target, tenant, and expiry. Safe rerun is allowlisted and idempotent. Repair cannot execute arbitrary commands and cannot auto-merge.
 
+## Authentication throttling
+
+The general per-IP request limit is supplemented by a failure-aware authentication limiter. Requests carrying a Bearer credential and POST requests to `/auth/token` are observed for HTTP 401 results. Ten failures within five minutes trigger an exponential block beginning at five seconds and capped at 15 minutes. The response is HTTP 429 JSON with `Retry-After`. Successful `/auth/token` exchange clears the failure state. This is defense in depth; admin tokens and generated API keys must still use high entropy and be rotated after suspected disclosure.
+
+## Protocol implementation responsibility
+
+CI Radar deliberately avoids third-party Go modules. Custom protocol code is therefore part of the trusted computing base, especially `internal/pgwire` and the SAML response parser in `internal/sso`. SAML XML signatures are verified by the configured `xmlsec1` executable rather than a Go dependency. Maintainers should fuzz, regression-test, and independently audit these parsers and state machines. A zero-module-dependency policy is not a substitute for protocol review.
+
+## Release integrity
+
+Official build jobs and local build scripts generate SHA-256 checksums. Publish `SHA256SUMS` beside every binary release through the same authenticated release process. Checksums detect corruption but do not authenticate an untrusted mirror; projects requiring stronger provenance should additionally sign release metadata with an organization-controlled signing identity. Release binaries are stripped by default, while `STRIP=0` retains debugging data for controlled diagnostic builds.
+
 ## Reporting vulnerabilities
 
 Do not place customer logs, keys, tokens, database URLs, SAML assertions, or webhook URLs in public reports. Use the project's private security contact.

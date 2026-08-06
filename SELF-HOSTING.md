@@ -58,3 +58,7 @@ The service account needs execute access to `xmlsec1`, read access to the pinned
 - `remote`: configured embedding API
 
 Keep the selected endpoint on a trusted network and treat repository and log text as untrusted input.
+
+## Restricted outbound networks
+
+Provider-status polling is independent of GitHub App configuration. In an environment that intentionally blocks public status endpoints, set `provider_polling` to `false` or `CIRADAR_PROVIDER_POLLING=false`. Persistent failures are summarized once and repeated identical failures are logged only at debug level; recovery is logged when connectivity returns.

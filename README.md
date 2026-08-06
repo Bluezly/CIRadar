@@ -4,7 +4,7 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC6.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC6-HARDENING-FIX-5.md`.
 
 ## What RC.6 includes
 
@@ -35,6 +35,22 @@ ciradar serve
 `demo` is built into the binary, so the quick start does not depend on files from the source archive. `ciradar init` creates a configuration containing bootstrap secrets with owner-only permissions on POSIX systems. Restrict the file ACL on Windows and move production secrets to environment variables or a secret manager.
 
 Open `http://127.0.0.1:8787/` and exchange the generated root token through the secure login field.
+
+## API routing and authentication hardening
+
+The dashboard is served only at `/`. Unknown non-API paths return HTTP 404, and every unmatched path under `/api` returns a JSON 404 response. This prevents a misspelled integration endpoint from receiving dashboard HTML with HTTP 200.
+
+Bearer-token and `/auth/token` failures are tracked separately from the general request limit. After 10 failed authentication attempts from one resolved client IP within five minutes, CI Radar applies an exponential delay starting at five seconds and capped at 15 minutes. Trusted-proxy configuration still controls which client IP is used.
+
+## Build integrity and diagnostics
+
+Release builds produce `SHA256SUMS`. Verify a downloaded binary before execution with `sha256sum -c SHA256SUMS` or the equivalent platform tool. A checksum detects corruption or substitution only when the checksum file itself comes from a trusted release channel.
+
+The build scripts strip release binaries by default. Set `STRIP=0` when building an internal diagnostic binary with DWARF data retained. Go panic stacks normally retain function and source-location information even in stripped release builds, but an unstripped build is still more useful for debuggers and post-mortem tooling.
+
+## Dependency and protocol ownership
+
+The Go module intentionally has no third-party Go module dependencies. That reduces supply-chain surface but makes this project responsible for maintaining its custom PostgreSQL wire client and strict SAML parsing/orchestration. SAML XML-signature verification is delegated to the operator-configured `xmlsec1` executable; optional integrations such as PostgreSQL, Ollama, and external CI providers remain runtime dependencies when enabled. The custom protocol surfaces should receive independent security review before high-risk production deployment.
 
 ## PostgreSQL
 
