@@ -528,6 +528,24 @@ func TestDashboardUsesStrictCSPWithoutInlineCode(t *testing.T) {
 	if !strings.Contains(body, "/assets/dashboard.js") || !strings.Contains(body, "/assets/dashboard.css") {
 		t.Fatalf("dashboard assets missing")
 	}
+	for _, forbidden := range []string{"linear-gradient(", "radial-gradient(", "backdrop-filter", "box-shadow:"} {
+		if strings.Contains(dashboardCSS, forbidden) {
+			t.Fatalf("dashboard CSS contains %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{`class="logo"`, ">C<"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("dashboard HTML contains %q", forbidden)
+		}
+	}
+	if strings.Contains(dashboardJS, "prompt(") {
+		t.Fatal("dashboard uses browser prompts")
+	}
+	for _, required := range []string{`id="action-dialog"`, `id="session-panel"`, `class="sidebar"`} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("dashboard missing %q", required)
+		}
+	}
 }
 
 func TestSecureDashboardLoginUsesEncryptedHttpOnlyCookie(t *testing.T) {
