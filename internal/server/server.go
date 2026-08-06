@@ -31,6 +31,7 @@ import (
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
 	"ciradar/internal/similarity"
+	"ciradar/internal/sourcecontext"
 	"ciradar/internal/sso"
 	"ciradar/internal/testintelligence"
 	"ciradar/internal/testselection"
@@ -56,12 +57,21 @@ type Server struct {
 	ipResolver  *clientIPResolver
 	mcpRuntime  *mcpserver.Runtime
 	mcpServer   *mcpserver.Server
+	github      *gh.Client
 }
 
 func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Logger) *Server {
 	runtime := mcpserver.NewRuntime()
 	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store), marketplace: marketplace.New(cfg.GitHubMarketplace, store), ipResolver: newClientIPResolver(cfg.TrustedProxyCIDRs), mcpRuntime: runtime}
 	s.mcpServer = &mcpserver.Server{Store: store, Semantic: cfg.Semantic, LLM: cfg.LLM, Repair: cfg.Repair, Runtime: runtime}
+	if cfg.GitHubAppID > 0 && strings.TrimSpace(cfg.GitHubPrivateKeyPath) != "" {
+		client, err := gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL, cfg.GitHubAllowPrivateNetwork)
+		if err != nil {
+			log.Error("GitHub API client initialization failed", "error", err)
+		} else {
+			s.github = client
+		}
+	}
 	if cfg.SSO.Enabled {
 		mgr, err := sso.New(cfg.SSO)
 		if err != nil {
@@ -101,6 +111,10 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /api/v1/analyses/{id}/llm", s.require(model.RoleOperator, s.createLLMEnhancement))
 	mux.HandleFunc("GET /api/v1/analyses/{id}/repair", s.require(model.RoleViewer, s.getRepairResult))
 	mux.HandleFunc("POST /api/v1/analyses/{id}/repair/draft-pr", s.require(model.RoleOperator, s.requestDraftRepairPR))
+	mux.HandleFunc("GET /api/v1/analyses/{id}/github-issue", s.require(model.RoleViewer, s.getAnalysisGitHubIssue))
+	mux.HandleFunc("POST /api/v1/analyses/{id}/github-issue", s.require(model.RoleOperator, s.createAnalysisGitHubIssue))
+	mux.HandleFunc("PATCH /api/v1/analyses/{id}/github-issue", s.require(model.RoleOperator, s.updateAnalysisGitHubIssue))
+	mux.HandleFunc("POST /api/v1/analyses/{id}/github-issue/comments", s.require(model.RoleOperator, s.commentAnalysisGitHubIssue))
 	mux.HandleFunc("GET /api/v1/analyses/{id}/similar", s.require(model.RoleViewer, s.similarAnalyses))
 	mux.HandleFunc("GET /api/v1/feedback", s.require(model.RoleViewer, s.feedbackList))
 	mux.HandleFunc("POST /api/v1/tests/junit", s.require(model.RoleOperator, s.ingestTestReport))
@@ -547,18 +561,55 @@ func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ChangedFiles []string `json:"changed_files"`
+		ChangedFiles  []string `json:"changed_files"`
+		FetchSource   *bool    `json:"fetch_source,omitempty"`
+		RequireSource bool     `json:"require_source,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil && err != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	result, err := s.llm.Enhance(r.Context(), *analysis, body.ChangedFiles)
+	fetchSource := s.llm.AcceptsSourceCode()
+	if body.FetchSource != nil {
+		fetchSource = *body.FetchSource && s.llm.AcceptsSourceCode()
+	}
+	changedFiles := body.ChangedFiles
+	sourceFiles := []llm.SourceFile{}
+	sourceWarnings := []string{}
+	if fetchSource {
+		var source model.RepairSource
+		found, sourceErr := s.store.GetObject(r.Context(), p.TenantID, "analysis_source", analysis.ID, &source)
+		if sourceErr != nil {
+			writeError(w, http.StatusInternalServerError, sourceErr.Error())
+			return
+		}
+		if found {
+			maxFiles, maxCharacters := s.llm.SourceLimits()
+			contextResult := sourcecontext.FetchGitHub(r.Context(), s.github, source, changedFiles, maxFiles, maxCharacters, analysis.RedactedExcerpt)
+			changedFiles = contextResult.ChangedFiles
+			sourceFiles = contextResult.Files
+			sourceWarnings = contextResult.Warnings
+		} else {
+			sourceWarnings = append(sourceWarnings, "analysis has no stored source metadata")
+		}
+	}
+	if body.RequireSource && len(sourceFiles) == 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "source context is required but no exact source files were available", "warnings": sourceWarnings})
+		return
+	}
+	result, err := s.llm.EnhanceWithSources(r.Context(), *analysis, changedFiles, sourceFiles)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	s.audit(r, "analysis.llm_enhance", "analysis", analysis.ID, map[string]string{"model": result.Model})
+	result.Warnings = append(result.Warnings, sourceWarnings...)
+	if len(sourceWarnings) > 0 {
+		if err := s.store.PutObject(r.Context(), p.TenantID, "llm_enhancement", analysis.ID, result); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	s.audit(r, "analysis.llm_enhance", "analysis", analysis.ID, map[string]string{"model": result.Model, "source_files": strconv.Itoa(len(sourceFiles))})
 	writeJSON(w, http.StatusOK, result)
 }
 
