@@ -323,3 +323,25 @@ func TestCancelledQueryMarksConnectionBroken(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestParseDSNRejectsUnterminatedQuotedValue(t *testing.T) {
+	if _, err := ParseDSN("host=localhost user='ci radar dbname=radar sslmode=disable"); err == nil {
+		t.Fatal("unterminated quoted DSN value was accepted")
+	}
+}
+
+func TestSCRAMIterationBounds(t *testing.T) {
+	for _, tc := range []struct {
+		iterations int
+		valid      bool
+	}{
+		{4095, false},
+		{4096, true},
+		{1_000_000, true},
+		{1_000_001, false},
+	} {
+		if got := validSCRAMIterationCount(tc.iterations); got != tc.valid {
+			t.Fatalf("iterations=%d valid=%v, want %v", tc.iterations, got, tc.valid)
+		}
+	}
+}
