@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -434,5 +435,69 @@ func TestCodeFailureHasPositiveEvidenceStrength(t *testing.T) {
 	}
 	if r.ExternalityScore != r.Score {
 		t.Fatalf("externality=%d score=%d", r.ExternalityScore, r.Score)
+	}
+}
+
+func TestRedactionMultilineQuotedSecretDoesNotLeakTail(t *testing.T) {
+	input := "client_secret=\"line-one\nline-two\nline-three\"\nafter=safe"
+	got := NewRedactor().Redact(input)
+	for _, leaked := range []string{"line-one", "line-two", "line-three"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("secret fragment %q leaked in %q", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "after=safe") {
+		t.Fatalf("safe context was removed: %q", got)
+	}
+}
+
+func TestRedactionDetectsBase64EncodedCredentialJSON(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte(`{"token":"super-secret-token-value","user":"ci"}`))
+	redactor := NewRedactor()
+	got := redactor.Redact("payload=" + encoded)
+	if strings.Contains(got, encoded) || !strings.Contains(got, "[REDACTED_ENCODED_SECRET]") {
+		t.Fatalf("encoded credential was not redacted: %q", got)
+	}
+	if redactor.ResidualSecretRisk(got) {
+		t.Fatalf("redacted output still looks risky: %q", got)
+	}
+}
+
+func TestRedactionDetectsWrappedBase64Secret(t *testing.T) {
+	secret := `{"client_secret":"very-sensitive-value","access_token":"ghp_abcdefghijklmnopqrstuvwxyz1234567890"}`
+	encoded := base64.StdEncoding.EncodeToString([]byte(secret))
+	var wrapped strings.Builder
+	for len(encoded) > 20 {
+		wrapped.WriteString(encoded[:20])
+		wrapped.WriteByte('\n')
+		encoded = encoded[20:]
+	}
+	wrapped.WriteString(encoded)
+	redactor := NewRedactor()
+	input := "stack payload follows:\n" + wrapped.String() + "\nend"
+	got := redactor.Redact(input)
+	if strings.Contains(got, "eyJ") || !strings.Contains(got, "[REDACTED_ENCODED_SECRET]") {
+		t.Fatalf("wrapped credential was not redacted: %q", got)
+	}
+	if redactor.ResidualSecretRisk(got) {
+		t.Fatalf("redacted output still looks risky: %q", got)
+	}
+}
+
+func TestRedactionDetectsBase64EncodedRawGitHubToken(t *testing.T) {
+	token := "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+	encoded := base64.StdEncoding.EncodeToString([]byte(token))
+	got := NewRedactor().Redact("opaque=" + encoded)
+	if strings.Contains(got, encoded) || !strings.Contains(got, "[REDACTED_ENCODED_SECRET]") {
+		t.Fatalf("encoded token leaked: %q", got)
+	}
+}
+
+func TestRedactionKeepsBenignWrappedBase64Text(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString([]byte("This is an ordinary build artifact description without credentials."))
+	wrapped := encoded[:24] + "\n" + encoded[24:48] + "\n" + encoded[48:]
+	got := NewRedactorWithPatterns(nil, false).Redact(wrapped)
+	if got != wrapped {
+		t.Fatalf("benign encoded text was removed: %q", got)
 	}
 }
