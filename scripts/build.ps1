@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.2-oss-rc.6-hardening-fix.6" }
+$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.2-oss-rc.7" }
 $BuildDate = if ($env:BUILD_DATE) { $env:BUILD_DATE } else { (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
 try { $Commit = if ($env:COMMIT) { $env:COMMIT } else { (git rev-parse --short HEAD).Trim() } } catch { $Commit = "unknown" }
 $Strip = if ($env:STRIP) { $env:STRIP.ToLowerInvariant() } else { "1" }
