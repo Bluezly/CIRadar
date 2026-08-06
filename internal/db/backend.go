@@ -70,6 +70,9 @@ type Backend interface {
 	FeedbackMetrics(context.Context, string) (model.FeedbackMetrics, error)
 	RecordTestObservations(context.Context, string, []model.TestObservation) ([]model.TestCaseStats, error)
 	ListTestCaseStats(context.Context, string, string, string, int) ([]model.TestCaseStats, error)
+	GetTestCaseStats(context.Context, string, string) (*model.TestCaseStats, error)
+	ListTestObservations(context.Context, string, string, int) ([]model.TestObservation, error)
+	SetTestCritical(context.Context, string, string, bool) (*model.TestCaseStats, error)
 	SetTestQuarantine(context.Context, model.TestQuarantine) (model.TestQuarantine, error)
 	RemoveTestQuarantine(context.Context, string, string) error
 	ListTestQuarantines(context.Context, string) ([]model.TestQuarantine, error)

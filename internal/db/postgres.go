@@ -721,6 +721,52 @@ func (p *PostgresBackend) ListTestCaseStats(ctx context.Context, tenantID, repos
 	})
 }
 
+func (p *PostgresBackend) GetTestCaseStats(ctx context.Context, tenantID, testKey string) (*model.TestCaseStats, error) {
+	return pgStateWith(ctx, p, false, []pgSpec{pgOne(tenantID, pgKindTestStats, testKey), pgOne(tenantID, pgKindQuarantine, testKey)}, func(store *Store) (*model.TestCaseStats, error) {
+		return store.GetTestCaseStats(ctx, tenantID, testKey)
+	})
+}
+
+func (p *PostgresBackend) ListTestObservations(ctx context.Context, tenantID, testKey string, limit int) ([]model.TestObservation, error) {
+	tenantID = normalizeTenant(tenantID)
+	testKey = strings.TrimSpace(testKey)
+	if limit < 1 || limit > 1000 {
+		limit = 100
+	}
+	c, err := p.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer p.release(c)
+	query := `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_test_observations WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND test_key=` + sqlLiteral(testKey) + ` ORDER BY occurred_at DESC LIMIT ` + strconv.Itoa(limit)
+	rows, err := c.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.TestObservation, 0, len(rows.Values))
+	for _, row := range rows.Values {
+		if len(row) == 0 || row[0] == nil {
+			continue
+		}
+		payload, decodeErr := decodePGBase64(*row[0])
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		var observation model.TestObservation
+		if unmarshalErr := json.Unmarshal(payload, &observation); unmarshalErr != nil {
+			return nil, unmarshalErr
+		}
+		out = append(out, observation)
+	}
+	return out, nil
+}
+
+func (p *PostgresBackend) SetTestCritical(ctx context.Context, tenantID, testKey string, critical bool) (*model.TestCaseStats, error) {
+	return pgStateWith(ctx, p, true, []pgSpec{pgOne(tenantID, pgKindTestStats, testKey)}, func(store *Store) (*model.TestCaseStats, error) {
+		return store.SetTestCritical(ctx, tenantID, testKey, critical)
+	})
+}
+
 func (p *PostgresBackend) SetTestQuarantine(ctx context.Context, quarantine model.TestQuarantine) (model.TestQuarantine, error) {
 	return pgStateWith(ctx, p, true, []pgSpec{pgTenant(quarantine.TenantID, pgKindTestStats), pgTenant(quarantine.TenantID, pgKindQuarantine)}, func(store *Store) (model.TestQuarantine, error) { return store.SetTestQuarantine(ctx, quarantine) })
 }

@@ -23,7 +23,11 @@ func testStatsKey(tenantID, testKey string) string  { return normalizeTenant(ten
 func quarantineKey(tenantID, testKey string) string { return normalizeTenant(tenantID) + "|" + testKey }
 
 func TestKey(o model.TestObservation) string {
-	material := strings.Join([]string{strings.ToLower(strings.TrimSpace(o.Repository)), strings.ToLower(strings.TrimSpace(o.Framework)), strings.TrimSpace(o.Suite), strings.TrimSpace(o.ClassName), strings.TrimSpace(o.Name), strings.TrimSpace(o.Parameters)}, "\x00")
+	parts := []string{strings.ToLower(strings.TrimSpace(o.Repository)), strings.ToLower(strings.TrimSpace(o.Framework)), strings.TrimSpace(o.Suite), strings.TrimSpace(o.ClassName), strings.TrimSpace(o.Name), strings.TrimSpace(o.Parameters)}
+	if variant := strings.ToLower(strings.TrimSpace(o.Variant)); variant != "" {
+		parts = append(parts, variant)
+	}
+	material := strings.Join(parts, "\x00")
 	h := sha256.Sum256([]byte(material))
 	return hex.EncodeToString(h[:16])
 }
@@ -149,7 +153,7 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 		sk := testStatsKey(tenantID, key)
 		stats := s.state.TestCaseStats[sk]
 		if stats.TestKey == "" {
-			stats = model.TestCaseStats{TenantID: tenantID, TestKey: key, Repository: o.Repository, Framework: o.Framework, Suite: o.Suite, ClassName: o.ClassName, File: o.File, Name: o.Name, Parameters: o.Parameters, FirstSeenAt: o.OccurredAt, CauseCounts: map[string]int{}}
+			stats = model.TestCaseStats{TenantID: tenantID, TestKey: key, Repository: o.Repository, Framework: o.Framework, Variant: o.Variant, Suite: o.Suite, ClassName: o.ClassName, File: o.File, Name: o.Name, Parameters: o.Parameters, FirstSeenAt: o.OccurredAt, CauseCounts: map[string]int{}}
 		}
 		if stats.ExecutedRuns == 0 && stats.Passes+stats.Failures > 0 {
 			stats.ExecutedRuns = stats.Passes + stats.Failures
@@ -207,6 +211,15 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 				stats.CauseConfidence = confidence
 			}
 		}
+		if o.Status == "failed" || o.Status == "error" {
+			if o.PullRequestNumber > 0 {
+				stats.ImpactedPullRequests = appendUniqueInt(stats.ImpactedPullRequests, o.PullRequestNumber)
+				stats.PullRequestsImpacted = len(stats.ImpactedPullRequests)
+			}
+			if q, ok := s.state.TestQuarantines[quarantineKey(tenantID, key)]; ok && quarantineActiveAt(q, o.OccurredAt) {
+				stats.QuarantinedFailures++
+			}
+		}
 		if stats.FirstSeenAt.IsZero() || o.OccurredAt.Before(stats.FirstSeenAt) {
 			stats.FirstSeenAt = o.OccurredAt
 		}
@@ -259,7 +272,12 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 	for _, v := range updated {
 		out = append(out, v)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].FlakeScore > out[j].FlakeScore })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].EstimatedEngineeringMinutesLost == out[j].EstimatedEngineeringMinutesLost {
+			return out[i].FlakeScore > out[j].FlakeScore
+		}
+		return out[i].EstimatedEngineeringMinutesLost > out[j].EstimatedEngineeringMinutesLost
+	})
 	return out, nil
 }
 
@@ -296,8 +314,14 @@ func (s *Store) ListTestCaseStats(ctx context.Context, tenantID, repository, cla
 		out = append(out, st)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Quarantined != out[j].Quarantined {
-			return out[i].Quarantined
+		if out[i].Critical != out[j].Critical {
+			return out[i].Critical
+		}
+		if out[i].EstimatedEngineeringMinutesLost != out[j].EstimatedEngineeringMinutesLost {
+			return out[i].EstimatedEngineeringMinutesLost > out[j].EstimatedEngineeringMinutesLost
+		}
+		if out[i].PullRequestsImpacted != out[j].PullRequestsImpacted {
+			return out[i].PullRequestsImpacted > out[j].PullRequestsImpacted
 		}
 		if out[i].FlakeScore == out[j].FlakeScore {
 			return out[i].LastSeenAt.After(out[j].LastSeenAt)
@@ -308,6 +332,67 @@ func (s *Store) ListTestCaseStats(ctx context.Context, tenantID, repository, cla
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func (s *Store) GetTestCaseStats(ctx context.Context, tenantID, testKey string) (*model.TestCaseStats, error) {
+	_ = ctx
+	tenantID = normalizeTenant(tenantID)
+	testKey = strings.TrimSpace(testKey)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stats, ok := s.state.TestCaseStats[testStatsKey(tenantID, testKey)]
+	if !ok {
+		return nil, nil
+	}
+	if q, exists := s.state.TestQuarantines[quarantineKey(tenantID, testKey)]; exists && q.Active && q.ExpiresAt.After(time.Now().UTC()) {
+		stats.Quarantined = true
+		stats.QuarantineUntil = q.ExpiresAt
+		stats.Owner = q.Owner
+	} else {
+		stats.Quarantined = false
+		stats.QuarantineUntil = time.Time{}
+	}
+	return &stats, nil
+}
+
+func (s *Store) ListTestObservations(ctx context.Context, tenantID, testKey string, limit int) ([]model.TestObservation, error) {
+	_ = ctx
+	tenantID = normalizeTenant(tenantID)
+	testKey = strings.TrimSpace(testKey)
+	if limit < 1 || limit > 1000 {
+		limit = 100
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]model.TestObservation, 0, minInt(limit, len(s.state.TestObservationOrder)))
+	for i := len(s.state.TestObservationOrder) - 1; i >= 0 && len(out) < limit; i-- {
+		o, ok := s.state.TestObservations[s.state.TestObservationOrder[i]]
+		if !ok || o.TenantID != tenantID || TestKey(o) != testKey {
+			continue
+		}
+		out = append(out, o)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].OccurredAt.After(out[j].OccurredAt) })
+	return out, nil
+}
+
+func (s *Store) SetTestCritical(ctx context.Context, tenantID, testKey string, critical bool) (*model.TestCaseStats, error) {
+	_ = ctx
+	tenantID = normalizeTenant(tenantID)
+	testKey = strings.TrimSpace(testKey)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sk := testStatsKey(tenantID, testKey)
+	stats, ok := s.state.TestCaseStats[sk]
+	if !ok {
+		return nil, fmt.Errorf("test case not found")
+	}
+	stats.Critical = critical
+	s.state.TestCaseStats[sk] = stats
+	if err := s.persistLocked(); err != nil {
+		return nil, err
+	}
+	return &stats, nil
 }
 
 func (s *Store) SetTestQuarantine(ctx context.Context, q model.TestQuarantine) (model.TestQuarantine, error) {
@@ -379,6 +464,28 @@ func (s *Store) ListTestQuarantines(ctx context.Context, tenantID string) ([]mod
 	sort.Slice(out, func(i, j int) bool { return out[i].ExpiresAt.Before(out[j].ExpiresAt) })
 	return out, nil
 }
+func appendUniqueInt(values []int, value int) []int {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	values = append(values, value)
+	sort.Ints(values)
+	return values
+}
+
+func quarantineActiveAt(q model.TestQuarantine, at time.Time) bool {
+	return q.Active && !at.Before(q.CreatedAt) && at.Before(q.ExpiresAt)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func maxInt(a, b int) int {
 	if a > b {
 		return a
