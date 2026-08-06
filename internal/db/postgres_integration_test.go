@@ -58,7 +58,6 @@ func TestPostgresIntegrationObservationLifecycle(t *testing.T) {
 		t.Fatalf("expected same-commit rerun recovery, got %+v", stats[0])
 	}
 
-	// Replaying the same provider payload must be idempotent.
 	replayed, err := backend.RecordTestObservations(ctx, tenantID, []model.TestObservation{failed, passed})
 	if err != nil {
 		t.Fatalf("replay observations: %v", err)
