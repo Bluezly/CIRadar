@@ -25,6 +25,7 @@ import (
 	"ciradar/internal/notifications"
 	"ciradar/internal/providers"
 	"ciradar/internal/repair"
+	"ciradar/internal/sourcecontext"
 )
 
 type jobDiagnosis struct {
@@ -117,7 +118,25 @@ func (w *Worker) process(ctx context.Context, job db.Job) error {
 		if analysis == nil {
 			return fmt.Errorf("analysis %s was not found", payload.AnalysisID)
 		}
-		enhancement, err := w.llm.Enhance(ctx, *analysis, payload.ChangedFiles)
+		changedFiles := payload.ChangedFiles
+		sourceFiles := []llm.SourceFile{}
+		if w.llm.AcceptsSourceCode() {
+			var source model.RepairSource
+			found, sourceErr := w.store.GetObject(ctx, payload.TenantID, "analysis_source", payload.AnalysisID, &source)
+			if sourceErr != nil {
+				return sourceErr
+			}
+			if found {
+				maxFiles, maxCharacters := w.llm.SourceLimits()
+				contextResult := sourcecontext.FetchGitHub(ctx, w.github, source, changedFiles, maxFiles, maxCharacters, analysis.RedactedExcerpt)
+				changedFiles = contextResult.ChangedFiles
+				sourceFiles = contextResult.Files
+				for _, warning := range contextResult.Warnings {
+					w.log.Warn("LLM source context", "analysis_id", analysis.ID, "warning", warning)
+				}
+			}
+		}
+		enhancement, err := w.llm.EnhanceWithSources(ctx, *analysis, changedFiles, sourceFiles)
 		if err != nil {
 			return err
 		}
