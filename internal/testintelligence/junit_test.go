@@ -37,3 +37,29 @@ func TestJUnitDurationRejectsNonFiniteAndNegativeValues(t *testing.T) {
 		}
 	}
 }
+
+func TestParseJUnitRedactsSecretsAndSanitizesRunURL(t *testing.T) {
+	report := `<testsuite name="unit"><testcase name="payment"><failure message="token=ghp_abcdefghijklmnopqrstuvwxyz123456">Authorization: Bearer secret-value-1234567890</failure></testcase></testsuite>`
+	observations, err := ParseJUnit(strings.NewReader(report), Metadata{Repository: "acme/api", RunURL: "https://user:password@ci.example/runs/7?token=secret#logs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(observations) != 1 {
+		t.Fatalf("observations=%d", len(observations))
+	}
+	got := observations[0]
+	if strings.Contains(got.Message+got.Details, "ghp_") || strings.Contains(got.Message+got.Details, "secret-value") {
+		t.Fatalf("secret leaked: message=%q details=%q", got.Message, got.Details)
+	}
+	if got.RunURL != "https://ci.example/runs/7" {
+		t.Fatalf("run_url=%q", got.RunURL)
+	}
+}
+
+func TestSanitizeRunURLRejectsUnsafeSchemes(t *testing.T) {
+	for _, value := range []string{"javascript:alert(1)", "data:text/html,boom", "/relative/path", "not a url"} {
+		if got := sanitizeRunURL(value); got != "" {
+			t.Fatalf("sanitizeRunURL(%q)=%q", value, got)
+		}
+	}
+}
