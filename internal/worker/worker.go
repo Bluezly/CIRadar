@@ -48,11 +48,22 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, github *gh.C
 	return &Worker{cfg: cfg, store: store, analyzer: a, github: github, notifier: notifier, llm: llm.New(cfg.LLM, store), log: log}
 }
 
+const (
+	jobLeaseTimeout   = 10 * time.Minute
+	jobLeaseHeartbeat = 2 * time.Minute
+	staleJobSweep     = time.Minute
+)
+
 func (w *Worker) Run(ctx context.Context) {
-	if err := w.store.RequeueStaleJobs(ctx, 10*time.Minute); err != nil && !errors.Is(err, context.Canceled) {
+	if err := w.store.RequeueStaleJobs(ctx, jobLeaseTimeout); err != nil && !errors.Is(err, context.Canceled) {
 		w.log.Error("requeue stale jobs failed", "error", err)
 	}
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.requeueLoop(ctx)
+	}()
 	for i := 0; i < w.cfg.WorkerCount; i++ {
 		wg.Add(1)
 		go func(n int) { defer wg.Done(); w.loop(ctx, fmt.Sprintf("worker-%d", n+1)) }(i)
@@ -76,16 +87,64 @@ func (w *Worker) loop(ctx context.Context, id string) {
 			sleep(ctx, 750*time.Millisecond)
 			continue
 		}
-		err = w.process(ctx, *job)
+		err = w.processWithLease(ctx, *job)
 		if err != nil {
 			w.log.Error("job failed", "job_id", job.ID, "type", job.Type, "error", err)
-			if failErr := w.store.FailJob(ctx, job.ID, job.Attempts, err.Error()); failErr != nil && !errors.Is(failErr, context.Canceled) {
+			if failErr := w.store.FailJob(ctx, job.ID, job.LeaseToken, job.Attempts, err.Error()); failErr != nil && !errors.Is(failErr, context.Canceled) {
 				w.log.Error("mark job as failed", "job_id", job.ID, "type", job.Type, "error", failErr)
 			}
-		} else if completeErr := w.store.CompleteJob(ctx, job.ID); completeErr != nil && !errors.Is(completeErr, context.Canceled) {
+		} else if completeErr := w.store.CompleteJob(ctx, job.ID, job.LeaseToken); completeErr != nil && !errors.Is(completeErr, context.Canceled) {
 			w.log.Error("complete job failed", "job_id", job.ID, "type", job.Type, "error", completeErr)
 		}
 	}
+}
+
+func (w *Worker) requeueLoop(ctx context.Context) {
+	ticker := time.NewTicker(staleJobSweep)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := w.store.RequeueStaleJobs(ctx, jobLeaseTimeout); err != nil && !errors.Is(err, context.Canceled) {
+				w.log.Error("requeue stale jobs failed", "error", err)
+			}
+		}
+	}
+}
+
+func (w *Worker) processWithLease(ctx context.Context, job db.Job) error {
+	jobCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(jobLeaseHeartbeat)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-jobCtx.Done():
+				return
+			case <-ticker.C:
+				err := w.store.RenewJobLease(jobCtx, job.ID, job.LeaseToken)
+				if err == nil {
+					continue
+				}
+				if errors.Is(err, db.ErrJobLeaseLost) {
+					w.log.Error("job lease lost", "job_id", job.ID, "type", job.Type)
+					cancel()
+					return
+				}
+				if !errors.Is(err, context.Canceled) {
+					w.log.Error("renew job lease failed", "job_id", job.ID, "type", job.Type, "error", err)
+				}
+			}
+		}
+	}()
+	err := w.process(jobCtx, job)
+	cancel()
+	<-done
+	return err
 }
 
 func (w *Worker) process(ctx context.Context, job db.Job) error {
