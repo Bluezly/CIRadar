@@ -353,8 +353,6 @@ func (m *Manager) parseSAMLIdentity(data []byte, requestID string) (model.SSOIde
 	}
 	email := firstNonEmpty(stringClaim(claims, m.cfg.SAMLEmailAttribute), stringClaim(claims, "email"), strings.TrimSpace(response.Assertion.Subject.NameID))
 	claims["email"] = email
-	// The email attribute is covered by the validated SAML signature. Mark it as
-	// verified so the shared identity policy can safely enforce allowed_domains.
 	claims["email_verified"] = true
 	claims["name"] = firstNonEmpty(stringClaim(claims, m.cfg.SAMLNameAttribute), stringClaim(claims, "name"), email)
 	return m.identityFromClaims(claims)
