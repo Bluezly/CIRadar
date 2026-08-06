@@ -2,6 +2,8 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -541,5 +543,109 @@ func TestOutOfOrderObservationDoesNotReplaceLatestExecution(t *testing.T) {
 	}
 	if st.Transitions != 0 || st.RerunRecoveries != 0 {
 		t.Fatalf("out-of-order event created a false transition: %#v", st)
+	}
+}
+
+func TestTestStatsTrackPullRequestImpactAndVariants(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	observations := []model.TestObservation{
+		{ID: "pr-1", Repository: "acme/api", Framework: "go", Name: "TestCheckout", Variant: "linux-go1.24", Status: "failed", PullRequestNumber: 41, OccurredAt: now},
+		{ID: "pr-2", Repository: "acme/api", Framework: "go", Name: "TestCheckout", Variant: "linux-go1.24", Status: "failed", PullRequestNumber: 41, OccurredAt: now.Add(time.Second)},
+		{ID: "pr-3", Repository: "acme/api", Framework: "go", Name: "TestCheckout", Variant: "linux-go1.24", Status: "failed", PullRequestNumber: 52, OccurredAt: now.Add(2 * time.Second)},
+	}
+	stats, err := store.RecordTestObservations(ctx, "default", observations)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
+	}
+	if stats[0].PullRequestsImpacted != 2 || len(stats[0].ImpactedPullRequests) != 2 {
+		t.Fatalf("PR impact=%#v", stats[0])
+	}
+	if stats[0].Variant != "linux-go1.24" {
+		t.Fatalf("variant=%q", stats[0].Variant)
+	}
+	other := observations[0]
+	other.Variant = "windows-go1.24"
+	if TestKey(other) == TestKey(observations[0]) {
+		t.Fatal("execution variants must have separate test identities")
+	}
+	withoutVariant := observations[0]
+	withoutVariant.Variant = ""
+	legacyMaterial := strings.Join([]string{"acme/api", "go", "", "", "TestCheckout", ""}, "\x00")
+	digest := sha256.Sum256([]byte(legacyMaterial))
+	if TestKey(withoutVariant) != hex.EncodeToString(digest[:16]) {
+		t.Fatal("blank variant changed existing test keys")
+	}
+}
+
+func TestTestHistoryCriticalFlagAndTenantIsolation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	base := model.TestObservation{Repository: "acme/api", Framework: "go", Name: "TestPolicy"}
+	first := base
+	first.ID, first.Status, first.OccurredAt = "history-1", "failed", now
+	second := base
+	second.ID, second.Status, second.OccurredAt = "history-2", "passed", now.Add(time.Minute)
+	if _, err := store.RecordTestObservations(ctx, "tenant-a", []model.TestObservation{first, second}); err != nil {
+		t.Fatal(err)
+	}
+	foreign := base
+	foreign.ID, foreign.Status, foreign.OccurredAt = "history-foreign", "failed", now.Add(2*time.Minute)
+	if _, err := store.RecordTestObservations(ctx, "tenant-b", []model.TestObservation{foreign}); err != nil {
+		t.Fatal(err)
+	}
+	key := TestKey(first)
+	stats, err := store.SetTestCritical(ctx, "tenant-a", key, true)
+	if err != nil || stats == nil || !stats.Critical {
+		t.Fatalf("critical stats=%#v err=%v", stats, err)
+	}
+	loaded, err := store.GetTestCaseStats(ctx, "tenant-a", key)
+	if err != nil || loaded == nil || !loaded.Critical {
+		t.Fatalf("loaded=%#v err=%v", loaded, err)
+	}
+	history, err := store.ListTestObservations(ctx, "tenant-a", key, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0].ID != "history-2" || history[1].ID != "history-1" {
+		t.Fatalf("history=%#v", history)
+	}
+}
+
+func TestQuarantinedFailuresAreCountedOnlyDuringActiveWindow(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	seed := model.TestObservation{ID: "seed", Repository: "acme/api", Framework: "go", Name: "TestQuarantineCount", Status: "passed", OccurredAt: now}
+	if _, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{seed}); err != nil {
+		t.Fatal(err)
+	}
+	key := TestKey(seed)
+	q, err := store.SetTestQuarantine(ctx, model.TestQuarantine{TenantID: "default", TestKey: key, Owner: "platform", Reason: "investigation", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := seed
+	failed.ID, failed.Status, failed.OccurredAt = "during-quarantine", "failed", q.CreatedAt.Add(time.Second)
+	stats, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{failed})
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
+	}
+	if stats[0].QuarantinedFailures != 1 {
+		t.Fatalf("quarantined failures=%d", stats[0].QuarantinedFailures)
 	}
 }
