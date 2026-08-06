@@ -237,8 +237,6 @@ func applyChanges(plan Plan, root string, dryRun bool, rename, link func(string,
 			cleanupStaged(true)
 			return err
 		}
-		// Recheck after directory creation so a pre-existing symbolic-link
-		// component cannot be introduced between validation and staging.
 		target, err = safePath(root, change.Path)
 		if err != nil {
 			cleanupStaged(true)
@@ -362,9 +360,6 @@ func applyChanges(plan Plan, root string, dryRun bool, rename, link func(string,
 			return errors.Join(err, rollbackErr)
 		}
 		if item.change.NewFile {
-			// Hard-linking a staged file into place is an atomic no-replace
-			// operation. Unlike Rename on Unix, it cannot overwrite a file
-			// created after the final verification check.
 			if err := link(item.temp, item.target); err != nil {
 				rollbackErr := rollbackCommitted(i - 1)
 				cleanupStaged(false)
@@ -509,9 +504,6 @@ func parseUnifiedDiff(raw string) ([]patchFile, error) {
 	var currentHunk *hunk
 	for scanner.Scan() {
 		line := scanner.Text()
-		// While a hunk still expects lines, content takes precedence over
-		// header-looking text. A removed source line such as "-- flag"
-		// legitimately appears in a patch as "--- flag".
 		if currentHunk != nil && !hunkComplete(currentHunk) && isHunkLine(line) {
 			if line != "\\ No newline at end of file" {
 				currentHunk.Lines = append(currentHunk.Lines, line)
