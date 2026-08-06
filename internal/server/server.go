@@ -1579,8 +1579,6 @@ func (s *Server) providerIncident(ctx context.Context, provider string) (bool, e
 	return false, nil
 }
 func (s *Server) maybeIncident(ctx context.Context, tenantID, repository string, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
-	// CorrelationForTenant already includes the candidate analysis represented by r.
-	// Adding one here would double-count the current failure and trigger thresholds early.
 	repos := c.Repositories
 	orgs := c.Organizations
 	occ := c.Occurrences
@@ -1839,10 +1837,6 @@ func requestIsHTTPS(r *http.Request, publicBaseURL string, resolver *clientIPRes
 
 func csrfGuard(cfg config.Config, resolver *clientIPResolver, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// SAML authentication returns through a cross-site form POST. The signed
-		// assertion and encrypted RelayState bind that callback, so a pre-existing
-		// CI Radar session cookie must not cause legitimate reauthentication to be
-		// rejected by the generic same-origin check.
 		if r.Method == http.MethodPost && r.URL.Path == "/auth/callback" && cfg.SSO.Enabled && strings.EqualFold(strings.TrimSpace(cfg.SSO.Mode), "saml") {
 			next.ServeHTTP(w, r)
 			return

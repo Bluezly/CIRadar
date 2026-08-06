@@ -232,7 +232,6 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		s.redirectOAuthError(w, r, redirectURI, state, "access_denied", "the resource owner denied the request")
 		return
 	case "approve":
-		// Continue and issue the authorization code below.
 	default:
 		s.redirectOAuthError(w, r, redirectURI, state, "invalid_request", "an explicit authorization decision is required")
 		return
