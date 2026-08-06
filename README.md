@@ -4,7 +4,7 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC8.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC9.md`.
 
 ## What RC.8 includes
 
