@@ -1,9 +1,11 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -93,12 +95,15 @@ type environmentRecord struct {
 	CreatedAt   time.Time         `json:"created_at"`
 }
 
+var ErrJobLeaseLost = errors.New("job lease is no longer owned by this worker")
+
 type Job struct {
-	TenantID string
-	ID       int64
-	Type     string
-	Payload  json.RawMessage
-	Attempts int
+	TenantID   string
+	ID         int64
+	Type       string
+	Payload    json.RawMessage
+	Attempts   int
+	LeaseToken string
 }
 
 type CorrelationStats struct {
@@ -111,6 +116,8 @@ type Stats struct {
 	Incidents              int `json:"incidents"`
 	OpenIncidents          int `json:"open_incidents"`
 	QueuedJobs             int `json:"queued_jobs"`
+	RunningJobs            int `json:"running_jobs"`
+	FailedJobs             int `json:"failed_jobs"`
 	Repositories           int `json:"repositories"`
 	NotificationDeliveries int `json:"notification_deliveries"`
 	NotificationFailures   int `json:"notification_failures"`
@@ -125,21 +132,72 @@ func Open(path string) (*Store, error) {
 	}
 	s := &Store{path: path, state: newState()}
 	b, err := os.ReadFile(path)
-	if err == nil && len(b) > 0 {
-		if err := json.Unmarshal(b, &s.state); err != nil {
-			backup, backupErr := os.ReadFile(path + ".bak")
-			if backupErr != nil || json.Unmarshal(backup, &s.state) != nil {
-				return nil, fmt.Errorf("decode state file: %w", err)
+	recoveredFromBackup := false
+	mainExists := err == nil
+	if err == nil {
+		if decodeErr := decodeStateFile(b, &s.state, "state file"); decodeErr != nil {
+			if backupErr := loadBackupState(path, &s.state); backupErr != nil {
+				return nil, fmt.Errorf("decode state file: %w; backup recovery failed: %v", decodeErr, backupErr)
 			}
+			recoveredFromBackup = true
 		}
-		s.normalize()
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
+	} else {
+		_, backupStatErr := os.Stat(path + ".bak")
+		switch {
+		case backupStatErr == nil:
+			if backupErr := loadBackupState(path, &s.state); backupErr != nil {
+				return nil, fmt.Errorf("recover missing state file from backup: %w", backupErr)
+			}
+			recoveredFromBackup = true
+		case !errors.Is(backupStatErr, os.ErrNotExist):
+			return nil, backupStatErr
+		}
 	}
+	if recoveredFromBackup && mainExists {
+		if err := quarantineCorruptState(path); err != nil {
+			return nil, fmt.Errorf("quarantine corrupt state: %w", err)
+		}
+	}
+	s.normalize()
 	if err := s.persistLocked(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+func loadBackupState(path string, target *state) error {
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		return err
+	}
+	return decodeStateFile(backup, target, "state backup")
+}
+
+func decodeStateFile(body []byte, target *state, label string) error {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return fmt.Errorf("%s is empty", label)
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("decode %s: %w", label, err)
+	}
+	if target.Version < 1 {
+		return fmt.Errorf("%s has no valid schema version", label)
+	}
+	return nil
+}
+
+func quarantineCorruptState(path string) error {
+	quarantine := path + ".corrupt"
+	if err := os.Remove(quarantine); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(path, quarantine); err != nil {
+		return err
+	}
+	_ = syncParentDirectory(path)
+	return nil
 }
 
 func newState() state {
@@ -313,7 +371,20 @@ func (s *Store) persistLocked() (returnErr error) {
 	if err := replacePersistedFile(tmp, s.path); err != nil {
 		return fmt.Errorf("install persisted state: %w", err)
 	}
+	_ = syncParentDirectory(s.path)
 	return nil
+}
+
+func syncParentDirectory(path string) error {
+	if runtimeWindows() {
+		return nil
+	}
+	directory, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func runtimeWindows() bool { return filepath.Separator == '\\' }
@@ -410,28 +481,152 @@ func incidentSeverityRank(v string) int {
 }
 
 func (s *Store) RecordDelivery(ctx context.Context, id, eventType string) (bool, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("delivery ID is required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.state.Deliveries[id]; ok {
 		return false, nil
 	}
-	s.state.Deliveries[id] = deliveryRecord{EventType: eventType, ReceivedAt: time.Now().UTC(), Status: "received"}
-	return true, s.persistLocked()
+	s.state.Deliveries[id] = deliveryRecord{EventType: strings.TrimSpace(eventType), ReceivedAt: time.Now().UTC(), Status: "received"}
+	if err := s.persistLocked(); err != nil {
+		delete(s.state.Deliveries, id)
+		return false, err
+	}
+	return true, nil
 }
+
+func (s *Store) RecordTerminalDelivery(ctx context.Context, id, eventType, status, errText string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	status = strings.TrimSpace(status)
+	if id == "" {
+		return false, errors.New("delivery ID is required")
+	}
+	if status == "" {
+		return false, errors.New("delivery status is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.state.Deliveries[id]; ok {
+		return false, nil
+	}
+	s.state.Deliveries[id] = deliveryRecord{EventType: strings.TrimSpace(eventType), ReceivedAt: time.Now().UTC(), Status: status, Error: trim(errText, 4000)}
+	if err := s.persistLocked(); err != nil {
+		delete(s.state.Deliveries, id)
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) ClaimDelivery(ctx context.Context, id, eventType string, staleAfter time.Duration) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("delivery ID is required")
+	}
+	if staleAfter <= 0 {
+		staleAfter = 5 * time.Minute
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, existed := s.state.Deliveries[id]
+	if existed {
+		switch old.Status {
+		case "processed", "queued", "ignored", "invalid", "unbound":
+			return false, nil
+		case "processing":
+			if now.Sub(old.ReceivedAt) < staleAfter {
+				return false, nil
+			}
+		}
+	}
+	s.state.Deliveries[id] = deliveryRecord{EventType: strings.TrimSpace(eventType), ReceivedAt: now, Status: "processing"}
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.Deliveries[id] = old
+		} else {
+			delete(s.state.Deliveries, id)
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) EnqueueDeliveryForTenant(ctx context.Context, deliveryID, eventType, tenantID, typ string, payload any, availableAt time.Time) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	deliveryID = strings.TrimSpace(deliveryID)
+	if deliveryID == "" {
+		return false, errors.New("delivery ID is required")
+	}
+	tenantID = normalizeTenant(tenantID)
+	typ = strings.TrimSpace(typ)
+	if typ == "" {
+		return false, errors.New("job type is required")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	if availableAt.IsZero() {
+		availableAt = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.state.Deliveries[deliveryID]; ok {
+		return false, nil
+	}
+	if tenant, ok := s.state.Tenants[tenantID]; !ok || !tenant.Enabled {
+		return false, fmt.Errorf("tenant %q not found or disabled", tenantID)
+	}
+	now := time.Now().UTC()
+	oldNext := s.state.NextJobID
+	oldJobsLen := len(s.state.Jobs)
+	s.state.Deliveries[deliveryID] = deliveryRecord{EventType: strings.TrimSpace(eventType), ReceivedAt: now, Status: "queued"}
+	s.state.Jobs = append(s.state.Jobs, jobRecord{TenantID: tenantID, ID: s.state.NextJobID, Type: typ, Payload: body, Status: "queued", AvailableAt: availableAt.UTC(), CreatedAt: now, UpdatedAt: now})
+	s.state.NextJobID++
+	if err := s.persistLocked(); err != nil {
+		delete(s.state.Deliveries, deliveryID)
+		s.state.Jobs = s.state.Jobs[:oldJobsLen]
+		s.state.NextJobID = oldNext
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) UpdateDelivery(ctx context.Context, id, status, errText string) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, ok := s.state.Deliveries[id]
 	if !ok {
 		return nil
 	}
-	d.Status = status
-	d.Error = errText
+	old := d
+	d.Status = strings.TrimSpace(status)
+	d.Error = trim(errText, 4000)
 	s.state.Deliveries[id] = d
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.state.Deliveries[id] = old
+		return err
+	}
+	return nil
 }
+
 func (s *Store) Enqueue(ctx context.Context, typ string, payload any, availableAt time.Time) error {
 	tenantID := model.DefaultTenantID
 	switch v := payload.(type) {
@@ -450,12 +645,22 @@ func (s *Store) Enqueue(ctx context.Context, typ string, payload any, availableA
 	}
 	return s.EnqueueForTenant(ctx, tenantID, typ, payload, availableAt)
 }
+
 func (s *Store) EnqueueForTenant(ctx context.Context, tenantID, typ string, payload any, availableAt time.Time) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tenantID = normalizeTenant(tenantID)
+	typ = strings.TrimSpace(typ)
+	if typ == "" {
+		return errors.New("job type is required")
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
+	}
+	if availableAt.IsZero() {
+		availableAt = time.Now().UTC()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -463,13 +668,32 @@ func (s *Store) EnqueueForTenant(ctx context.Context, tenantID, typ string, payl
 		return fmt.Errorf("tenant %q not found or disabled", tenantID)
 	}
 	now := time.Now().UTC()
+	oldNext := s.state.NextJobID
+	oldLen := len(s.state.Jobs)
 	j := jobRecord{TenantID: tenantID, ID: s.state.NextJobID, Type: typ, Payload: b, Status: "queued", AvailableAt: availableAt.UTC(), CreatedAt: now, UpdatedAt: now}
 	s.state.NextJobID++
 	s.state.Jobs = append(s.state.Jobs, j)
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.state.NextJobID = oldNext
+		s.state.Jobs = s.state.Jobs[:oldLen]
+		return err
+	}
+	return nil
 }
+
 func (s *Store) ClaimJob(ctx context.Context, workerID string) (*Job, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return nil, errors.New("worker ID is required")
+	}
+	random, err := randomText(18)
+	if err != nil {
+		return nil, err
+	}
+	lease := workerID + ":" + random
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
@@ -489,59 +713,127 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string) (*Job, error) {
 	if idx < 0 {
 		return nil, nil
 	}
+	old := s.state.Jobs[idx]
 	j := &s.state.Jobs[idx]
 	j.Status = "running"
 	j.LockedAt = now
-	j.LockedBy = workerID
+	j.LockedBy = lease
 	j.Attempts++
 	j.UpdatedAt = now
 	if err := s.persistLocked(); err != nil {
+		s.state.Jobs[idx] = old
 		return nil, err
 	}
-	return &Job{TenantID: normalizeTenant(j.TenantID), ID: j.ID, Type: j.Type, Payload: append(json.RawMessage(nil), j.Payload...), Attempts: j.Attempts}, nil
+	return &Job{TenantID: normalizeTenant(j.TenantID), ID: j.ID, Type: j.Type, Payload: append(json.RawMessage(nil), j.Payload...), Attempts: j.Attempts, LeaseToken: lease}, nil
 }
-func (s *Store) CompleteJob(ctx context.Context, id int64) error {
-	_ = ctx
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for i := range s.state.Jobs {
-		if s.state.Jobs[i].ID == id {
-			s.state.Jobs[i].Status = "done"
-			s.state.Jobs[i].LockedAt = time.Time{}
-			s.state.Jobs[i].LockedBy = ""
-			s.state.Jobs[i].UpdatedAt = time.Now().UTC()
-			break
-		}
+
+func (s *Store) RenewJobLease(ctx context.Context, id int64, leaseToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return s.persistLocked()
-}
-func (s *Store) FailJob(ctx context.Context, id int64, attempts int, errText string) error {
-	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.state.Jobs {
 		j := &s.state.Jobs[i]
-		if j.ID == id {
-			j.Status = "queued"
-			if attempts >= 8 {
-				j.Status = "failed"
-			}
-			j.LastError = trim(errText, 4000)
-			j.AvailableAt = time.Now().UTC().Add(time.Duration(attempts*attempts) * 10 * time.Second)
-			j.LockedAt = time.Time{}
-			j.LockedBy = ""
-			j.UpdatedAt = time.Now().UTC()
-			break
+		if j.ID != id {
+			continue
 		}
+		if j.Status != "running" || !secureEqualText(j.LockedBy, leaseToken) {
+			return ErrJobLeaseLost
+		}
+		oldLockedAt, oldUpdatedAt := j.LockedAt, j.UpdatedAt
+		now := time.Now().UTC()
+		j.LockedAt = now
+		j.UpdatedAt = now
+		if err := s.persistLocked(); err != nil {
+			j.LockedAt, j.UpdatedAt = oldLockedAt, oldUpdatedAt
+			return err
+		}
+		return nil
 	}
-	return s.persistLocked()
+	return ErrJobLeaseLost
 }
+
+func (s *Store) CompleteJob(ctx context.Context, id int64, leaseToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Jobs {
+		j := &s.state.Jobs[i]
+		if j.ID != id {
+			continue
+		}
+		if j.Status != "running" || !secureEqualText(j.LockedBy, leaseToken) {
+			return ErrJobLeaseLost
+		}
+		old := *j
+		j.Status = "done"
+		j.LockedAt = time.Time{}
+		j.LockedBy = ""
+		j.UpdatedAt = time.Now().UTC()
+		if err := s.persistLocked(); err != nil {
+			*j = old
+			return err
+		}
+		return nil
+	}
+	return ErrJobLeaseLost
+}
+
+func (s *Store) FailJob(ctx context.Context, id int64, leaseToken string, attempts int, errText string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Jobs {
+		j := &s.state.Jobs[i]
+		if j.ID != id {
+			continue
+		}
+		if j.Status != "running" || !secureEqualText(j.LockedBy, leaseToken) {
+			return ErrJobLeaseLost
+		}
+		old := *j
+		j.Status = "queued"
+		if attempts >= 8 {
+			j.Status = "failed"
+		}
+		j.LastError = trim(errText, 4000)
+		j.AvailableAt = time.Now().UTC().Add(time.Duration(attempts*attempts) * 10 * time.Second)
+		j.LockedAt = time.Time{}
+		j.LockedBy = ""
+		j.UpdatedAt = time.Now().UTC()
+		if err := s.persistLocked(); err != nil {
+			*j = old
+			return err
+		}
+		return nil
+	}
+	return ErrJobLeaseLost
+}
+
+func secureEqualText(a, b string) bool {
+	if a == "" || b == "" || len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
 func (s *Store) RequeueStaleJobs(ctx context.Context, olderThan time.Duration) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if olderThan <= 0 {
+		return errors.New("stale job duration must be positive")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cut := time.Now().UTC().Add(-olderThan)
 	changed := false
+	old := append([]jobRecord(nil), s.state.Jobs...)
 	for i := range s.state.Jobs {
 		j := &s.state.Jobs[i]
 		if j.Status == "running" && !j.LockedAt.IsZero() && j.LockedAt.Before(cut) {
@@ -552,8 +844,12 @@ func (s *Store) RequeueStaleJobs(ctx context.Context, olderThan time.Duration) e
 			changed = true
 		}
 	}
-	if changed {
-		return s.persistLocked()
+	if !changed {
+		return nil
+	}
+	if err := s.persistLocked(); err != nil {
+		s.state.Jobs = old
+		return err
 	}
 	return nil
 }
@@ -563,7 +859,9 @@ func (s *Store) RecordAnalysis(ctx context.Context, in model.AnalysisInput, r mo
 }
 
 func (s *Store) RecordAnalysisForTenant(ctx context.Context, tenantID string, in model.AnalysisInput, r model.AnalysisResult, storeExcerpt, storeRaw bool) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tenantID = normalizeTenant(tenantID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -588,24 +886,44 @@ func (s *Store) RecordAnalysisForTenant(ctx context.Context, tenantID string, in
 	if !storeRaw {
 		in.Log = ""
 	}
-	if _, ok := s.state.Analyses[r.ID]; !ok {
+	oldRecord, existed := s.state.Analyses[r.ID]
+	oldOrderLen := len(s.state.AnalysisOrder)
+	oldEnvironmentLen := len(s.state.Environments)
+	if !existed {
 		s.state.AnalysisOrder = append(s.state.AnalysisOrder, r.ID)
 	}
 	s.state.Analyses[r.ID] = analysisRecord{TenantID: tenantID, Input: in, Result: r}
 	s.state.Environments = append(s.state.Environments, environmentRecord{TenantID: tenantID, Repository: in.Repository, Workflow: in.Workflow, Job: in.Job, CommitSHA: in.CommitSHA, Successful: false, Environment: r.Environment, CreatedAt: r.CreatedAt})
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.Analyses[r.ID] = oldRecord
+		} else {
+			delete(s.state.Analyses, r.ID)
+		}
+		s.state.AnalysisOrder = s.state.AnalysisOrder[:oldOrderLen]
+		s.state.Environments = s.state.Environments[:oldEnvironmentLen]
+		return err
+	}
+	return nil
 }
 func (s *Store) RecordSuccessfulEnvironment(ctx context.Context, repository, workflow, job, sha string, env model.Environment, at time.Time) error {
 	return s.RecordSuccessfulEnvironmentForTenant(ctx, model.DefaultTenantID, repository, workflow, job, sha, env, at)
 }
 
 func (s *Store) RecordSuccessfulEnvironmentForTenant(ctx context.Context, tenantID, repository, workflow, job, sha string, env model.Environment, at time.Time) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tenantID = normalizeTenant(tenantID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	oldLen := len(s.state.Environments)
 	s.state.Environments = append(s.state.Environments, environmentRecord{TenantID: tenantID, Repository: repository, Workflow: workflow, Job: job, CommitSHA: sha, Successful: true, Environment: env, CreatedAt: at.UTC()})
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.state.Environments = s.state.Environments[:oldLen]
+		return err
+	}
+	return nil
 }
 func (s *Store) LastSuccessfulEnvironment(ctx context.Context, repository, workflow, job string) (*model.Environment, error) {
 	return s.LastSuccessfulEnvironmentForTenant(ctx, model.DefaultTenantID, repository, workflow, job)
@@ -675,7 +993,9 @@ func (s *Store) UpsertIncident(ctx context.Context, i model.Incident) error {
 }
 
 func (s *Store) UpsertIncidentForTenant(ctx context.Context, tenantID string, i model.Incident) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tenantID = normalizeTenant(tenantID)
 	i.TenantID = tenantID
 	s.mu.Lock()
@@ -709,8 +1029,17 @@ func (s *Store) UpsertIncidentForTenant(ctx context.Context, tenantID string, i 
 			i.ResolutionNote = ""
 		}
 	}
+	old, existed := s.state.Incidents[key]
 	s.state.Incidents[key] = i
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.Incidents[key] = old
+		} else {
+			delete(s.state.Incidents, key)
+		}
+		return err
+	}
+	return nil
 }
 func (s *Store) ListIncidents(ctx context.Context, limit int, stateFilter string) ([]model.Incident, error) {
 	return s.ListIncidentsForTenant(ctx, model.DefaultTenantID, limit, stateFilter)
@@ -737,11 +1066,23 @@ func (s *Store) ListIncidentsForTenant(ctx context.Context, tenantID string, lim
 	return out, nil
 }
 func (s *Store) RecordProviderStatus(ctx context.Context, p model.ProviderStatus) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state.ProviderStatuses[strings.ToLower(p.Provider)] = p
-	return s.persistLocked()
+	key := strings.ToLower(strings.TrimSpace(p.Provider))
+	old, existed := s.state.ProviderStatuses[key]
+	s.state.ProviderStatuses[key] = p
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.ProviderStatuses[key] = old
+		} else {
+			delete(s.state.ProviderStatuses, key)
+		}
+		return err
+	}
+	return nil
 }
 func (s *Store) GetProviderStatus(ctx context.Context, provider string) (*model.ProviderStatus, error) {
 	_ = ctx
@@ -804,8 +1145,16 @@ func (s *Store) StatsForTenant(ctx context.Context, tenantID string) (Stats, err
 		}
 	}
 	for _, j := range s.state.Jobs {
-		if normalizeTenant(j.TenantID) == tenantID && j.Status == "queued" {
+		if normalizeTenant(j.TenantID) != tenantID {
+			continue
+		}
+		switch j.Status {
+		case "queued":
 			st.QueuedJobs++
+		case "running":
+			st.RunningJobs++
+		case "failed":
+			st.FailedJobs++
 		}
 	}
 	return st, nil
@@ -847,12 +1196,24 @@ func (s *Store) ListAnalysesForTenant(ctx context.Context, tenantID string, limi
 	return out, nil
 }
 func (s *Store) Cleanup(ctx context.Context, retentionDays int) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if retentionDays < 1 {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	oldAnalyses := cloneMap(s.state.Analyses)
+	oldAnalysisOrder := append([]string(nil), s.state.AnalysisOrder...)
+	oldEnvironments := append([]environmentRecord(nil), s.state.Environments...)
+	oldJobs := append([]jobRecord(nil), s.state.Jobs...)
+	oldAuditEvents := cloneMap(s.state.AuditEvents)
+	oldAuditOrder := append([]string(nil), s.state.AuditOrder...)
+	oldNotifications := cloneMap(s.state.NotificationDeliveries)
+	oldNotificationOrder := append([]string(nil), s.state.NotificationOrder...)
+	oldIncidents := cloneMap(s.state.Incidents)
+	oldDeliveries := cloneMap(s.state.Deliveries)
 	cut := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
 	newOrder := s.state.AnalysisOrder[:0]
 	for _, id := range s.state.AnalysisOrder {
@@ -917,8 +1278,30 @@ func (s *Store) Cleanup(ctx context.Context, retentionDays int) error {
 			delete(s.state.Deliveries, id)
 		}
 	}
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.state.Analyses = oldAnalyses
+		s.state.AnalysisOrder = oldAnalysisOrder
+		s.state.Environments = oldEnvironments
+		s.state.Jobs = oldJobs
+		s.state.AuditEvents = oldAuditEvents
+		s.state.AuditOrder = oldAuditOrder
+		s.state.NotificationDeliveries = oldNotifications
+		s.state.NotificationOrder = oldNotificationOrder
+		s.state.Incidents = oldIncidents
+		s.state.Deliveries = oldDeliveries
+		return err
+	}
+	return nil
 }
+
+func cloneMap[K comparable, V any](source map[K]V) map[K]V {
+	cloned := make(map[K]V, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
 func trim(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -932,13 +1315,17 @@ func (s *Store) ResolveStaleIncidents(ctx context.Context, cutoff time.Time) (in
 }
 
 func (s *Store) ResolveStaleIncidentsDetailed(ctx context.Context, cutoff time.Time) ([]model.Incident, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	out := []model.Incident{}
+	previous := map[string]model.Incident{}
 	for key, incident := range s.state.Incidents {
 		if (incident.State == "open" || incident.State == "acknowledged") && incident.LastSeenAt.Before(cutoff) {
+			previous[key] = incident
 			incident.State = "resolved"
 			incident.ResolvedAt = now
 			incident.ResolvedBy = "system"
@@ -948,7 +1335,12 @@ func (s *Store) ResolveStaleIncidentsDetailed(ctx context.Context, cutoff time.T
 		}
 	}
 	if len(out) > 0 {
-		return out, s.persistLocked()
+		if err := s.persistLocked(); err != nil {
+			for key, incident := range previous {
+				s.state.Incidents[key] = incident
+			}
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -971,14 +1363,18 @@ func (s *Store) GetIncidentForTenant(ctx context.Context, tenantID, fingerprint 
 }
 
 func (s *Store) RecordNotificationDelivery(ctx context.Context, d model.NotificationDelivery) error {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	d.TenantID = normalizeTenant(d.TenantID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if d.ID == "" {
 		d.ID = notificationKey(d.TenantID, d.EventID, d.Channel)
 	}
-	if old, ok := s.state.NotificationDeliveries[d.ID]; ok {
+	old, existed := s.state.NotificationDeliveries[d.ID]
+	oldOrderLen := len(s.state.NotificationOrder)
+	if existed {
 		if d.CreatedAt.IsZero() {
 			d.CreatedAt = old.CreatedAt
 		}
@@ -986,7 +1382,16 @@ func (s *Store) RecordNotificationDelivery(ctx context.Context, d model.Notifica
 		s.state.NotificationOrder = append(s.state.NotificationOrder, d.ID)
 	}
 	s.state.NotificationDeliveries[d.ID] = d
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.NotificationDeliveries[d.ID] = old
+		} else {
+			delete(s.state.NotificationDeliveries, d.ID)
+		}
+		s.state.NotificationOrder = s.state.NotificationOrder[:oldOrderLen]
+		return err
+	}
+	return nil
 }
 
 func (s *Store) GetNotificationDelivery(ctx context.Context, eventID, channel string) (*model.NotificationDelivery, error) {
@@ -1049,12 +1454,28 @@ func (s *Store) BeginNotificationDelivery(ctx context.Context, eventID, channel,
 }
 
 func (s *Store) BeginNotificationDeliveryForTenant(ctx context.Context, tenantID, eventID, channel, channelType, dedupeKey string, cooldown time.Duration, maxAttempts int) (string, model.NotificationDelivery, error) {
-	_ = ctx
+	if err := ctx.Err(); err != nil {
+		return "", model.NotificationDelivery{}, err
+	}
 	tenantID = normalizeTenant(tenantID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	id := notificationKey(tenantID, eventID, channel)
+	original, originallyExisted := s.state.NotificationDeliveries[id]
+	originalOrderLen := len(s.state.NotificationOrder)
+	persist := func() error {
+		if err := s.persistLocked(); err != nil {
+			if originallyExisted {
+				s.state.NotificationDeliveries[id] = original
+			} else {
+				delete(s.state.NotificationDeliveries, id)
+			}
+			s.state.NotificationOrder = s.state.NotificationOrder[:originalOrderLen]
+			return err
+		}
+		return nil
+	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
@@ -1071,7 +1492,7 @@ func (s *Store) BeginNotificationDeliveryForTenant(ctx context.Context, tenantID
 			old.Status = "failed"
 			old.UpdatedAt = now
 			s.state.NotificationDeliveries[id] = old
-			return "skip", old, s.persistLocked()
+			return "skip", old, persist()
 		}
 	}
 	if cooldown > 0 && dedupeKey != "" {
@@ -1093,7 +1514,7 @@ func (s *Store) BeginNotificationDeliveryForTenant(ctx context.Context, tenantID
 					s.state.NotificationOrder = append(s.state.NotificationOrder, id)
 				}
 				s.state.NotificationDeliveries[id] = d
-				return "suppressed", d, s.persistLocked()
+				return "suppressed", d, persist()
 			}
 		}
 	}
@@ -1108,7 +1529,7 @@ func (s *Store) BeginNotificationDeliveryForTenant(ctx context.Context, tenantID
 	d.LastError = ""
 	d.HTTPStatus = 0
 	s.state.NotificationDeliveries[id] = d
-	if err := s.persistLocked(); err != nil {
+	if err := persist(); err != nil {
 		return "", model.NotificationDelivery{}, err
 	}
 	return "send", d, nil

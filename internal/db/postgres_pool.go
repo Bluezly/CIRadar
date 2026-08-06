@@ -11,12 +11,15 @@ import (
 
 const defaultPostgresPoolSize = 10
 
+var errPostgresPoolClosed = errors.New("postgres connection pool is closed")
+
 type postgresPool struct {
-	dsn    string
-	idle   chan *pgwire.Client
-	slots  chan struct{}
-	mu     sync.RWMutex
-	closed bool
+	dsn     string
+	idle    chan *pgwire.Client
+	slots   chan struct{}
+	closeCh chan struct{}
+	mu      sync.RWMutex
+	closed  bool
 }
 
 func newPostgresPool(dsn string, size int) *postgresPool {
@@ -24,34 +27,64 @@ func newPostgresPool(dsn string, size int) *postgresPool {
 		size = defaultPostgresPoolSize
 	}
 	return &postgresPool{
-		dsn:   dsn,
-		idle:  make(chan *pgwire.Client, size),
-		slots: make(chan struct{}, size),
+		dsn:     dsn,
+		idle:    make(chan *pgwire.Client, size),
+		slots:   make(chan struct{}, size),
+		closeCh: make(chan struct{}),
 	}
 }
 
-func (p *postgresPool) acquire(ctx context.Context) (*pgwire.Client, error) {
+func (p *postgresPool) isClosed() bool {
 	p.mu.RLock()
-	closed := p.closed
-	p.mu.RUnlock()
-	if closed {
-		return nil, errors.New("postgres connection pool is closed")
+	defer p.mu.RUnlock()
+	return p.closed
+}
+
+func (p *postgresPool) acquire(ctx context.Context) (*pgwire.Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.isClosed() {
+		return nil, errPostgresPoolClosed
 	}
 
 	select {
+	case <-p.closeCh:
+		return nil, errPostgresPoolClosed
 	case c := <-p.idle:
+		if p.isClosed() {
+			_ = c.Close()
+			<-p.slots
+			return nil, errPostgresPoolClosed
+		}
 		return c, nil
 	default:
 	}
 
 	select {
+	case <-p.closeCh:
+		return nil, errPostgresPoolClosed
 	case c := <-p.idle:
+		if p.isClosed() {
+			_ = c.Close()
+			<-p.slots
+			return nil, errPostgresPoolClosed
+		}
 		return c, nil
 	case p.slots <- struct{}{}:
+		if p.isClosed() {
+			<-p.slots
+			return nil, errPostgresPoolClosed
+		}
 		c, err := pgwire.Connect(ctx, p.dsn)
 		if err != nil {
 			<-p.slots
 			return nil, err
+		}
+		if p.isClosed() {
+			_ = c.Close()
+			<-p.slots
+			return nil, errPostgresPoolClosed
 		}
 		return c, nil
 	case <-ctx.Done():
@@ -63,15 +96,15 @@ func (p *postgresPool) release(c *pgwire.Client) {
 	if c == nil {
 		return
 	}
-	p.mu.RLock()
-	closed := p.closed
-	p.mu.RUnlock()
-	if closed || !postgresConnectionHealthy(c) {
+	if p.isClosed() || !postgresConnectionHealthy(c) {
 		_ = c.Close()
 		<-p.slots
 		return
 	}
 	select {
+	case <-p.closeCh:
+		_ = c.Close()
+		<-p.slots
 	case p.idle <- c:
 	default:
 		_ = c.Close()
@@ -98,6 +131,7 @@ func (p *postgresPool) close() error {
 		return nil
 	}
 	p.closed = true
+	close(p.closeCh)
 	p.mu.Unlock()
 
 	for {

@@ -93,7 +93,14 @@ func (p *PostgresBackend) Enqueue(ctx context.Context, typ string, payload any, 
 }
 
 func (p *PostgresBackend) EnqueueForTenant(ctx context.Context, tenantID, typ string, payload any, availableAt time.Time) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tenantID = normalizeTenant(tenantID)
+	typ = strings.TrimSpace(typ)
+	if typ == "" {
+		return errors.New("job type is required")
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -124,7 +131,7 @@ func (p *PostgresBackend) EnqueueForTenant(ctx context.Context, tenantID, typ st
 	if len(rows.Values) != 1 || len(rows.Values[0]) < 1 || rows.Values[0][0] == nil || *rows.Values[0][0] != "enabled" {
 		return fmt.Errorf("tenant %q not found or disabled", tenantID)
 	}
-	query := `INSERT INTO ciradar_jobs(tenant_id,type,payload,status,attempts,available_at,created_at,updated_at) VALUES (` + sqlLiteral(tenantID) + `,` + sqlLiteral(strings.TrimSpace(typ)) + `,` + jsonExpr(data) + `,'queued',0,` + sqlTime(availableAt) + `,now(),now())`
+	query := `INSERT INTO ciradar_jobs(tenant_id,type,payload,status,attempts,available_at,created_at,updated_at) VALUES (` + sqlLiteral(tenantID) + `,` + sqlLiteral(typ) + `,` + jsonExpr(data) + `,'queued',0,` + sqlTime(availableAt) + `,now(),now())`
 	if err = c.Exec(ctx, query); err != nil {
 		return err
 	}
@@ -132,6 +139,18 @@ func (p *PostgresBackend) EnqueueForTenant(ctx context.Context, tenantID, typ st
 }
 
 func (p *PostgresBackend) ClaimJob(ctx context.Context, workerID string) (job *Job, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return nil, errors.New("worker ID is required")
+	}
+	random, err := randomText(18)
+	if err != nil {
+		return nil, err
+	}
+	lease := workerID + ":" + random
 	c, err := p.connect(ctx)
 	if err != nil {
 		return nil, err
@@ -173,14 +192,14 @@ func (p *PostgresBackend) ClaimJob(ctx context.Context, workerID string) (job *J
 		return nil, err
 	}
 	attempts++
-	update := `UPDATE ciradar_jobs SET status='running',attempts=` + strconv.Itoa(attempts) + `,locked_at=now(),locked_by=` + sqlLiteral(workerID) + `,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10)
+	update := `UPDATE ciradar_jobs SET status='running',attempts=` + strconv.Itoa(attempts) + `,locked_at=now(),locked_by=` + sqlLiteral(lease) + `,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10)
 	if err = c.Exec(ctx, update); err != nil {
 		return nil, err
 	}
 	if err = c.Exec(ctx, "COMMIT"); err != nil {
 		return nil, err
 	}
-	return &Job{TenantID: normalizeTenant(valueOf(row[1])), ID: id, Type: valueOf(row[2]), Payload: append(json.RawMessage(nil), payload...), Attempts: attempts}, nil
+	return &Job{TenantID: normalizeTenant(valueOf(row[1])), ID: id, Type: valueOf(row[2]), Payload: append(json.RawMessage(nil), payload...), Attempts: attempts, LeaseToken: lease}, nil
 }
 
 func valueOf(value *string) string {
@@ -199,21 +218,78 @@ func parsePostgresInt(value *string, field string) (int, error) {
 	return n, nil
 }
 
-func (p *PostgresBackend) CompleteJob(ctx context.Context, id int64) error {
-	return p.exec(ctx, `UPDATE ciradar_jobs SET status='done',locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=`+strconv.FormatInt(id, 10))
+func (p *PostgresBackend) RenewJobLease(ctx context.Context, id int64, leaseToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	query := `UPDATE ciradar_jobs SET locked_at=now(),updated_at=now() WHERE id=` + strconv.FormatInt(id, 10) + ` AND status='running' AND locked_by=` + sqlLiteral(leaseToken) + ` RETURNING id::text`
+	c, err := p.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer p.release(c)
+	rows, err := c.Query(ctx, query)
+	if err != nil {
+		return err
+	}
+	if len(rows.Values) != 1 {
+		return ErrJobLeaseLost
+	}
+	return nil
 }
 
-func (p *PostgresBackend) FailJob(ctx context.Context, id int64, attempts int, errText string) error {
+func (p *PostgresBackend) CompleteJob(ctx context.Context, id int64, leaseToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	query := `UPDATE ciradar_jobs SET status='done',locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10) + ` AND status='running' AND locked_by=` + sqlLiteral(leaseToken) + ` RETURNING id::text`
+	c, err := p.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer p.release(c)
+	rows, err := c.Query(ctx, query)
+	if err != nil {
+		return err
+	}
+	if len(rows.Values) != 1 {
+		return ErrJobLeaseLost
+	}
+	return nil
+}
+
+func (p *PostgresBackend) FailJob(ctx context.Context, id int64, leaseToken string, attempts int, errText string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	status := "queued"
 	if attempts >= 8 {
 		status = "failed"
 	}
 	seconds := attempts * attempts * 10
-	query := `UPDATE ciradar_jobs SET status=` + sqlLiteral(status) + `,last_error=` + sqlLiteral(trim(errText, 4000)) + `,available_at=now()+interval ` + sqlLiteral(strconv.Itoa(seconds)+" seconds") + `,locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10)
-	return p.exec(ctx, query)
+	query := `UPDATE ciradar_jobs SET status=` + sqlLiteral(status) + `,last_error=` + sqlLiteral(trim(errText, 4000)) + `,available_at=now()+interval ` + sqlLiteral(strconv.Itoa(seconds)+" seconds") + `,locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10) + ` AND status='running' AND locked_by=` + sqlLiteral(leaseToken) + ` RETURNING id::text`
+	c, err := p.connect(ctx)
+	if err != nil {
+		return err
+	}
+	defer p.release(c)
+	rows, err := c.Query(ctx, query)
+	if err != nil {
+		return err
+	}
+	if len(rows.Values) != 1 {
+		return ErrJobLeaseLost
+	}
+	return nil
 }
 
 func (p *PostgresBackend) RequeueStaleJobs(ctx context.Context, olderThan time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if olderThan <= 0 {
+		return errors.New("stale job duration must be positive")
+	}
 	seconds := int64(olderThan / time.Second)
 	if seconds < 1 {
 		seconds = 1
@@ -232,6 +308,13 @@ func (p *PostgresBackend) exec(ctx context.Context, query string) error {
 }
 
 func (p *PostgresBackend) RecordDelivery(ctx context.Context, id, eventType string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("delivery ID is required")
+	}
 	c, err := p.connect(ctx)
 	if err != nil {
 		return false, err
@@ -243,6 +326,145 @@ func (p *PostgresBackend) RecordDelivery(ctx context.Context, id, eventType stri
 		return false, err
 	}
 	return len(rows.Values) == 1, nil
+}
+
+func (p *PostgresBackend) RecordTerminalDelivery(ctx context.Context, id, eventType, status, errText string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	status = strings.TrimSpace(status)
+	if id == "" {
+		return false, errors.New("delivery ID is required")
+	}
+	if status == "" {
+		return false, errors.New("delivery status is required")
+	}
+	c, err := p.connect(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer p.release(c)
+	query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES (` + sqlLiteral(id) + `,` + sqlLiteral(strings.TrimSpace(eventType)) + `,` + sqlLiteral(status) + `,` + sqlLiteral(trim(errText, 4000)) + `) ON CONFLICT (id) DO NOTHING RETURNING id`
+	rows, err := c.Query(ctx, query)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Values) == 1, nil
+}
+
+func (p *PostgresBackend) ClaimDelivery(ctx context.Context, id, eventType string, staleAfter time.Duration) (claimed bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("delivery ID is required")
+	}
+	if staleAfter <= 0 {
+		staleAfter = 5 * time.Minute
+	}
+	c, err := p.connect(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer p.release(c)
+	if err = c.Exec(ctx, "BEGIN"); err != nil {
+		return false, err
+	}
+	defer func() {
+		if err != nil {
+			_ = c.Exec(context.Background(), "ROLLBACK")
+		}
+	}()
+	insert := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES (` + sqlLiteral(id) + `,` + sqlLiteral(strings.TrimSpace(eventType)) + `,'processing','') ON CONFLICT (id) DO NOTHING RETURNING id`
+	rows, err := c.Query(ctx, insert)
+	if err != nil {
+		return false, err
+	}
+	if len(rows.Values) == 1 {
+		if err = c.Exec(ctx, "COMMIT"); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	seconds := int64(staleAfter / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	update := `UPDATE ciradar_webhook_deliveries SET event_type=` + sqlLiteral(strings.TrimSpace(eventType)) + `,received_at=now(),status='processing',error='' WHERE id=` + sqlLiteral(id) + ` AND (status='error' OR ((status='processing' OR status='received') AND received_at<now()-interval ` + sqlLiteral(strconv.FormatInt(seconds, 10)+" seconds") + `)) RETURNING id`
+	rows, err = c.Query(ctx, update)
+	if err != nil {
+		return false, err
+	}
+	if err = c.Exec(ctx, "COMMIT"); err != nil {
+		return false, err
+	}
+	return len(rows.Values) == 1, nil
+}
+
+func (p *PostgresBackend) EnqueueDeliveryForTenant(ctx context.Context, deliveryID, eventType, tenantID, typ string, payload any, availableAt time.Time) (fresh bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	deliveryID = strings.TrimSpace(deliveryID)
+	if deliveryID == "" {
+		return false, errors.New("delivery ID is required")
+	}
+	tenantID = normalizeTenant(tenantID)
+	typ = strings.TrimSpace(typ)
+	if typ == "" {
+		return false, errors.New("job type is required")
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	if availableAt.IsZero() {
+		availableAt = time.Now().UTC()
+	}
+	c, err := p.connect(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer p.release(c)
+	if err = c.Exec(ctx, "BEGIN"); err != nil {
+		return false, err
+	}
+	defer func() {
+		if err != nil {
+			_ = c.Exec(context.Background(), "ROLLBACK")
+		}
+	}()
+	if err = lockSpecs(ctx, c, []pgSpec{pgGlobal(pgKindTenant)}); err != nil {
+		return false, err
+	}
+	tenantRows, err := c.Query(ctx, `SELECT status FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(pgSystemTenant)+` AND kind=`+sqlLiteral(pgKindTenant)+` AND object_id=`+sqlLiteral(tenantID)+` FOR SHARE`)
+	if err != nil {
+		return false, err
+	}
+	if len(tenantRows.Values) != 1 || len(tenantRows.Values[0]) < 1 || tenantRows.Values[0][0] == nil || *tenantRows.Values[0][0] != "enabled" {
+		return false, fmt.Errorf("tenant %q not found or disabled", tenantID)
+	}
+	insertDelivery := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES (` + sqlLiteral(deliveryID) + `,` + sqlLiteral(strings.TrimSpace(eventType)) + `,'queued','') ON CONFLICT (id) DO NOTHING RETURNING id`
+	deliveryRows, err := c.Query(ctx, insertDelivery)
+	if err != nil {
+		return false, err
+	}
+	if len(deliveryRows.Values) == 0 {
+		if err = c.Exec(ctx, "COMMIT"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	insertJob := `INSERT INTO ciradar_jobs(tenant_id,type,payload,status,attempts,available_at,created_at,updated_at) VALUES (` + sqlLiteral(tenantID) + `,` + sqlLiteral(typ) + `,` + jsonExpr(data) + `,'queued',0,` + sqlTime(availableAt) + `,now(),now())`
+	if err = c.Exec(ctx, insertJob); err != nil {
+		return false, err
+	}
+	if err = c.Exec(ctx, "COMMIT"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (p *PostgresBackend) UpdateDelivery(ctx context.Context, id, status, errText string) error {
@@ -575,16 +797,21 @@ func (p *PostgresBackend) StatsForTenant(ctx context.Context, tenantID string) (
 		return Stats{}, err
 	}
 	defer p.release(c)
-	rows, err := c.Query(ctx, `SELECT count(*)::text FROM ciradar_jobs WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID))+` AND status='queued'`)
+	rows, err := c.Query(ctx, `SELECT count(*) FILTER (WHERE status='queued')::text,count(*) FILTER (WHERE status='running')::text,count(*) FILTER (WHERE status='failed')::text FROM ciradar_jobs WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID)))
 	if err != nil {
 		return Stats{}, err
 	}
-	row, err := requireRow(rows, 1)
+	row, err := requireRow(rows, 3)
 	if err != nil {
 		return Stats{}, err
 	}
-	stats.QueuedJobs, err = parsePostgresInt(row[0], "queued job count")
-	if err != nil {
+	if stats.QueuedJobs, err = parsePostgresInt(row[0], "queued job count"); err != nil {
+		return Stats{}, err
+	}
+	if stats.RunningJobs, err = parsePostgresInt(row[1], "running job count"); err != nil {
+		return Stats{}, err
+	}
+	if stats.FailedJobs, err = parsePostgresInt(row[2], "failed job count"); err != nil {
 		return Stats{}, err
 	}
 	return stats, nil

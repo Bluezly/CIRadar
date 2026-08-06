@@ -11,13 +11,17 @@ type Backend interface {
 	Close() error
 	Migrate(context.Context) error
 	ClaimJob(context.Context, string) (*Job, error)
-	CompleteJob(context.Context, int64) error
-	FailJob(context.Context, int64, int, string) error
+	RenewJobLease(context.Context, int64, string) error
+	CompleteJob(context.Context, int64, string) error
+	FailJob(context.Context, int64, string, int, string) error
 	RequeueStaleJobs(context.Context, time.Duration) error
 	Enqueue(context.Context, string, any, time.Time) error
 	EnqueueForTenant(context.Context, string, string, any, time.Time) error
 
 	RecordDelivery(context.Context, string, string) (bool, error)
+	RecordTerminalDelivery(context.Context, string, string, string, string) (bool, error)
+	ClaimDelivery(context.Context, string, string, time.Duration) (bool, error)
+	EnqueueDeliveryForTenant(context.Context, string, string, string, string, any, time.Time) (bool, error)
 	UpdateDelivery(context.Context, string, string, string) error
 
 	RecordAnalysisForTenant(context.Context, string, model.AnalysisInput, model.AnalysisResult, bool, bool) error
