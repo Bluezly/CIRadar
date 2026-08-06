@@ -166,9 +166,6 @@ func allHex(value string) bool {
 	return true
 }
 
-// ResidualSecretRisk performs a conservative second pass intended for outbound
-// LLM payloads. A positive result should block transmission rather than trying
-// to guess whether an unfamiliar high-entropy value is harmless.
 func (r *Redactor) ResidualSecretRisk(s string) bool {
 	if r == nil {
 		r = NewRedactor()
@@ -276,13 +273,9 @@ func decodedSecret(decoded []byte) bool {
 			return true
 		}
 	}
-	// JSON-encoded credentials frequently have quoted sensitive keys.
 	if strings.Contains(text, `"`) && (strings.Contains(text, `"token"`) || strings.Contains(text, `"password"`) || strings.Contains(text, `"secret"`) || strings.Contains(text, `"private_key"`) || strings.Contains(text, `"client_secret"`)) {
 		return true
 	}
-	// A decoded printable, random-looking value near no labels is still likely a
-	// credential when it has the shape of an opaque API key. Keep this threshold
-	// deliberately high to avoid erasing ordinary base64-encoded log text.
 	trimmed := strings.TrimSpace(value)
 	return len(trimmed) >= 40 && len(trimmed) <= 512 && looksLikeStandaloneOpaqueSecret(trimmed)
 }
