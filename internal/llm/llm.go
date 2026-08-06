@@ -361,24 +361,18 @@ func marshalPrompt(payload map[string]any, maximum int) string {
 		return out
 	}
 
-	// File names are useful hints, but exact source and the failure excerpt carry
-	// more repair value. Drop the lowest-value bulk first.
 	delete(payload, "changed_files")
 	out = encode()
 	if len(out) <= maximum {
 		return out
 	}
 
-	// Keep at least a concise failure signal while reserving space for source.
 	if excerpt, ok := payload["redacted_log_excerpt_untrusted"].(string); ok && len(excerpt) > 1200 {
 		payload["redacted_log_excerpt_untrusted"] = trim(excerpt, 1200)
 		out = encode()
 	}
 
 	if sources, ok := payload["source_files_untrusted"].([]SourceFile); ok && len(sources) > 0 {
-		// First trim each file rather than deleting all source context. This fixes a
-		// previous failure mode where a 32 KiB source limit and a 24 KiB prompt
-		// limit silently produced a source-free "AI repair" request.
 		for len(out) > maximum && len(sources) > 0 {
 			largest := -1
 			for i := range sources {
@@ -425,8 +419,6 @@ func marshalPrompt(payload map[string]any, maximum int) string {
 		}
 	}
 
-	// If the fixed diagnosis metadata itself exceeds the configured budget, keep
-	// valid JSON and remove optional source rather than returning malformed data.
 	delete(payload, "source_files_untrusted")
 	out = encode()
 	if len(out) <= maximum {
