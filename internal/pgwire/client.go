@@ -32,12 +32,14 @@ type Config struct {
 	SSLMode        string
 	RootCert       string
 	ConnectTimeout time.Duration
+	PoolMaxConns   int
 }
 
 type Client struct {
-	conn net.Conn
-	r    *bufio.Reader
-	cfg  Config
+	conn   net.Conn
+	r      *bufio.Reader
+	cfg    Config
+	broken bool
 }
 
 type Rows struct {
@@ -51,7 +53,7 @@ func ParseDSN(dsn string) (Config, error) {
 	if dsn == "" {
 		return Config{}, errors.New("postgres dsn is empty")
 	}
-	cfg := Config{Port: 5432, SSLMode: "verify-full", ConnectTimeout: 10 * time.Second}
+	cfg := Config{Port: 5432, SSLMode: "verify-full", ConnectTimeout: 10 * time.Second, PoolMaxConns: 10}
 	if strings.Contains(dsn, "://") {
 		u, err := url.Parse(dsn)
 		if err != nil {
@@ -82,6 +84,13 @@ func ParseDSN(dsn string) (Config, error) {
 			}
 			cfg.ConnectTimeout = time.Duration(n) * time.Second
 		}
+		if v := q.Get("pool_max_conns"); v != "" {
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 || n > 200 {
+				return cfg, errors.New("pool_max_conns must be between 1 and 200")
+			}
+			cfg.PoolMaxConns = n
+		}
 	} else {
 		fields, err := parseKV(dsn)
 		if err != nil {
@@ -108,6 +117,13 @@ func ParseDSN(dsn string) (Config, error) {
 				return cfg, e
 			}
 			cfg.ConnectTimeout = time.Duration(n) * time.Second
+		}
+		if v := fields["pool_max_conns"]; v != "" {
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 || n > 200 {
+				return cfg, errors.New("pool_max_conns must be between 1 and 200")
+			}
+			cfg.PoolMaxConns = n
 		}
 	}
 	if cfg.Host == "" {
@@ -372,43 +388,73 @@ func (c *Client) readMessage() (byte, []byte, error) {
 }
 
 func (c *Client) Query(ctx context.Context, q string) (Rows, error) {
+	if err := ctx.Err(); err != nil {
+		return Rows{}, err
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = c.conn.SetDeadline(deadline)
-		defer c.conn.SetDeadline(time.Time{})
 	}
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = c.conn.SetDeadline(time.Now())
+		close(cancelDone)
+	})
+	defer func() {
+		if !stopCancel() {
+			<-cancelDone
+		}
+		_ = c.conn.SetDeadline(time.Time{})
+	}()
 	if err := c.sendMessage('Q', append([]byte(q), 0)); err != nil {
+		c.broken = true
 		return Rows{}, err
 	}
 	var out Rows
+	var queryErr error
 	for {
 		t, p, err := c.readMessage()
 		if err != nil {
+			c.broken = true
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return out, ctxErr
+			}
 			return out, err
 		}
 		switch t {
 		case 'T':
 			names, err := parseRowDescription(p)
 			if err != nil {
+				c.broken = true
 				return out, err
 			}
 			out.Columns = names
 		case 'D':
 			vals, err := parseDataRow(p)
 			if err != nil {
+				c.broken = true
 				return out, err
 			}
 			out.Values = append(out.Values, vals)
 		case 'C':
 			out.Command = strings.TrimRight(string(p), "\x00")
 		case 'E':
-			return out, parseError(p)
+			// PostgreSQL sends ReadyForQuery after ErrorResponse. Consume the
+			// protocol through that boundary before returning so a subsequent
+			// query cannot observe a stale 'Z' and silently desynchronize.
+			queryErr = parseError(p)
 		case 'Z':
-			return out, nil
+			return out, queryErr
 		case 'I', 'N', 'S':
 		}
 	}
 }
 func (c *Client) Exec(ctx context.Context, q string) error { _, err := c.Query(ctx, q); return err }
+
+// Broken reports whether transport cancellation or protocol parsing made this
+// connection unsafe to reuse. SQL ErrorResponse values alone do not mark a
+// connection broken because Query drains through ReadyForQuery.
+func (c *Client) Broken() bool { return c == nil || c.broken }
+
 func (c *Client) Close() error {
 	if c == nil || c.conn == nil {
 		return nil
