@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"ciradar/internal/db"
@@ -23,10 +24,12 @@ type Endpoint struct {
 }
 
 type Poller struct {
-	store     db.Backend
-	http      *http.Client
-	log       *slog.Logger
-	endpoints []Endpoint
+	store                db.Backend
+	http                 *http.Client
+	log                  *slog.Logger
+	endpoints            []Endpoint
+	mu                   sync.Mutex
+	lastFailureSignature string
 }
 
 func NewPoller(store db.Backend, log *slog.Logger) *Poller {
@@ -63,16 +66,44 @@ type summaryResponse struct {
 }
 
 func (p *Poller) Poll(ctx context.Context) {
+	failed := make([]string, 0)
+	details := make([]string, 0)
 	for _, ep := range p.endpoints {
 		st, err := p.fetch(ctx, ep)
 		if err != nil {
-			p.log.Warn("provider status poll failed", "provider", ep.Name, "error", err)
+			failed = append(failed, ep.Name)
+			details = append(details, ep.Name+": "+err.Error())
 			continue
 		}
 		if err := p.store.RecordProviderStatus(ctx, st); err != nil {
-			p.log.Warn("store provider status failed", "provider", ep.Name, "error", err)
+			failed = append(failed, ep.Name)
+			details = append(details, ep.Name+": store: "+err.Error())
 		}
 	}
+	p.reportPollFailures(failed, details)
+}
+
+func (p *Poller) reportPollFailures(failed, details []string) {
+	sort.Strings(failed)
+	sort.Strings(details)
+	signature := strings.Join(failed, ",")
+	p.mu.Lock()
+	previous := p.lastFailureSignature
+	p.lastFailureSignature = signature
+	p.mu.Unlock()
+	for _, detail := range details {
+		p.log.Debug("provider status poll detail", "detail", detail)
+	}
+	if signature == previous {
+		return
+	}
+	if signature == "" {
+		if previous != "" {
+			p.log.Info("provider status polling recovered")
+		}
+		return
+	}
+	p.log.Warn("provider status polling incomplete", "failed_count", len(failed), "providers", signature, "hint", "set provider_polling=false when outbound status checks are intentionally unavailable")
 }
 
 func (p *Poller) Run(ctx context.Context, interval time.Duration) {
