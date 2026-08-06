@@ -69,10 +69,6 @@ type Service struct {
 	store db.Backend
 }
 
-// PayloadError identifies a webhook payload that the sender must correct.
-// Storage and other operational failures intentionally remain unwrapped so
-// the HTTP layer can return a retryable 5xx response instead of a misleading
-// 4xx response.
 type PayloadError struct {
 	Err error
 }
@@ -80,10 +76,6 @@ type PayloadError struct {
 func (e *PayloadError) Error() string { return e.Err.Error() }
 func (e *PayloadError) Unwrap() error { return e.Err }
 
-// PostCommitError reports a failure that occurred after the subscription was
-// persisted. Retrying the webhook as though nothing was applied could produce
-// duplicate side effects, so callers should acknowledge the delivery while
-// surfacing the warning operationally.
 type PostCommitError struct {
 	Err error
 }
