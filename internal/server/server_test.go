@@ -421,6 +421,13 @@ func TestJUnitAutoQuarantineAndManifest(t *testing.T) {
 		`<testsuite name="unit"><testcase classname="Calc" name="adds"/></testsuite>`,
 		`<testsuite name="unit"><testcase classname="Calc" name="adds"><failure message="boom">stack</failure></testcase></testsuite>`,
 		`<testsuite name="unit"><testcase classname="Calc" name="adds"/></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"><failure message="boom">stack</failure></testcase></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"/></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"><failure message="boom">stack</failure></testcase></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"/></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"><failure message="boom">stack</failure></testcase></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"/></testsuite>`,
+		`<testsuite name="unit"><testcase classname="Calc" name="adds"><failure message="boom">stack</failure></testcase></testsuite>`,
 	}
 	for i, xmlBody := range reports {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/tests/junit?repository=acme/api&workflow=ci&job=test&run_id="+strconv.Itoa(i+1), strings.NewReader(xmlBody))
