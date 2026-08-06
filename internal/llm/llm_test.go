@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -226,5 +227,111 @@ func TestEnhancePropagatesCacheReadFailure(t *testing.T) {
 func TestReadLLMResponseBodyRejectsOversizedPayload(t *testing.T) {
 	if _, err := readLLMResponseBody(strings.NewReader("12345"), 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestGeneratedPatchMustApplyToFetchedSource(t *testing.T) {
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,2 +1,2 @@\n package main\n-func value() int { return 1 }\n+func value() int { return 2 }\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": `{"explanation":"The function returns the wrong value.","suggested_fix":"Return 2.","patch":` + strconv.Quote(patch) + `,"warnings":[]}`}}}})
+	}))
+	defer srv.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, AllowPrivateNetwork: true, Model: "local", Timeout: time.Second, MaxInputCharacters: 10000, MaxOutputTokens: 500, SendSourceCode: true, DataPolicy: "local_only"}
+	analysis := model.AnalysisResult{ID: "source-patch", TenantID: "default", Summary: "wrong result"}
+	out, err := New(cfg, store).EnhanceWithSources(context.Background(), analysis, []string{"main.go"}, []SourceFile{{Path: "main.go", Content: "package main\nfunc value() int { return 1 }\n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Patch == "" || out.Metadata["patch_validated_against_source"] != "true" {
+		t.Fatalf("enhancement=%#v", out)
+	}
+}
+
+func TestGeneratedPatchRejectedWhenSourceDoesNotMatch(t *testing.T) {
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1,1 +1,1 @@\n-not present\n+replacement\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": `{"explanation":"Attempted repair.","suggested_fix":"Review.","patch":` + strconv.Quote(patch) + `,"warnings":[]}`}}}})
+	}))
+	defer srv.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, AllowPrivateNetwork: true, Model: "local", Timeout: time.Second, MaxInputCharacters: 10000, MaxOutputTokens: 500, SendSourceCode: true, DataPolicy: "local_only"}
+	out, err := New(cfg, store).EnhanceWithSources(context.Background(), model.AnalysisResult{ID: "bad-patch", TenantID: "default", Summary: "failure"}, nil, []SourceFile{{Path: "main.go", Content: "package main\n"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Patch != "" || len(out.Warnings) == 0 || !strings.Contains(strings.Join(out.Warnings, " "), "rejected") {
+		t.Fatalf("enhancement=%#v", out)
+	}
+}
+
+func TestResponsesEndpointUsesResponsesRequestShape(t *testing.T) {
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/responses") {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"output": []map[string]any{{"content": []map[string]any{{"type": "output_text", "text": `{"explanation":"Responses shape worked.","suggested_fix":"Review.","patch":"","warnings":[]}`}}}},
+			"usage":  map[string]int{"input_tokens": 10, "output_tokens": 5},
+		})
+	}))
+	defer srv.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL + "/v1/responses", AllowPrivateNetwork: true, Model: "test", Timeout: time.Second, MaxInputCharacters: 4000, MaxOutputTokens: 321}
+	out, err := New(cfg, store).Enhance(context.Background(), model.AnalysisResult{ID: "responses", TenantID: "default", Summary: "failure"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Explanation == "" {
+		t.Fatal("missing response")
+	}
+	if _, ok := requestBody["messages"]; ok {
+		t.Fatalf("chat messages leaked into Responses request: %#v", requestBody)
+	}
+	if requestBody["input"] == nil || requestBody["instructions"] == nil || requestBody["max_output_tokens"] != float64(321) {
+		t.Fatalf("invalid Responses request: %#v", requestBody)
+	}
+	if _, ok := requestBody["text"]; !ok {
+		t.Fatalf("missing Responses JSON format: %#v", requestBody)
+	}
+}
+
+func TestPromptBudgetPreservesTruncatedSourceContext(t *testing.T) {
+	e := &Enhancer{cfg: config.LLMConfig{MaxInputCharacters: 5000, SendRedactedExcerpt: true, SendChangedFiles: true, SendSourceCode: true, MaxSourceFiles: 8, MaxSourceFileCharacters: 32000, DataPolicy: "local_only"}}
+	analysis := model.AnalysisResult{ID: "budget", TenantID: "default", Summary: "assertion failed", RedactedExcerpt: strings.Repeat("stack trace line\n", 400)}
+	prompt, err := e.buildPromptCheckedWithSources(analysis, []string{"large.go"}, []SourceFile{{Path: "large.go", Content: "package main\n" + strings.Repeat("func generated() {}\n", 2000)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(prompt)) {
+		t.Fatalf("invalid JSON: %s", prompt)
+	}
+	if len(prompt) > 5000 {
+		t.Fatalf("prompt exceeded budget: %d", len(prompt))
+	}
+	var payload struct {
+		Sources []SourceFile `json:"source_files_untrusted"`
+	}
+	if err := json.Unmarshal([]byte(prompt), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Sources) != 1 || payload.Sources[0].Content == "" || !payload.Sources[0].Truncated {
+		t.Fatalf("source context was discarded instead of trimmed: %#v", payload.Sources)
 	}
 }
