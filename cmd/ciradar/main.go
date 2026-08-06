@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -488,7 +489,12 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	skipStoreClose := false
+	defer func() {
+		if !skipStoreClose {
+			_ = store.Close()
+		}
+	}()
 	if tenant, err := store.GetTenant(context.Background(), cfg.DefaultTenantID); err != nil {
 		return err
 	} else if tenant == nil {
@@ -512,16 +518,54 @@ func cmdServe(args []string) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	var background sync.WaitGroup
 	if cfg.ProviderPolling {
 		poller := providers.NewPoller(store, log)
-		go poller.Run(ctx, cfg.ProviderPollInterval)
+		background.Add(1)
+		go func() {
+			defer background.Done()
+			poller.Run(ctx, cfg.ProviderPollInterval)
+		}()
 	}
 	notifier := notifications.New(cfg.Notifications, store, log)
 	w := worker.New(cfg, store, a, githubClient, notifier, log)
-	go w.Run(ctx)
-	go maintenanceLoop(ctx, store, cfg, log)
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		w.Run(ctx)
+	}()
+	background.Add(1)
+	go func() {
+		defer background.Done()
+		maintenanceLoop(ctx, store, cfg, log)
+	}()
 	srv := server.New(cfg, store, a, log)
-	return srv.Run(ctx)
+	runErr := srv.Run(ctx)
+	cancel()
+	backgroundDone := make(chan struct{})
+	go func() {
+		background.Wait()
+		close(backgroundDone)
+	}()
+	select {
+	case <-backgroundDone:
+	case <-time.After(30 * time.Second):
+		skipStoreClose = true
+		shutdownErr := errors.New("background services did not stop within 30 seconds; storage was left open for process shutdown")
+		if runErr != nil {
+			return fmt.Errorf("server stopped: %v; %w", runErr, shutdownErr)
+		}
+		return shutdownErr
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		skipStoreClose = true
+		if runErr != nil {
+			return fmt.Errorf("server stopped: %v; close storage: %w", runErr, closeErr)
+		}
+		return fmt.Errorf("close storage: %w", closeErr)
+	}
+	skipStoreClose = true
+	return runErr
 }
 
 func cmdAnalyze(args []string) error {
