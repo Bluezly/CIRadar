@@ -864,3 +864,47 @@ func TestDecodeJSONBodyRejectsTrailingAndOversizedInput(t *testing.T) {
 		})
 	}
 }
+
+func TestUnknownRoutesDoNotFallBackToDashboard(t *testing.T) {
+	s, _, _ := testServer(t)
+	api := doReq(t, s, http.MethodGet, "/api/v1/does-not-exist", "", "", nil)
+	if api.Code != http.StatusNotFound {
+		t.Fatalf("API status=%d body=%s", api.Code, api.Body.String())
+	}
+	if contentType := api.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+		t.Fatalf("API content type=%q", contentType)
+	}
+	if !strings.Contains(api.Body.String(), `"status":404`) || !strings.Contains(api.Body.String(), `"error":"API route not found"`) {
+		t.Fatalf("API body=%s", api.Body.String())
+	}
+
+	random := doReq(t, s, http.MethodGet, "/totally/random/path", "", "", nil)
+	if random.Code != http.StatusNotFound {
+		t.Fatalf("random status=%d body=%s", random.Code, random.Body.String())
+	}
+	if strings.Contains(strings.ToLower(random.Body.String()), "ci radar") {
+		t.Fatalf("random route returned dashboard HTML: %s", random.Body.String())
+	}
+
+	root := doReq(t, s, http.MethodGet, "/", "", "", nil)
+	if root.Code != http.StatusOK || !strings.Contains(strings.ToLower(root.Body.String()), "ci radar") {
+		t.Fatalf("root status=%d body=%s", root.Code, root.Body.String())
+	}
+}
+
+func TestServerBlocksRepeatedFailedTokenAttempts(t *testing.T) {
+	s, _, _ := testServer(t)
+	for i := 0; i < defaultAuthFailureThreshold; i++ {
+		result := doReq(t, s, http.MethodGet, "/api/v1/status", "invalid-token", "", nil)
+		if result.Code != http.StatusUnauthorized {
+			t.Fatalf("failure %d status=%d body=%s", i+1, result.Code, result.Body.String())
+		}
+	}
+	blocked := doReq(t, s, http.MethodGet, "/api/v1/status", "root-secret", "", nil)
+	if blocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("blocked status=%d body=%s", blocked.Code, blocked.Body.String())
+	}
+	if blocked.Header().Get("Retry-After") == "" {
+		t.Fatal("missing Retry-After")
+	}
+}
