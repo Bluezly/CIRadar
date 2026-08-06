@@ -4,9 +4,9 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC6-HARDENING-FIX-5.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC7.md`.
 
-## What RC.6 includes
+## What RC.7 includes
 
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
@@ -34,7 +34,7 @@ ciradar serve
 
 `demo` is built into the binary, so the quick start does not depend on files from the source archive. `ciradar init` creates a configuration containing bootstrap secrets with owner-only permissions on POSIX systems. Restrict the file ACL on Windows and move production secrets to environment variables or a secret manager.
 
-Open `http://127.0.0.1:8787/` and exchange the generated root token through the secure login field.
+Open `http://127.0.0.1:8787/`, expand Session, and sign in with the generated root token.
 
 ## API routing and authentication hardening
 
