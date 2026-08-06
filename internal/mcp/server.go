@@ -369,8 +369,6 @@ func (s *Server) callTool(ctx context.Context, principal model.Principal, p Call
 		auditErr := s.Store.RecordAudit(ctx, model.AuditEvent{TenantID: tenant, Actor: principal.Name, Role: principal.Role, Action: "repair.draft_pr_requested", Resource: "analysis", ResourceID: target, CreatedAt: time.Now().UTC()})
 		result := map[string]any{"status": "queued", "analysis_id": target, "review_required": true, "audit_recorded": auditErr == nil}
 		if auditErr != nil {
-			// The external action is already queued. Returning an RPC error here
-			// would encourage a retry and could enqueue a duplicate repair PR.
 			result["warning"] = "repair was queued, but its audit event could not be recorded"
 		}
 		return result, nil
