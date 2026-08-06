@@ -165,6 +165,7 @@ func parseKV(s string) (map[string]string, error) {
 		var b strings.Builder
 		if i < len(s) && s[i] == '\'' {
 			i++
+			closed := false
 			for i < len(s) {
 				if s[i] == '\\' && i+1 < len(s) {
 					i++
@@ -174,10 +175,14 @@ func parseKV(s string) (map[string]string, error) {
 				}
 				if s[i] == '\'' {
 					i++
+					closed = true
 					break
 				}
 				b.WriteByte(s[i])
 				i++
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated quoted dsn value for %q", key)
 			}
 		} else {
 			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '\n' {
@@ -564,7 +569,7 @@ func (s *scramState) continueAuth(c *Client, server string) error {
 		return err
 	}
 	iter, err := strconv.Atoi(it)
-	if err != nil || iter < 4096 {
+	if err != nil || !validSCRAMIterationCount(iter) {
 		return errors.New("invalid scram iteration count")
 	}
 	salted := pbkdf2SHA256([]byte(s.password), salt, iter, 32)
@@ -582,6 +587,10 @@ func (s *scramState) continueAuth(c *Client, server string) error {
 	final := s.clientFinalWithout + ",p=" + base64.StdEncoding.EncodeToString(proof)
 	return c.sendMessage('p', []byte(final))
 }
+func validSCRAMIterationCount(iter int) bool {
+	return iter >= 4096 && iter <= 1_000_000
+}
+
 func (s *scramState) verifyFinal(final string) error {
 	m := parseSCRAMFields(final)
 	if e := m["e"]; e != "" {
