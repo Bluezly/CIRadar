@@ -1,5 +1,3 @@
-// Package httpguard provides outbound network clients that reject SSRF targets
-// such as loopback, link-local, private, and metadata-service addresses.
 package httpguard
 
 import (
@@ -27,8 +25,6 @@ var blockedRanges = []netip.Prefix{
 	netip.MustParsePrefix("2001:db8::/32"),
 }
 
-// ValidateURL performs syntax and literal-address checks before a request is
-// attempted. DNS answers are validated again by the guarded dialer.
 func ValidateURL(raw string, allowPrivate bool) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -56,10 +52,6 @@ func ValidateURL(raw string, allowPrivate bool) error {
 	return nil
 }
 
-// NewClient returns an HTTP client that resolves and dials only validated
-// addresses. Environment proxies are deliberately disabled because a proxy can
-// resolve a seemingly public hostname to an internal target outside this
-// process's validation boundary.
 func NewClient(timeout time.Duration, allowPrivate bool) *http.Client {
 	return NewClientWithOptions(timeout, ClientOptions{AllowPrivateNetwork: allowPrivate})
 }
@@ -69,9 +61,6 @@ type ClientOptions struct {
 	AllowCrossOriginRedirects bool
 }
 
-// NewClientWithOptions permits narrowly scoped redirect behavior for read-only
-// APIs that hand out signed download URLs. Cross-origin redirects never carry
-// caller-provided headers.
 func NewClientWithOptions(timeout time.Duration, options ClientOptions) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
@@ -113,9 +102,6 @@ func (t guardedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req)
 }
 
-// GuardedDialContext wraps a net.Dialer and pins the connection to an address
-// returned by the validated DNS lookup, preventing a second DNS resolution at
-// dial time.
 func GuardedDialContext(dialer *net.Dialer, allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
 	if dialer == nil {
 		dialer = &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
