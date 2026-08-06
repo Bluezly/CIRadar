@@ -17,9 +17,6 @@ type LLMEnhancement struct {
 	CreatedAt        time.Time         `json:"created_at"`
 }
 
-// ExternalIssueLink records the issue tracker object created from a CI Radar
-// analysis. It is stored as an extension object so existing database backends
-// remain backward compatible while the API can refresh the remote state.
 type ExternalIssueLink struct {
 	TenantID       string    `json:"tenant_id"`
 	AnalysisID     string    `json:"analysis_id"`
