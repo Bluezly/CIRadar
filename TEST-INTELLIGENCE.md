@@ -1,6 +1,6 @@
 # Test intelligence and impact selection
 
-CI Radar ingests JUnit XML, Playwright JSON, Jest JSON, pytest-json-report, Cypress JSON, and Mocha JSON. It tracks individual test identity, pass/fail history, likely flake cause, quarantine state, owner, expiry, and audit history.
+CI Radar ingests JUnit XML, Playwright JSON, Jest JSON, pytest-json-report, Cypress JSON, and Mocha JSON. It tracks individual test identity, execution variant, pass/fail history, unique Pull Requests impacted, likely flake cause, quarantine state, critical-test policy, owner, expiry, and audit history. Failure messages and details are redacted before persistence, and stored run URLs discard credentials, query strings, fragments, and unsafe schemes.
 
 ## Impact-aware selection
 
@@ -88,4 +88,11 @@ ciradar tests unquarantine --repo acme/app --test payments/PaymentServiceTest/re
 ciradar tests gate --repo acme/app --format junit results.xml
 ```
 
-Automatic quarantine is optional and disabled by default.
+Critical tests can be protected from automatic quarantine through the API, dashboard, or CLI:
+
+```bash
+ciradar tests critical --repo acme/app --test payments/PaymentServiceTest/retries_transient_gateway_error
+ciradar tests noncritical --repo acme/app --test payments/PaymentServiceTest/retries_transient_gateway_error
+```
+
+Automatic quarantine is optional and disabled by default. Even when enabled, it skips tests marked critical.

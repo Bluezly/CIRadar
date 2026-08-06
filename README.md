@@ -4,9 +4,9 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC7.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC8.md`.
 
-## What RC.7 includes
+## What RC.8 includes
 
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
@@ -15,7 +15,8 @@ Current release notes: `RELEASE-NOTES-OSS-RC7.md`.
 - Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie, and signed generic webhooks
 - ChatOps for acknowledge, resolve, quarantine, and restore
 - JUnit, Playwright, Jest, pytest, Cypress, and Mocha result ingestion
-- test history, likely flake cause, quarantine, CI gates, source impact indexing, and per-test coverage maps
+- triage-first test history with variants, grouped failures, unique PR impact, critical-test policy, quarantine, CI gates, source impact indexing, and per-test coverage maps
+- a plain table-first dashboard prioritized by unresolved work, affected Pull Requests, and conservative engineering-time loss
 - DORA metrics, runner duration, estimated cost, and historical trends
 - lexical similarity fallback, local static vectors, local neural embeddings through Ollama, or BYOK remote embeddings
 - MCP over stdio and Streamable HTTP with OAuth discovery, PKCE, sessions, SSE, server notifications, and confirmation-gated write tools
@@ -34,7 +35,7 @@ ciradar serve
 
 `demo` is built into the binary, so the quick start does not depend on files from the source archive. `ciradar init` creates a configuration containing bootstrap secrets with owner-only permissions on POSIX systems. Restrict the file ACL on Windows and move production secrets to environment variables or a secret manager.
 
-Open `http://127.0.0.1:8787/`, expand Session, and sign in with the generated root token.
+Open `http://127.0.0.1:8787/`, choose Session, and sign in with the generated root token.
 
 ## API routing and authentication hardening
 
@@ -155,4 +156,4 @@ Repair is separate from rerun. A patch must pass path, size, binary-file, symlin
 - strict CSP and HttpOnly encrypted dashboard sessions
 - PostgreSQL TLS verification enabled by default
 
-Read `SECURITY.md`, `POSTGRESQL.md`, `CONNECTORS.md`, `TEST-INTELLIGENCE.md`, `MCP.md`, `SELF-HOSTING.md`, `COMPARISONS.md`, and `PROJECT-STATUS.md` before production use.
+Read `SECURITY.md`, `POSTGRESQL.md`, `CONNECTORS.md`, `TEST-INTELLIGENCE.md`, `MCP.md`, `SELF-HOSTING.md`, `COMPARISONS.md`, `COMPETITOR-BENCHMARK.md`, and `PROJECT-STATUS.md` before production use.

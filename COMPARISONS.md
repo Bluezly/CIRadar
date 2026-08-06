@@ -34,3 +34,6 @@ This page explains product positioning rather than claiming that one self-hosted
 - PostgreSQL is relational and tenant-scoped, but is not a globally distributed Datadog-scale event plane
 - macOS and ARM binaries are cross-built in CI; operators should run platform acceptance tests
 - project age, maintainer count, support history, and production scale must be evaluated from repository activity, not source claims
+
+
+For a named, date-stamped comparison with BuildPulse, Trunk, Datadog Test Optimization, and GitHub Checks, see `COMPETITOR-BENCHMARK.md`.
