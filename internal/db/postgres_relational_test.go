@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ciradar/internal/model"
+	"ciradar/internal/pgwire"
 )
 
 func TestRelationalObjectsRoundTripTenantData(t *testing.T) {
@@ -117,5 +118,42 @@ func TestParsePostgresIntRejectsMalformedValues(t *testing.T) {
 	}
 	if _, err := parsePostgresInt(nil, "count"); err == nil {
 		t.Fatal("NULL PostgreSQL integer was accepted")
+	}
+}
+
+func TestObservationPartitionStatementsMoveDefaultRowsBeforeAttach(t *testing.T) {
+	statements := observationPartitionStatements(time.Date(2026, time.August, 6, 0, 0, 0, 0, time.UTC))
+	if len(statements) != 4 {
+		t.Fatalf("partition statements=%d", len(statements))
+	}
+	joined := strings.Join(statements, "\n")
+	for _, want := range []string{
+		"ciradar_test_observations_202607",
+		"ciradar_test_observations_202608",
+		"ciradar_test_observations_202609",
+		"ciradar_test_observations_202610",
+		"ACCESS EXCLUSIVE",
+		"INSERT INTO ciradar_test_observations_202608 SELECT * FROM ciradar_test_observations_default",
+		"DELETE FROM ciradar_test_observations_default",
+		"ATTACH PARTITION ciradar_test_observations_202608",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("partition maintenance SQL missing %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestExpiredObservationPartitionsOnlyDropsWholeMonths(t *testing.T) {
+	value := func(s string) *string { return &s }
+	rows := pgwire.Rows{Values: [][]*string{
+		{value("ciradar_test_observations_202604")},
+		{value("ciradar_test_observations_202605")},
+		{value("ciradar_test_observations_default")},
+		{value("not_a_partition")},
+		{value("ciradar_test_observations_2026xx")},
+	}}
+	got := expiredObservationPartitions(rows, time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC))
+	if len(got) != 2 || got[0] != "ciradar_test_observations_202604" || got[1] != "ciradar_test_observations_202605" {
+		t.Fatalf("expired partitions=%v", got)
 	}
 }

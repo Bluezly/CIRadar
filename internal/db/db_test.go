@@ -404,3 +404,142 @@ func TestReplaceFileWithRollbackInstallsNewFile(t *testing.T) {
 		t.Fatalf("target=%q err=%v", string(body), err)
 	}
 }
+
+func TestFlakeClassificationUsesColdStartConfidence(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	statuses := []string{"passed", "failed", "passed", "failed", "passed"}
+	var latest []model.TestCaseStats
+	for i, status := range statuses {
+		latest, err = store.RecordTestObservations(ctx, "default", []model.TestObservation{{
+			Repository: "acme/api", Framework: "go", Name: "TestSometimes", Status: status,
+			CommitSHA: "abc123", RunID: int64(i + 1), DurationMS: 1000, OccurredAt: time.Now().UTC().Add(time.Duration(i) * time.Second),
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(latest) != 1 {
+		t.Fatalf("stats=%#v", latest)
+	}
+	st := latest[0]
+	if st.Classification != "suspected_flaky" || !st.ColdStart || st.HistoryConfidence >= .55 {
+		t.Fatalf("stats=%#v", st)
+	}
+	if st.Classification == "flaky" {
+		t.Fatal("cold-start test must not be promoted to confirmed flaky")
+	}
+}
+
+func TestFlakeStatsTrackSameCommitRecoveryAndLostTime(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	base := model.TestObservation{Repository: "acme/api", Framework: "go", Name: "TestRetry", CommitSHA: "same", DurationMS: 60000, OccurredAt: time.Now().UTC()}
+	failed := base
+	failed.Status = "failed"
+	passed := base
+	passed.Status = "passed"
+	passed.OccurredAt = passed.OccurredAt.Add(time.Minute)
+	latest, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{failed, passed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := latest[0]
+	if st.RerunRecoveries != 1 || st.EstimatedComputeMinutesLost != 2 || st.EstimatedEngineeringMinutesLost != 7 {
+		t.Fatalf("stats=%#v", st)
+	}
+	if st.FailureRateLow <= 0 || st.FailureRateHigh >= 1 || st.AverageDurationMS != 60000 {
+		t.Fatalf("stats=%#v", st)
+	}
+}
+
+func TestTestObservationReplayIsIdempotent(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	observation := model.TestObservation{
+		ID: "delivery-result-1", Repository: "acme/api", Framework: "go", Name: "TestIdempotent",
+		Status: "failed", RunID: 42, CommitSHA: "abc", DurationMS: 2000, OccurredAt: time.Now().UTC(),
+	}
+	first, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{observation})
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{observation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("replayed observation unexpectedly updated stats: %#v", second)
+	}
+	stats, err := store.ListTestCaseStats(ctx, "default", "acme/api", "", 10)
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("stats=%#v err=%v", stats, err)
+	}
+	if stats[0].TotalRuns != 1 || stats[0].ExecutedRuns != 1 || stats[0].Failures != 1 {
+		t.Fatalf("replay inflated stats: %#v", stats[0])
+	}
+}
+
+func TestSkippedObservationsDoNotIncreaseFlakeConfidence(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	observations := []model.TestObservation{
+		{ID: "skip-1", Repository: "acme/api", Framework: "go", Name: "TestOptional", Status: "skipped", OccurredAt: now},
+		{ID: "skip-2", Repository: "acme/api", Framework: "go", Name: "TestOptional", Status: "skipped", OccurredAt: now.Add(time.Second)},
+		{ID: "skip-3", Repository: "acme/api", Framework: "go", Name: "TestOptional", Status: "skipped", OccurredAt: now.Add(2 * time.Second)},
+	}
+	latest, err := store.RecordTestObservations(ctx, "default", observations)
+	if err != nil || len(latest) != 1 {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	st := latest[0]
+	if st.TotalRuns != 3 || st.ExecutedRuns != 0 || st.Skipped != 3 {
+		t.Fatalf("unexpected counts: %#v", st)
+	}
+	if st.HistoryConfidence != 0 || st.FailureRate != 0 || st.Classification != "not_executed" || !st.ColdStart {
+		t.Fatalf("skips became flake evidence: %#v", st)
+	}
+}
+
+func TestOutOfOrderObservationDoesNotReplaceLatestExecution(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	newer := model.TestObservation{ID: "newer", Repository: "acme/api", Framework: "go", Name: "TestOrdering", Status: "passed", RunID: 2, CommitSHA: "new", OccurredAt: now}
+	older := model.TestObservation{ID: "older", Repository: "acme/api", Framework: "go", Name: "TestOrdering", Status: "failed", RunID: 1, CommitSHA: "old", OccurredAt: now.Add(-time.Hour)}
+	if _, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{newer}); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := store.RecordTestObservations(ctx, "default", []model.TestObservation{older})
+	if err != nil || len(latest) != 1 {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	st := latest[0]
+	if st.LastStatus != "passed" || st.LastRunID != 2 || st.LastCommitSHA != "new" || !st.LastSeenAt.Equal(now) {
+		t.Fatalf("older event replaced latest state: %#v", st)
+	}
+	if st.Transitions != 0 || st.RerunRecoveries != 0 {
+		t.Fatalf("out-of-order event created a false transition: %#v", st)
+	}
+}
