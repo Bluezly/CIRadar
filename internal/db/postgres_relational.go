@@ -17,7 +17,10 @@ import (
 	"ciradar/internal/pgwire"
 )
 
-const pgSystemTenant = "__system__"
+const (
+	pgSystemTenant              = "__system__"
+	postgresSchemaVersion int64 = 5
+)
 
 const (
 	pgKindAnalysis     = "analysis"
@@ -180,25 +183,65 @@ func matchesSpec(specs []pgSpec, object pgObject) bool {
 }
 
 func (p *PostgresBackend) migrateRelational(ctx context.Context, c *pgwire.Client) error {
+	if err := c.Exec(ctx, `CREATE TABLE IF NOT EXISTS ciradar_schema_migrations (version bigint PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		return err
+	}
+	rows, err := c.Query(ctx, `SELECT coalesce(max(version),0)::text FROM ciradar_schema_migrations`)
+	if err != nil {
+		return err
+	}
+	row, err := requireRow(rows, 1)
+	if err != nil {
+		return err
+	}
+	version, err := strconv.ParseInt(valueOf(row[0]), 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse postgres schema version: %w", err)
+	}
+	if version > postgresSchemaVersion {
+		return fmt.Errorf("postgres schema version %d is newer than supported version %d; refusing an unsafe downgrade", version, postgresSchemaVersion)
+	}
 	statements := []string{
-		`CREATE TABLE IF NOT EXISTS ciradar_schema_migrations (version bigint PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`,
 		`CREATE TABLE IF NOT EXISTS ciradar_objects (tenant_id text NOT NULL, kind text NOT NULL, object_id text NOT NULL, payload jsonb NOT NULL, event_time timestamptz, repository text, organization text, fingerprint text, state text, status text, dedupe_key text, expires_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id,kind,object_id))`,
 		`CREATE INDEX IF NOT EXISTS ciradar_objects_tenant_kind_time_idx ON ciradar_objects (tenant_id,kind,event_time DESC)`,
 		`CREATE INDEX IF NOT EXISTS ciradar_objects_fingerprint_time_idx ON ciradar_objects (kind,fingerprint,event_time DESC) WHERE fingerprint IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS ciradar_objects_repository_time_idx ON ciradar_objects (tenant_id,repository,event_time DESC) WHERE repository IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS ciradar_objects_status_time_idx ON ciradar_objects (tenant_id,kind,status,event_time DESC)`,
 		`CREATE INDEX IF NOT EXISTS ciradar_objects_dedupe_idx ON ciradar_objects (tenant_id,kind,dedupe_key,event_time DESC) WHERE dedupe_key IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS ciradar_objects_expires_idx ON ciradar_objects (expires_at) WHERE expires_at IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS ciradar_objects_event_brin_idx ON ciradar_objects USING brin (event_time) WHERE event_time IS NOT NULL`,
 		`CREATE TABLE IF NOT EXISTS ciradar_jobs (id bigserial PRIMARY KEY, tenant_id text NOT NULL, type text NOT NULL, payload jsonb NOT NULL, status text NOT NULL, attempts integer NOT NULL DEFAULT 0, available_at timestamptz NOT NULL, locked_at timestamptz, locked_by text, last_error text, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())`,
 		`CREATE INDEX IF NOT EXISTS ciradar_jobs_claim_idx ON ciradar_jobs (status,available_at,id)`,
 		`CREATE INDEX IF NOT EXISTS ciradar_jobs_tenant_idx ON ciradar_jobs (tenant_id,status,available_at)`,
 		`CREATE TABLE IF NOT EXISTS ciradar_webhook_deliveries (id text PRIMARY KEY, event_type text NOT NULL, received_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL, error text NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS ciradar_test_observations (tenant_id text NOT NULL, id text NOT NULL, repository text NOT NULL, test_key text NOT NULL, framework text, workflow text, job text, run_id bigint, commit_sha text, branch text, status text NOT NULL, duration_ms bigint NOT NULL DEFAULT 0, occurred_at timestamptz NOT NULL, payload jsonb NOT NULL, ingested_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id,id,occurred_at)) PARTITION BY RANGE (occurred_at)`,
 	}
 	for _, statement := range statements {
 		if err := c.Exec(ctx, statement); err != nil {
 			return err
 		}
 	}
+	if err := c.Exec(ctx, `CREATE TABLE IF NOT EXISTS ciradar_test_observations_default PARTITION OF ciradar_test_observations DEFAULT`); err != nil {
+		return err
+	}
+	if err := ensureObservationPartitions(ctx, c, time.Now().UTC()); err != nil {
+		return err
+	}
+	postPartitionStatements := []string{
+		`CREATE INDEX IF NOT EXISTS ciradar_test_observations_repo_time_idx ON ciradar_test_observations (tenant_id,repository,occurred_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS ciradar_test_observations_test_time_idx ON ciradar_test_observations (tenant_id,test_key,occurred_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS ciradar_test_observations_status_time_idx ON ciradar_test_observations (tenant_id,status,occurred_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS ciradar_test_observations_time_brin_idx ON ciradar_test_observations USING brin (occurred_at)`,
+	}
+	for _, statement := range postPartitionStatements {
+		if err := c.Exec(ctx, statement); err != nil {
+			return err
+		}
+	}
 	if err := p.migrateLegacyState(ctx, c); err != nil {
+		return err
+	}
+	if err := backfillNativeTestObservations(ctx, c); err != nil {
 		return err
 	}
 	defaultTenant := model.Tenant{ID: model.DefaultTenantID, Name: "Default", Enabled: true, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
@@ -207,7 +250,102 @@ func (p *PostgresBackend) migrateRelational(ctx context.Context, c *pgwire.Clien
 	if err := insertPGObjectIfMissing(ctx, c, object); err != nil {
 		return err
 	}
-	return c.Exec(ctx, `INSERT INTO ciradar_schema_migrations(version) VALUES (3) ON CONFLICT (version) DO NOTHING`)
+	return c.Exec(ctx, `INSERT INTO ciradar_schema_migrations(version) VALUES (`+strconv.FormatInt(postgresSchemaVersion, 10)+`) ON CONFLICT (version) DO NOTHING`)
+}
+
+func observationPartitionStatements(now time.Time) []string {
+	now = now.UTC()
+	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	out := make([]string, 0, 4)
+	for offset := -1; offset <= 2; offset++ {
+		from := month.AddDate(0, offset, 0)
+		to := from.AddDate(0, 1, 0)
+		name := fmt.Sprintf("ciradar_test_observations_%04d%02d", from.Year(), int(from.Month()))
+		// A DEFAULT partition may already contain rows for a newly-created
+		// month. Move those rows under an ACCESS EXCLUSIVE lock before attach;
+		// otherwise PostgreSQL rejects ATTACH PARTITION or scans an unsafe
+		// moving target.
+		out = append(out, `DO $ciradar_partition$
+BEGIN
+  IF to_regclass(`+sqlLiteral(name)+`) IS NULL THEN
+    LOCK TABLE ciradar_test_observations IN ACCESS EXCLUSIVE MODE;
+    CREATE TABLE `+name+` (LIKE ciradar_test_observations INCLUDING ALL);
+    INSERT INTO `+name+` SELECT * FROM ciradar_test_observations_default
+      WHERE occurred_at >= `+sqlTime(from)+` AND occurred_at < `+sqlTime(to)+`
+      ON CONFLICT DO NOTHING;
+    DELETE FROM ciradar_test_observations_default
+      WHERE occurred_at >= `+sqlTime(from)+` AND occurred_at < `+sqlTime(to)+`;
+    ALTER TABLE ciradar_test_observations ATTACH PARTITION `+name+`
+      FOR VALUES FROM (`+sqlLiteral(from.Format(time.RFC3339))+`) TO (`+sqlLiteral(to.Format(time.RFC3339))+`);
+  END IF;
+END
+$ciradar_partition$`)
+	}
+	return out
+}
+
+func ensureObservationPartitions(ctx context.Context, c *pgwire.Client, now time.Time) error {
+	for _, statement := range observationPartitionStatements(now) {
+		if err := c.Exec(ctx, statement); err != nil {
+			return fmt.Errorf("ensure PostgreSQL observation partition: %w", err)
+		}
+	}
+	return nil
+}
+
+func expiredObservationPartitions(rows pgwire.Rows, cutoff time.Time) []string {
+	cutoff = cutoff.UTC()
+	out := make([]string, 0)
+	for _, row := range rows.Values {
+		if len(row) == 0 || row[0] == nil {
+			continue
+		}
+		name := strings.TrimSpace(*row[0])
+		const prefix = "ciradar_test_observations_"
+		if !strings.HasPrefix(name, prefix) || name == prefix+"default" {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, prefix)
+		if len(suffix) != 6 {
+			continue
+		}
+		year, errYear := strconv.Atoi(suffix[:4])
+		month, errMonth := strconv.Atoi(suffix[4:])
+		if errYear != nil || errMonth != nil || month < 1 || month > 12 {
+			continue
+		}
+		partitionEnd := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 1, 0)
+		if !partitionEnd.After(cutoff) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func dropExpiredObservationPartitions(ctx context.Context, c *pgwire.Client, cutoff time.Time) error {
+	rows, err := c.Query(ctx, `SELECT child.relname
+FROM pg_inherits
+JOIN pg_class parent ON pg_inherits.inhparent=parent.oid
+JOIN pg_class child ON pg_inherits.inhrelid=child.oid
+WHERE parent.relname='ciradar_test_observations'`)
+	if err != nil {
+		return err
+	}
+	for _, name := range expiredObservationPartitions(rows, cutoff) {
+		// Names are accepted only after strict prefix + YYYYMM validation.
+		if err := c.Exec(ctx, `DROP TABLE IF EXISTS `+name); err != nil {
+			return fmt.Errorf("drop expired PostgreSQL observation partition %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func backfillNativeTestObservations(ctx context.Context, c *pgwire.Client) error {
+	query := `INSERT INTO ciradar_test_observations(tenant_id,id,repository,test_key,framework,workflow,job,run_id,commit_sha,branch,status,duration_ms,occurred_at,payload)
+SELECT tenant_id,object_id,coalesce(repository,''),coalesce(payload->>'test_key',''),nullif(payload->>'framework',''),nullif(payload->>'workflow',''),nullif(payload->>'job',''),CASE WHEN coalesce(payload->>'run_id','') ~ '^[0-9]+$' THEN (payload->>'run_id')::bigint END,nullif(payload->>'commit_sha',''),nullif(payload->>'branch',''),coalesce(status,payload->>'status','unknown'),CASE WHEN coalesce(payload->>'duration_ms','') ~ '^[0-9]+$' THEN (payload->>'duration_ms')::bigint ELSE 0 END,coalesce(event_time,created_at),payload
+FROM ciradar_objects WHERE kind=` + sqlLiteral(pgKindObservation) + ` ON CONFLICT DO NOTHING`
+	return c.Exec(ctx, query)
 }
 
 func (p *PostgresBackend) migrateLegacyState(ctx context.Context, c *pgwire.Client) (err error) {
@@ -286,6 +424,61 @@ func (p *PostgresBackend) migrateLegacyState(ctx context.Context, c *pgwire.Clie
 		return err
 	}
 	return c.Exec(ctx, "COMMIT")
+}
+
+func normalizePostgresObservations(tenantID string, observations []model.TestObservation) []model.TestObservation {
+	return normalizeTestObservations(tenantID, observations)
+}
+
+func filterExistingNativeTestObservations(ctx context.Context, c *pgwire.Client, tenantID string, observations []model.TestObservation) ([]model.TestObservation, error) {
+	if len(observations) == 0 {
+		return nil, nil
+	}
+	existing := make(map[string]struct{})
+	const chunkSize = 500
+	for start := 0; start < len(observations); start += chunkSize {
+		end := start + chunkSize
+		if end > len(observations) {
+			end = len(observations)
+		}
+		literals := make([]string, 0, end-start)
+		for _, observation := range observations[start:end] {
+			literals = append(literals, sqlLiteral(observation.ID))
+		}
+		rows, err := c.Query(ctx, `SELECT DISTINCT id FROM ciradar_test_observations WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID))+` AND id IN (`+strings.Join(literals, ",")+`)`)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows.Values {
+			if len(row) > 0 && row[0] != nil {
+				existing[*row[0]] = struct{}{}
+			}
+		}
+	}
+	filtered := make([]model.TestObservation, 0, len(observations)-len(existing))
+	for _, observation := range observations {
+		if _, duplicate := existing[observation.ID]; !duplicate {
+			filtered = append(filtered, observation)
+		}
+	}
+	return filtered, nil
+}
+
+func insertNativeTestObservation(ctx context.Context, c *pgwire.Client, observation model.TestObservation) error {
+	payload, err := json.Marshal(observation)
+	if err != nil {
+		return err
+	}
+	query := `INSERT INTO ciradar_test_observations(tenant_id,id,repository,test_key,framework,workflow,job,run_id,commit_sha,branch,status,duration_ms,occurred_at,payload) VALUES (` +
+		sqlLiteral(normalizeTenant(observation.TenantID)) + `,` + sqlLiteral(observation.ID) + `,` + sqlLiteral(strings.TrimSpace(observation.Repository)) + `,` + sqlLiteral(TestKey(observation)) + `,` + nullableText(observation.Framework) + `,` + nullableText(observation.Workflow) + `,` + nullableText(observation.Job) + `,` + nullableInt64(observation.RunID) + `,` + nullableText(observation.CommitSHA) + `,` + nullableText(observation.Branch) + `,` + sqlLiteral(observation.Status) + `,` + strconv.FormatInt(maxInt64(0, observation.DurationMS), 10) + `,` + sqlTime(observation.OccurredAt) + `,` + jsonExpr(payload) + `) ON CONFLICT DO NOTHING`
+	return c.Exec(ctx, query)
+}
+
+func nullableInt64(value int64) string {
+	if value == 0 {
+		return "NULL"
+	}
+	return strconv.FormatInt(value, 10)
 }
 
 func lockSpecs(ctx context.Context, c *pgwire.Client, specs []pgSpec) error {
@@ -596,11 +789,11 @@ type pgCall[T any] func(*Store) (T, error)
 
 func pgStateWith[T any](ctx context.Context, p *PostgresBackend, write bool, specs []pgSpec, fn pgCall[T]) (out T, err error) {
 	specs = normalizeSpecs(specs)
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return out, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	if write {
 		if err = c.Exec(ctx, "BEGIN"); err != nil {
 			return out, err

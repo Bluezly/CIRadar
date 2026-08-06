@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -128,24 +130,22 @@ func (s *Store) FeedbackMetrics(ctx context.Context, tenantID string) (model.Fee
 func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, observations []model.TestObservation) ([]model.TestCaseStats, error) {
 	_ = ctx
 	tenantID = normalizeTenant(tenantID)
+	observations = normalizeTestObservations(tenantID, observations)
+	sort.SliceStable(observations, func(i, j int) bool {
+		if observations[i].OccurredAt.Equal(observations[j].OccurredAt) {
+			return observations[i].ID < observations[j].ID
+		}
+		return observations[i].OccurredAt.Before(observations[j].OccurredAt)
+	})
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	updated := map[string]model.TestCaseStats{}
 	for _, o := range observations {
-		o.TenantID = tenantID
-		o.Status = strings.ToLower(strings.TrimSpace(o.Status))
-		if o.Status != "passed" && o.Status != "failed" && o.Status != "skipped" && o.Status != "error" {
+		// Observation IDs are idempotency keys. Replaying the same CI payload must
+		// not inflate historical confidence, transitions, or engineering time lost.
+		if _, exists := s.state.TestObservations[o.ID]; exists {
 			continue
-		}
-		if o.OccurredAt.IsZero() {
-			o.OccurredAt = time.Now().UTC()
-		}
-		if o.ID == "" {
-			id, err := randomText(12)
-			if err != nil {
-				return nil, fmt.Errorf("generate test observation ID: %w", err)
-			}
-			o.ID = "testobs_" + id
 		}
 		key := TestKey(o)
 		sk := testStatsKey(tenantID, key)
@@ -153,19 +153,50 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 		if stats.TestKey == "" {
 			stats = model.TestCaseStats{TenantID: tenantID, TestKey: key, Repository: o.Repository, Framework: o.Framework, Suite: o.Suite, ClassName: o.ClassName, File: o.File, Name: o.Name, Parameters: o.Parameters, FirstSeenAt: o.OccurredAt, CauseCounts: map[string]int{}}
 		}
-		if stats.LastStatus != "" && stats.LastStatus != o.Status && ((stats.LastStatus == "passed" && (o.Status == "failed" || o.Status == "error")) || ((stats.LastStatus == "failed" || stats.LastStatus == "error") && o.Status == "passed")) {
-			stats.Transitions++
+		if stats.ExecutedRuns == 0 && stats.Passes+stats.Failures > 0 {
+			// Backward-compatible recovery for state written before ExecutedRuns was
+			// introduced. Skips never count as evidence for flakiness.
+			stats.ExecutedRuns = stats.Passes + stats.Failures
 		}
+		chronological := stats.LastSeenAt.IsZero() || !o.OccurredAt.Before(stats.LastSeenAt)
+		executed := o.Status != "skipped"
+		previousStatus := stats.LastStatus
+		previousCommit := stats.LastCommitSHA
+		previousRunID := stats.LastRunID
+		previousDurationMS := stats.LastDurationMS
+		if executed && chronological {
+			if previousStatus != "" && previousStatus != o.Status && ((previousStatus == "passed" && (o.Status == "failed" || o.Status == "error")) || ((previousStatus == "failed" || previousStatus == "error") && o.Status == "passed")) {
+				stats.Transitions++
+			}
+			if (previousStatus == "failed" || previousStatus == "error") && o.Status == "passed" && sameTestExecutionContext(previousCommit, o.CommitSHA, previousRunID, o.RunID) {
+				stats.RerunRecoveries++
+				stats.EstimatedComputeMinutesLost += float64(maxInt64(0, previousDurationMS)+maxInt64(0, o.DurationMS)) / 60000
+			}
+		}
+
 		stats.TotalRuns++
 		switch o.Status {
 		case "passed":
 			stats.Passes++
+			stats.ExecutedRuns++
 		case "skipped":
 			stats.Skipped++
 		default:
 			stats.Failures++
+			stats.ExecutedRuns++
 		}
-		stats.LastStatus = o.Status
+		if executed {
+			stats.TotalDurationMS += maxInt64(0, o.DurationMS)
+			if stats.ExecutedRuns > 0 {
+				stats.AverageDurationMS = stats.TotalDurationMS / int64(stats.ExecutedRuns)
+			}
+		}
+		if executed && chronological {
+			stats.LastStatus = o.Status
+			stats.LastCommitSHA = strings.TrimSpace(o.CommitSHA)
+			stats.LastRunID = o.RunID
+			stats.LastDurationMS = maxInt64(0, o.DurationMS)
+		}
 		if stats.File == "" {
 			stats.File = o.File
 		}
@@ -180,21 +211,35 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 				stats.CauseConfidence = confidence
 			}
 		}
-		stats.LastSeenAt = o.OccurredAt
-		if stats.TotalRuns >= 2 {
-			failureRate := float64(stats.Failures) / float64(stats.TotalRuns)
-			transitionRate := float64(stats.Transitions) / float64(maxInt(1, stats.TotalRuns-1))
-			stats.FlakeScore = clampFloat((0.55*transitionRate+0.45*(1-absFloat(0.5-failureRate)*2))*100, 0, 100)
+		if stats.FirstSeenAt.IsZero() || o.OccurredAt.Before(stats.FirstSeenAt) {
+			stats.FirstSeenAt = o.OccurredAt
 		}
+		if stats.LastSeenAt.IsZero() || o.OccurredAt.After(stats.LastSeenAt) {
+			stats.LastSeenAt = o.OccurredAt
+		}
+		stats.FailureRate = safeRatio(stats.Failures, stats.ExecutedRuns)
+		stats.TransitionRate = safeRatio(stats.Transitions, maxInt(1, stats.ExecutedRuns-1))
+		stats.FailureRateLow, stats.FailureRateHigh = wilsonInterval(stats.Failures, stats.ExecutedRuns, 1.96)
+		stats.HistoryConfidence = clampFloat(1-math.Exp(-float64(stats.ExecutedRuns)/12), 0, 1)
+		balance := 1 - math.Abs(0.5-stats.FailureRate)*2
+		rawFlake := clampFloat((0.6*stats.TransitionRate+0.4*balance)*100, 0, 100)
+		stats.FlakeScore = rawFlake
+		stats.FlakeProbability = rawFlake * stats.HistoryConfidence
+		stats.ColdStart = stats.ExecutedRuns < 10
+		stats.EstimatedEngineeringMinutesLost = stats.EstimatedComputeMinutesLost + float64(stats.RerunRecoveries)*5
 		switch {
-		case stats.TotalRuns < 3:
-			stats.Classification = "insufficient_history"
-		case stats.Passes > 0 && stats.Failures > 0 && stats.FlakeScore >= 35:
-			stats.Classification = "flaky"
-		case stats.Failures == stats.TotalRuns:
+		case stats.ExecutedRuns == 0:
+			stats.Classification = "not_executed"
+		case stats.ExecutedRuns < 5:
+			stats.Classification = "warming_up"
+		case stats.Failures == stats.ExecutedRuns:
 			stats.Classification = "consistently_failing"
-		case stats.Passes == stats.TotalRuns:
+		case stats.Passes == stats.ExecutedRuns:
 			stats.Classification = "stable"
+		case stats.Passes > 0 && stats.Failures > 0 && rawFlake >= 35 && stats.ExecutedRuns >= 10 && stats.HistoryConfidence >= .55:
+			stats.Classification = "flaky"
+		case stats.Passes > 0 && stats.Failures > 0 && rawFlake >= 25:
+			stats.Classification = "suspected_flaky"
 		default:
 			stats.Classification = "mixed"
 		}
@@ -358,4 +403,78 @@ func clampFloat(v, min, max float64) float64 {
 		return max
 	}
 	return v
+}
+
+func normalizeTestObservations(tenantID string, observations []model.TestObservation) []model.TestObservation {
+	tenantID = normalizeTenant(tenantID)
+	now := time.Now().UTC()
+	out := make([]model.TestObservation, 0, len(observations))
+	seen := make(map[string]struct{}, len(observations))
+	for _, observation := range observations {
+		observation.TenantID = tenantID
+		observation.Status = strings.ToLower(strings.TrimSpace(observation.Status))
+		switch observation.Status {
+		case "passed", "failed", "skipped", "error":
+		default:
+			continue
+		}
+		if observation.OccurredAt.IsZero() {
+			observation.OccurredAt = now
+		} else {
+			observation.OccurredAt = observation.OccurredAt.UTC()
+		}
+		if strings.TrimSpace(observation.ID) == "" {
+			parts := []string{tenantID, TestKey(observation), strconv.FormatInt(observation.RunID, 10), strings.TrimSpace(observation.CommitSHA), observation.Status}
+			// A CI run normally contains one result for a fully-qualified test key.
+			// When no run identity exists, time and payload details preserve distinct
+			// executions while still making exact delivery retries idempotent.
+			if observation.RunID == 0 {
+				parts = append(parts, observation.OccurredAt.Format(time.RFC3339Nano), strconv.FormatInt(observation.DurationMS, 10), observation.Message, observation.Details)
+			}
+			digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+			observation.ID = "testobs_" + hex.EncodeToString(digest[:12])
+		}
+		if _, duplicate := seen[observation.ID]; duplicate {
+			continue
+		}
+		seen[observation.ID] = struct{}{}
+		out = append(out, observation)
+	}
+	return out
+}
+
+func safeRatio(numerator, denominator int) float64 {
+	if denominator <= 0 {
+		return 0
+	}
+	return float64(numerator) / float64(denominator)
+}
+
+func wilsonInterval(successes, total int, z float64) (float64, float64) {
+	if total <= 0 {
+		return 0, 1
+	}
+	n := float64(total)
+	p := float64(successes) / n
+	z2 := z * z
+	denominator := 1 + z2/n
+	center := (p + z2/(2*n)) / denominator
+	margin := z * math.Sqrt((p*(1-p)+z2/(4*n))/n) / denominator
+	return clampFloat(center-margin, 0, 1), clampFloat(center+margin, 0, 1)
+}
+
+func sameTestExecutionContext(previousCommit, currentCommit string, previousRunID, currentRunID int64) bool {
+	previousCommit = strings.TrimSpace(previousCommit)
+	currentCommit = strings.TrimSpace(currentCommit)
+	if previousCommit != "" && currentCommit != "" {
+		return previousCommit == currentCommit
+	}
+	return previousRunID != 0 && currentRunID != 0 && previousRunID == currentRunID
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

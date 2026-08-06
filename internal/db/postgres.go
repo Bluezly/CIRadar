@@ -13,27 +13,60 @@ import (
 	"ciradar/internal/pgwire"
 )
 
-type PostgresBackend struct{ dsn string }
+type PostgresBackend struct {
+	dsn  string
+	pool *postgresPool
+}
 
 func OpenPostgres(ctx context.Context, dsn string) (*PostgresBackend, error) {
-	p := &PostgresBackend{dsn: strings.TrimSpace(dsn)}
-	if p.dsn == "" {
+	trimmed := strings.TrimSpace(dsn)
+	if trimmed == "" {
 		return nil, errors.New("postgres dsn is required")
 	}
+	cfg, err := pgwire.ParseDSN(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres dsn: %w", err)
+	}
+	p := &PostgresBackend{dsn: trimmed, pool: newPostgresPool(trimmed, cfg.PoolMaxConns)}
 	if err := p.Migrate(ctx); err != nil {
+		_ = p.Close()
 		return nil, err
 	}
 	return p, nil
 }
 
-func (p *PostgresBackend) Close() error { return nil }
+func (p *PostgresBackend) Close() error {
+	if p == nil || p.pool == nil {
+		return nil
+	}
+	return p.pool.close()
+}
+
+func (p *PostgresBackend) connect(ctx context.Context) (*pgwire.Client, error) {
+	if p.pool == nil {
+		return nil, errors.New("postgres connection pool is unavailable")
+	}
+	return p.pool.acquire(ctx)
+}
+
+func (p *PostgresBackend) release(c *pgwire.Client) {
+	if p != nil && p.pool != nil {
+		p.pool.release(c)
+	}
+}
 
 func (p *PostgresBackend) Migrate(ctx context.Context) error {
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
-	defer c.Close()
+	defer p.release(c)
+	if err := c.Exec(ctx, `SELECT pg_advisory_lock(hashtext('ciradar:schema:migrate'))`); err != nil {
+		return fmt.Errorf("lock postgres migration: %w", err)
+	}
+	defer func() {
+		_ = c.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('ciradar:schema:migrate'))`)
+	}()
 	if err := p.migrateRelational(ctx, c); err != nil {
 		return fmt.Errorf("migrate postgres: %w", err)
 	}
@@ -68,11 +101,11 @@ func (p *PostgresBackend) EnqueueForTenant(ctx context.Context, tenantID, typ st
 	if availableAt.IsZero() {
 		availableAt = time.Now().UTC()
 	}
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer p.release(c)
 	if err = c.Exec(ctx, "BEGIN"); err != nil {
 		return err
 	}
@@ -99,11 +132,11 @@ func (p *PostgresBackend) EnqueueForTenant(ctx context.Context, tenantID, typ st
 }
 
 func (p *PostgresBackend) ClaimJob(ctx context.Context, workerID string) (job *Job, err error) {
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	if err = c.Exec(ctx, "BEGIN"); err != nil {
 		return nil, err
 	}
@@ -190,20 +223,20 @@ func (p *PostgresBackend) RequeueStaleJobs(ctx context.Context, olderThan time.D
 }
 
 func (p *PostgresBackend) exec(ctx context.Context, query string) error {
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer p.release(c)
 	return c.Exec(ctx, query)
 }
 
 func (p *PostgresBackend) RecordDelivery(ctx context.Context, id, eventType string) (bool, error) {
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status) VALUES (` + sqlLiteral(id) + `,` + sqlLiteral(eventType) + `,'received') ON CONFLICT (id) DO NOTHING RETURNING id`
 	rows, err := c.Query(ctx, query)
 	if err != nil {
@@ -242,11 +275,11 @@ func (p *PostgresBackend) CorrelationForTenant(ctx context.Context, tenantID, fi
 	if !crossTenant {
 		where += ` AND tenant_id=` + sqlLiteral(tenantID)
 	}
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return CorrelationStats{}, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	query := `SELECT count(*)::text,count(DISTINCT CASE WHEN repository<>'' THEN tenant_id||'|'||repository END)::text,count(DISTINCT CASE WHEN organization<>'' THEN tenant_id||'|'||organization END)::text,count(*) FILTER (WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND repository=` + sqlLiteral(repository) + `)::text,count(*) FILTER (WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND organization=` + sqlLiteral(organization) + `)::text FROM ciradar_objects WHERE ` + where
 	rows, err := c.Query(ctx, query)
 	if err != nil {
@@ -402,11 +435,11 @@ func (p *PostgresBackend) AuthenticateAPIKey(ctx context.Context, token string) 
 		return nil, nil
 	}
 	fingerprint := hashToken(token)
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	if err = c.Exec(ctx, "BEGIN"); err != nil {
 		return nil, err
 	}
@@ -537,11 +570,11 @@ func (p *PostgresBackend) StatsForTenant(ctx context.Context, tenantID string) (
 	if err != nil {
 		return Stats{}, err
 	}
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return Stats{}, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	rows, err := c.Query(ctx, `SELECT count(*)::text FROM ciradar_jobs WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID))+` AND status='queued'`)
 	if err != nil {
 		return Stats{}, err
@@ -558,8 +591,35 @@ func (p *PostgresBackend) StatsForTenant(ctx context.Context, tenantID string) (
 }
 
 func (p *PostgresBackend) Dashboard(ctx context.Context, tenantID string, since time.Time) (model.DashboardSummary, error) {
-	specs := []pgSpec{pgTenant(tenantID, pgKindAnalysis), pgTenant(tenantID, pgKindIncident), pgTenant(tenantID, pgKindNotification), pgTenant(tenantID, pgKindFeedback), pgTenant(tenantID, pgKindObservation), pgTenant(tenantID, pgKindTestStats), pgTenant(tenantID, pgKindQuarantine)}
-	return pgStateWith(ctx, p, false, specs, func(store *Store) (model.DashboardSummary, error) { return store.Dashboard(ctx, tenantID, since) })
+	tenantID = normalizeTenant(tenantID)
+	specs := []pgSpec{pgTenant(tenantID, pgKindAnalysis), pgTenant(tenantID, pgKindIncident), pgTenant(tenantID, pgKindNotification), pgTenant(tenantID, pgKindFeedback), pgTenant(tenantID, pgKindTestStats), pgTenant(tenantID, pgKindQuarantine)}
+	dashboard, err := pgStateWith(ctx, p, false, specs, func(store *Store) (model.DashboardSummary, error) { return store.Dashboard(ctx, tenantID, since) })
+	if err != nil {
+		return model.DashboardSummary{}, err
+	}
+	c, err := p.connect(ctx)
+	if err != nil {
+		return model.DashboardSummary{}, err
+	}
+	defer p.release(c)
+	rows, err := c.Query(ctx, `SELECT occurred_at::date::text,count(*)::text FROM ciradar_test_observations WHERE tenant_id=`+sqlLiteral(tenantID)+` AND occurred_at>=`+sqlTime(since)+` AND status IN ('failed','error') GROUP BY occurred_at::date ORDER BY occurred_at::date`)
+	if err != nil {
+		return model.DashboardSummary{}, err
+	}
+	if dashboard.DailyTestFailures == nil {
+		dashboard.DailyTestFailures = map[string]int{}
+	}
+	for _, row := range rows.Values {
+		if len(row) < 2 || row[0] == nil {
+			continue
+		}
+		count, parseErr := parsePostgresInt(row[1], "daily test failure count")
+		if parseErr != nil {
+			return model.DashboardSummary{}, parseErr
+		}
+		dashboard.DailyTestFailures[*row[0]] = count
+	}
+	return dashboard, nil
 }
 
 func (p *PostgresBackend) UpsertDiagnosisFeedback(ctx context.Context, feedback model.DiagnosisFeedback) (model.DiagnosisFeedback, error) {
@@ -578,11 +638,81 @@ func (p *PostgresBackend) FeedbackMetrics(ctx context.Context, tenantID string) 
 	return pgStateWith(ctx, p, false, []pgSpec{pgTenant(tenantID, pgKindAnalysis), pgTenant(tenantID, pgKindFeedback)}, func(store *Store) (model.FeedbackMetrics, error) { return store.FeedbackMetrics(ctx, tenantID) })
 }
 
-func (p *PostgresBackend) RecordTestObservations(ctx context.Context, tenantID string, observations []model.TestObservation) ([]model.TestCaseStats, error) {
-	specs := []pgSpec{pgTenant(tenantID, pgKindObservation), pgTenant(tenantID, pgKindTestStats), pgTenant(tenantID, pgKindQuarantine)}
-	return pgStateWith(ctx, p, true, specs, func(store *Store) ([]model.TestCaseStats, error) {
-		return store.RecordTestObservations(ctx, tenantID, observations)
-	})
+func (p *PostgresBackend) RecordTestObservations(ctx context.Context, tenantID string, observations []model.TestObservation) (out []model.TestCaseStats, err error) {
+	tenantID = normalizeTenant(tenantID)
+	observations = normalizePostgresObservations(tenantID, observations)
+	if len(observations) == 0 {
+		return nil, nil
+	}
+	specs := make([]pgSpec, 0, len(observations)*2)
+	seen := map[string]bool{}
+	for _, observation := range observations {
+		key := TestKey(observation)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		specs = append(specs, pgOne(tenantID, pgKindTestStats, key), pgOne(tenantID, pgKindQuarantine, key))
+	}
+	specs = normalizeSpecs(specs)
+	c, err := p.connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer p.release(c)
+	if err = c.Exec(ctx, "BEGIN"); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = c.Exec(context.Background(), "ROLLBACK")
+		}
+	}()
+	if err = lockSpecs(ctx, c, specs); err != nil {
+		return nil, err
+	}
+	observations, err = filterExistingNativeTestObservations(ctx, c, tenantID, observations)
+	if err != nil {
+		return nil, err
+	}
+	if len(observations) == 0 {
+		if err = c.Exec(ctx, "COMMIT"); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	objects, err := loadPGObjects(ctx, c, specs, true)
+	if err != nil {
+		return nil, err
+	}
+	store, err := hydrateStore(objects)
+	if err != nil {
+		return nil, err
+	}
+	out, err = store.RecordTestObservations(ctx, tenantID, observations)
+	if err != nil {
+		return nil, err
+	}
+	current, err := stateObjects(store.state)
+	if err != nil {
+		return nil, err
+	}
+	for _, object := range current {
+		if matchesSpec(specs, object) {
+			if err = upsertPGObject(ctx, c, object); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, observation := range observations {
+		if err = insertNativeTestObservation(ctx, c, observation); err != nil {
+			return nil, err
+		}
+	}
+	if err = c.Exec(ctx, "COMMIT"); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (p *PostgresBackend) ListTestCaseStats(ctx context.Context, tenantID, repository, classification string, limit int) ([]model.TestCaseStats, error) {
@@ -618,11 +748,11 @@ func (p *PostgresBackend) PutObject(ctx context.Context, tenantID, kind, id stri
 	if err != nil {
 		return err
 	}
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer p.release(c)
 	if err = c.Exec(ctx, "BEGIN"); err != nil {
 		return err
 	}
@@ -658,11 +788,11 @@ func (p *PostgresBackend) PutObject(ctx context.Context, tenantID, kind, id stri
 }
 
 func (p *PostgresBackend) GetObject(ctx context.Context, tenantID, kind, id string, out any) (bool, error) {
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	rows, err := c.Query(ctx, `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID))+` AND kind=`+sqlLiteral(extensionKind(kind))+` AND object_id=`+sqlLiteral(strings.TrimSpace(id)))
 	if err != nil || len(rows.Values) == 0 {
 		return false, err
@@ -691,11 +821,11 @@ func (p *PostgresBackend) ListObjects(ctx context.Context, tenantID, kind string
 	if limit < 1 || limit > 10000 {
 		limit = 500
 	}
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Close()
+	defer p.release(c)
 	query := `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=` + sqlLiteral(normalizeTenant(tenantID)) + ` AND kind=` + sqlLiteral(extensionKind(kind)) + ` ORDER BY event_time DESC NULLS LAST,updated_at DESC LIMIT ` + strconv.Itoa(limit)
 	rows, err := c.Query(ctx, query)
 	if err != nil {
@@ -727,15 +857,22 @@ func (p *PostgresBackend) Cleanup(ctx context.Context, retentionDays int) error 
 		return nil
 	}
 	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
-	c, err := pgwire.Connect(ctx, p.dsn)
+	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	defer p.release(c)
+	if err := ensureObservationPartitions(ctx, c, time.Now().UTC()); err != nil {
+		return err
+	}
+	if err := dropExpiredObservationPartitions(ctx, c, cutoff); err != nil {
+		return err
+	}
 	if err := c.Exec(ctx, "BEGIN"); err != nil {
 		return err
 	}
 	queries := []string{
+		`DELETE FROM ciradar_test_observations WHERE occurred_at<` + sqlTime(cutoff),
 		`DELETE FROM ciradar_objects WHERE kind IN (` + sqlLiteral(pgKindAnalysis) + `,` + sqlLiteral(pgKindEnvironment) + `,` + sqlLiteral(pgKindAudit) + `,` + sqlLiteral(pgKindNotification) + `,` + sqlLiteral(pgKindObservation) + `) AND event_time<` + sqlTime(cutoff),
 		`DELETE FROM ciradar_objects WHERE kind=` + sqlLiteral(pgKindIncident) + ` AND state='resolved' AND event_time<` + sqlTime(cutoff),
 		`DELETE FROM ciradar_webhook_deliveries WHERE received_at<` + sqlTime(cutoff),
