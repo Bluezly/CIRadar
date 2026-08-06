@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"ciradar/internal/analyzer"
 	"ciradar/internal/model"
 )
 
@@ -43,9 +45,26 @@ func normalizeMeta(meta Metadata, framework string) (Metadata, error) {
 	return meta, nil
 }
 
+var testOutputRedactor = analyzer.NewRedactor()
+
+func sanitizeRunURL(value string) string {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed == nil || !parsed.IsAbs() || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return ""
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func secureTestOutput(value string, limit int) string {
+	return truncate(strings.TrimSpace(testOutputRedactor.Redact(value)), limit)
+}
+
 func observation(meta Metadata, suite, className, file, name, status string, durationMS int64, message, details string) model.TestObservation {
 	base, params := splitParameters(name)
-	return model.TestObservation{TenantID: meta.TenantID, Repository: meta.Repository, Workflow: meta.Workflow, Job: meta.Job, RunID: meta.RunID, CommitSHA: meta.CommitSHA, Branch: meta.Branch, Framework: meta.Framework, Suite: suite, ClassName: className, File: filepath.ToSlash(file), Name: base, Parameters: params, Status: normalizeTestStatus(status), DurationMS: durationMS, Message: truncate(strings.TrimSpace(message), 1000), Details: truncate(strings.TrimSpace(details), 8000), Environment: meta.Environment, OccurredAt: meta.OccurredAt}
+	return model.TestObservation{TenantID: meta.TenantID, Repository: meta.Repository, Workflow: meta.Workflow, Job: meta.Job, RunID: meta.RunID, CommitSHA: meta.CommitSHA, Branch: meta.Branch, PullRequestNumber: meta.PullRequestNumber, RunURL: sanitizeRunURL(meta.RunURL), Variant: strings.TrimSpace(meta.Variant), Framework: meta.Framework, Suite: suite, ClassName: className, File: filepath.ToSlash(file), Name: base, Parameters: params, Status: normalizeTestStatus(status), DurationMS: durationMS, Message: secureTestOutput(message, 1000), Details: secureTestOutput(details, 8000), Environment: meta.Environment, OccurredAt: meta.OccurredAt}
 }
 
 func normalizeTestStatus(v string) string {

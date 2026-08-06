@@ -14,16 +14,19 @@ import (
 )
 
 type Metadata struct {
-	TenantID    string
-	Repository  string
-	Workflow    string
-	Job         string
-	RunID       int64
-	CommitSHA   string
-	Branch      string
-	Framework   string
-	Environment model.Environment
-	OccurredAt  time.Time
+	TenantID          string
+	Repository        string
+	Workflow          string
+	Job               string
+	RunID             int64
+	CommitSHA         string
+	Branch            string
+	PullRequestNumber int
+	RunURL            string
+	Variant           string
+	Framework         string
+	Environment       model.Environment
+	OccurredAt        time.Time
 }
 
 type testCaseXML struct {
@@ -121,7 +124,7 @@ func toObservation(m Metadata, suite string, t testCaseXML) model.TestObservatio
 		details = first(t.SystemErr, t.SystemOut)
 	}
 	name, params := splitParameters(t.Name)
-	return model.TestObservation{TenantID: m.TenantID, Repository: m.Repository, Workflow: m.Workflow, Job: m.Job, RunID: m.RunID, CommitSHA: m.CommitSHA, Branch: m.Branch, Framework: m.Framework, Suite: suite, ClassName: t.ClassName, File: t.File, Name: name, Parameters: params, Status: status, DurationMS: parseDurationMS(t.Time), Message: truncate(message, 1000), Details: truncate(strings.TrimSpace(details), 8000), Environment: m.Environment, OccurredAt: m.OccurredAt}
+	return model.TestObservation{TenantID: m.TenantID, Repository: m.Repository, Workflow: m.Workflow, Job: m.Job, RunID: m.RunID, CommitSHA: m.CommitSHA, Branch: m.Branch, PullRequestNumber: m.PullRequestNumber, RunURL: sanitizeRunURL(m.RunURL), Variant: strings.TrimSpace(m.Variant), Framework: m.Framework, Suite: suite, ClassName: t.ClassName, File: t.File, Name: name, Parameters: params, Status: status, DurationMS: parseDurationMS(t.Time), Message: secureTestOutput(message, 1000), Details: secureTestOutput(details, 8000), Environment: m.Environment, OccurredAt: m.OccurredAt}
 }
 
 func parseDurationMS(raw string) int64 {
