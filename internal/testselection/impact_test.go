@@ -135,8 +135,11 @@ func TestEmptySelectionExplainsCoverageIdentityMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Selected) != 0 || len(out.Diagnostics) == 0 {
+	if len(out.Selected) != 1 || !out.FullSuiteRequired || out.SelectionSafe || len(out.Diagnostics) == 0 {
 		t.Fatalf("%#v", out)
+	}
+	if out.Selected[0].Strategy != "safety_full_suite" {
+		t.Fatalf("expected safety fallback, got %#v", out.Selected[0])
 	}
 }
 
