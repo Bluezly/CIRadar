@@ -438,9 +438,6 @@ func (c *Client) Query(ctx context.Context, q string) (Rows, error) {
 		case 'C':
 			out.Command = strings.TrimRight(string(p), "\x00")
 		case 'E':
-			// PostgreSQL sends ReadyForQuery after ErrorResponse. Consume the
-			// protocol through that boundary before returning so a subsequent
-			// query cannot observe a stale 'Z' and silently desynchronize.
 			queryErr = parseError(p)
 		case 'Z':
 			return out, queryErr
@@ -450,9 +447,6 @@ func (c *Client) Query(ctx context.Context, q string) (Rows, error) {
 }
 func (c *Client) Exec(ctx context.Context, q string) error { _, err := c.Query(ctx, q); return err }
 
-// Broken reports whether transport cancellation or protocol parsing made this
-// connection unsafe to reuse. SQL ErrorResponse values alone do not mark a
-// connection broken because Query drains through ReadyForQuery.
 func (c *Client) Broken() bool { return c == nil || c.broken }
 
 func (c *Client) Close() error {
