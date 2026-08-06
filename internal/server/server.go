@@ -126,6 +126,8 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("PUT /api/v1/tests/impact", s.require(model.RoleOperator, s.putTestImpact))
 	mux.HandleFunc("POST /api/v1/tests/coverage", s.require(model.RoleOperator, s.putTestCoverage))
 	mux.HandleFunc("GET /api/v1/tests/quarantine-manifest", s.require(model.RoleViewer, s.testQuarantineManifest))
+	mux.HandleFunc("GET /api/v1/tests/{key}", s.require(model.RoleViewer, s.testCaseDetail))
+	mux.HandleFunc("PUT /api/v1/tests/{key}/critical", s.require(model.RoleOperator, s.setTestCritical))
 	mux.HandleFunc("POST /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.quarantineTest))
 	mux.HandleFunc("DELETE /api/v1/tests/{key}/quarantine", s.require(model.RoleOperator, s.unquarantineTest))
 	mux.HandleFunc("POST /api/v1/deployments", s.require(model.RoleOperator, s.recordDeployment))
@@ -658,7 +660,7 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	runID, _ := strconv.ParseInt(q.Get("run_id"), 10, 64)
 	format := firstNonEmpty(q.Get("format"), "junit")
-	obs, err := testintelligence.ParseReport(format, http.MaxBytesReader(w, r.Body, 128<<20), testintelligence.Metadata{TenantID: p.TenantID, Repository: q.Get("repository"), Workflow: q.Get("workflow"), Job: q.Get("job"), RunID: runID, CommitSHA: q.Get("commit_sha"), Branch: q.Get("branch"), Framework: firstNonEmpty(q.Get("framework"), format), OccurredAt: time.Now().UTC()})
+	obs, err := testintelligence.ParseReport(format, http.MaxBytesReader(w, r.Body, 128<<20), testintelligence.Metadata{TenantID: p.TenantID, Repository: q.Get("repository"), Workflow: q.Get("workflow"), Job: q.Get("job"), RunID: runID, CommitSHA: q.Get("commit_sha"), Branch: q.Get("branch"), PullRequestNumber: parsePositiveInt(q.Get("pull_request_number")), RunURL: q.Get("run_url"), Variant: q.Get("variant"), Framework: firstNonEmpty(q.Get("framework"), format), OccurredAt: time.Now().UTC()})
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
@@ -682,7 +684,7 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, st := range stats {
-			if st.Classification != "flaky" || st.TotalRuns < s.cfg.TestIntelligence.AutoQuarantineMinRuns || st.FlakeScore < s.cfg.TestIntelligence.AutoQuarantineMinScore || st.Quarantined {
+			if st.Critical || st.Classification != "flaky" || st.TotalRuns < s.cfg.TestIntelligence.AutoQuarantineMinRuns || st.FlakeScore < s.cfg.TestIntelligence.AutoQuarantineMinScore || st.Quarantined {
 				continue
 			}
 			qu, e := s.store.SetTestQuarantine(r.Context(), model.TestQuarantine{TenantID: p.TenantID, TestKey: st.TestKey, Reason: "Automatic quarantine: repeated pass/fail transitions", Owner: owner, CreatedBy: "system", ExpiresAt: time.Now().UTC().Add(s.cfg.TestIntelligence.AutoQuarantineDuration)})
@@ -713,7 +715,84 @@ func (s *Server) testCases(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
+	enrichServerTestStats(items)
 	writeJSON(w, 200, map[string]any{"tests": items})
+}
+
+func (s *Server) testCaseDetail(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	testKey := strings.TrimSpace(r.PathValue("key"))
+	stats, err := s.store.GetTestCaseStats(r.Context(), p.TenantID, testKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if stats == nil {
+		writeError(w, http.StatusNotFound, "test case not found")
+		return
+	}
+	stats.DisplayName = testselection.DisplayName(*stats)
+	stats.Aliases = testselection.TestAliases(*stats)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	history, err := s.store.ListTestObservations(r.Context(), p.TenantID, testKey, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	audit, err := s.store.ListAudit(r.Context(), p.TenantID, 500)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type testAuditEvent struct {
+		Actor     string     `json:"actor"`
+		Role      model.Role `json:"role"`
+		Action    string     `json:"action"`
+		CreatedAt time.Time  `json:"created_at"`
+	}
+	testAudit := make([]testAuditEvent, 0)
+	for _, event := range audit {
+		if event.Resource == "test" && event.ResourceID == testKey {
+			testAudit = append(testAudit, testAuditEvent{Actor: event.Actor, Role: event.Role, Action: event.Action, CreatedAt: event.CreatedAt})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"test":          stats,
+		"history":       history,
+		"failure_types": testintelligence.GroupFailureTypes(history, 20),
+		"audit":         testAudit,
+	})
+}
+
+func (s *Server) setTestCritical(w http.ResponseWriter, r *http.Request) {
+	p := principal(r)
+	var body struct {
+		Critical bool `json:"critical"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	stats, err := s.store.SetTestCritical(r.Context(), p.TenantID, r.PathValue("key"), body.Critical)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	action := "test.critical.disable"
+	if body.Critical {
+		action = "test.critical.enable"
+	}
+	s.audit(r, action, "test", stats.TestKey, nil)
+	stats.DisplayName = testselection.DisplayName(*stats)
+	stats.Aliases = testselection.TestAliases(*stats)
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func enrichServerTestStats(items []model.TestCaseStats) {
+	for i := range items {
+		items[i].DisplayName = testselection.DisplayName(items[i])
+		items[i].Aliases = testselection.TestAliases(items[i])
+	}
 }
 func (s *Server) testQuarantines(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListTestQuarantines(r.Context(), principal(r).TenantID)
@@ -770,6 +849,14 @@ func (s *Server) unquarantineTest(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "test.unquarantine", "test", r.PathValue("key"), nil)
 	w.WriteHeader(204)
 }
+func parsePositiveInt(value string) int {
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < 1 {
+		return 0
+	}
+	return parsed
+}
+
 func firstNonEmpty(v, d string) string {
 	if strings.TrimSpace(v) != "" {
 		return v

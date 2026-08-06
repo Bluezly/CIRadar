@@ -10,102 +10,84 @@
 <body>
 <div class="app-shell">
 <aside class="sidebar">
-<div class="wordmark">
-<strong>CI Radar</strong>
-<span>CI operations</span>
-</div>
-<nav class="nav" aria-label="Dashboard sections">
+<a class="brand" href="#overview" aria-label="CI Radar home">CI Radar</a>
+<nav class="nav" aria-label="Primary navigation">
 <button type="button" data-tab="overview" class="active"><span>Overview</span><b id="nav-overview-count"></b></button>
 <button type="button" data-tab="incidents"><span>Incidents</span><b id="nav-incident-count"></b></button>
 <button type="button" data-tab="diagnoses"><span>Diagnoses</span><b id="nav-diagnosis-count"></b></button>
 <button type="button" data-tab="tests"><span>Tests</span><b id="nav-test-count"></b></button>
 <button type="button" data-tab="operations"><span>Operations</span><b id="nav-provider-count"></b></button>
 </nav>
-<details id="session-panel" class="session-panel">
-<summary>Session</summary>
-<div class="session-fields">
-<label for="tenant">Tenant</label>
-<input id="tenant" autocomplete="organization" value="default">
-<label for="token">Admin token or API key</label>
-<input id="token" type="password" autocomplete="off">
-<div class="session-actions">
-<button id="secure-login" type="button" class="primary">Sign in</button>
-<button id="sso-login" type="button">SSO</button>
-</div>
-<button id="logout" type="button" class="text-button">Sign out</button>
-</div>
-</details>
-<div class="sidebar-foot">
-<span id="connection-state" class="connection-state">Connecting</span>
-<a href="/source">Source</a>
-</div>
 </aside>
 <div class="workspace">
-<header class="page-header">
-<div>
-<h1 id="page-title">Overview</h1>
-<p id="page-description">CI health across the selected period.</p>
-</div>
-<div class="page-actions">
-<label class="field-inline" for="range"><span>Period</span><select id="range"><option value="24h">24 hours</option><option value="168h" selected>7 days</option><option value="720h">30 days</option><option value="2160h">90 days</option><option value="4320h">180 days</option><option value="8760h">365 days</option></select></label>
-<button id="refresh" type="button">Reload</button>
+<header class="topbar">
+<div class="page-heading"><h1 id="page-title">Overview</h1><p id="page-description">Work that is slowing delivery right now.</p></div>
+<div class="topbar-actions">
+<label class="select-field"><span>Repository</span><select id="repository-filter"><option value="">All repositories</option></select></label>
+<label class="select-field"><span>Period</span><select id="range"><option value="24h">24 hours</option><option value="168h" selected>7 days</option><option value="720h">30 days</option><option value="2160h">90 days</option></select></label>
+<button id="refresh" type="button">Refresh</button>
+<button id="session-open" type="button">Session</button>
 </div>
 </header>
-<div class="status-row"><span id="updated-at">Not loaded</span></div>
-<div id="error" role="alert" aria-live="polite"></div>
+<div id="error" class="error-banner" role="alert" aria-live="polite" hidden></div>
 <main>
 <section id="overview" class="view active">
-<section id="cards" class="metric-strip" aria-label="Summary metrics"></section>
-<section class="chart-grid">
-<article class="panel chart-panel"><header class="panel-header"><div><h2>Diagnoses</h2><p>Failures analyzed per day</p></div></header><div id="analysistrend" class="svg-chart"></div></article>
-<article class="panel chart-panel"><header class="panel-header"><div><h2>Incidents</h2><p>New incidents per day</p></div></header><div id="incidenttrend" class="svg-chart"></div></article>
-<article class="panel chart-panel"><header class="panel-header"><div><h2>Test failures</h2><p>Recorded failures per day</p></div></header><div id="testtrend" class="svg-chart"></div></article>
-<article class="panel chart-panel"><header class="panel-header"><div><h2>CI cost</h2><p>Estimated spend per day</p></div></header><div id="costtrend" class="svg-chart"></div></article>
-</section>
-<section class="content-grid">
-<article class="panel"><header class="panel-header"><div><h2>DORA metrics</h2><p>Selected period</p></div></header><div id="dora" class="metric-list"></div></article>
-<article class="panel"><header class="panel-header"><div><h2>Failure categories</h2><p>Diagnosis volume</p></div></header><div id="category-bars" class="category-bars"></div></article>
-</section>
-<article class="panel"><header class="panel-header"><div><h2>Active incidents</h2><p>Highest priority unresolved work</p></div><button type="button" data-tab-jump="incidents">View all</button></header><div class="table-wrap"><table><thead><tr><th>Incident</th><th>State</th><th>Impact</th><th></th></tr></thead><tbody id="incident-preview"></tbody></table></div></article>
+<div id="overview-metrics" class="metric-row" aria-label="Reliability summary"></div>
+<div class="overview-grid">
+<article class="panel attention-panel">
+<header class="panel-header"><div><h2>Needs attention</h2><p>Highest-impact unresolved work</p></div><span id="attention-count" class="muted"></span></header>
+<div id="attention-list" class="attention-list"></div>
+</article>
+<article class="panel trend-panel">
+<header class="panel-header"><div><h2>Failure pressure</h2><p>Incidents and test failures over time</p></div><span id="updated-at" class="muted">Not loaded</span></header>
+<div id="reliability-trend" class="chart"></div>
+</article>
+</div>
+<div class="overview-grid lower-grid">
+<article class="panel">
+<header class="panel-header"><div><h2>Tests costing the most</h2><p>Prioritized by blocked PRs and estimated engineering time</p></div><button type="button" data-tab-jump="tests">View tests</button></header>
+<div class="table-wrap"><table><thead><tr><th>Test</th><th>Impact</th><th>State</th></tr></thead><tbody id="test-impact-preview"></tbody></table></div>
+</article>
+<article class="panel">
+<header class="panel-header"><div><h2>Repository health</h2><p>Diagnoses and unstable tests by repository</p></div></header>
+<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Diagnoses</th><th>Unstable tests</th><th>Time lost</th></tr></thead><tbody id="repository-health"></tbody></table></div>
+</article>
+</div>
 </section>
 <section id="incidents" class="view">
 <article class="panel">
 <header class="panel-header table-header"><div><h2>Incidents</h2><p id="incident-count"></p></div><div class="filters"><input id="incident-search" type="search" placeholder="Search incidents"><select id="incident-state"><option value="">All states</option><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select><select id="incident-severity"><option value="">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></header>
-<div class="table-wrap"><table><thead><tr><th>Incident</th><th>Provider</th><th>State</th><th>Repos</th><th>Events</th><th>Last seen</th><th></th></tr></thead><tbody id="incident-table"></tbody></table></div>
+<div class="table-wrap"><table><thead><tr><th>Incident</th><th>State</th><th>Repositories</th><th>Events</th><th>Last seen</th><th></th></tr></thead><tbody id="incident-table"></tbody></table></div>
 </article>
 </section>
 <section id="diagnoses" class="view">
 <article class="panel">
-<header class="panel-header table-header"><div><h2>Diagnoses</h2><p id="analysis-count"></p></div><div class="filters"><input id="analysis-search" type="search" placeholder="Search diagnoses"><select id="analysis-attribution"><option value="">All attributions</option><option value="EXTERNAL">External</option><option value="CODE">Code</option><option value="MIXED">Mixed</option><option value="TOOLCHAIN">Toolchain</option><option value="UNKNOWN">Unknown</option></select><select id="analysis-category"><option value="">All categories</option></select><select id="analysis-provider"><option value="">All providers</option></select></div></header>
-<div class="table-wrap"><table><thead><tr><th>Time</th><th>Repository / job</th><th>Decision</th><th>Summary</th><th>Evidence</th><th>Feedback</th></tr></thead><tbody id="analysis-table"></tbody></table></div>
+<header class="panel-header table-header"><div><h2>Diagnoses</h2><p id="analysis-count"></p></div><div class="filters"><input id="analysis-search" type="search" placeholder="Search diagnoses"><select id="analysis-attribution"><option value="">All attributions</option><option value="EXTERNAL">External</option><option value="CODE">Code</option><option value="MIXED">Mixed</option><option value="TOOLCHAIN">Toolchain</option><option value="UNKNOWN">Unknown</option></select><select id="analysis-category"><option value="">All categories</option></select></div></header>
+<div class="table-wrap"><table><thead><tr><th>Repository / job</th><th>Decision</th><th>Summary</th><th>Evidence</th><th>Time</th><th></th></tr></thead><tbody id="analysis-table"></tbody></table></div>
 </article>
 </section>
 <section id="tests" class="view">
+<div id="test-metrics" class="metric-row compact-metrics"></div>
 <article class="panel">
-<header class="panel-header table-header"><div><h2>Test intelligence</h2><p id="test-count"></p></div><div class="filters"><input id="test-search" type="search" placeholder="Search tests"><select id="test-state"><option value="">All states</option><option value="flaky">Flaky</option><option value="consistently_failing">Consistently failing</option><option value="stable">Stable</option><option value="suspected_flaky">Suspected flaky</option><option value="warming_up">Warming up</option><option value="not_executed">Not executed</option><option value="mixed">Mixed</option></select><select id="test-cause"><option value="">All causes</option><option value="timing">Timing</option><option value="selector">Selector</option><option value="network">Network</option><option value="environment">Environment</option><option value="resource">Resource</option><option value="order_state">Order/state</option><option value="concurrency">Concurrency</option><option value="data">Data</option><option value="unknown">Unknown</option></select></div></header>
-<div class="table-wrap"><table><thead><tr><th>Test</th><th>Repository</th><th>History</th><th>Flake score</th><th>Likely cause</th><th>State</th><th></th></tr></thead><tbody id="test-table"></tbody></table></div>
+<header class="panel-header table-header"><div><h2>Test reliability</h2><p id="test-count"></p></div><div class="filters"><input id="test-search" type="search" placeholder="Search tests"><select id="test-state"><option value="">All states</option><option value="flaky">Flaky</option><option value="consistently_failing">Consistently failing</option><option value="suspected_flaky">Suspected flaky</option><option value="warming_up">Warming up</option><option value="stable">Stable</option><option value="mixed">Mixed</option></select><select id="test-sort"><option value="impact">Highest impact</option><option value="prs">Most PRs blocked</option><option value="flake">Highest flake score</option><option value="recent">Most recent</option></select><label class="check-field"><input id="test-critical" type="checkbox"> Critical only</label></div></header>
+<div class="table-wrap"><table><thead><tr><th>Test</th><th>State</th><th>PRs impacted</th><th>Time lost</th><th>Failure rate</th><th>Last seen</th><th></th></tr></thead><tbody id="test-table"></tbody></table></div>
 </article>
 </section>
 <section id="operations" class="view">
-<section class="content-grid operations-grid">
-<article class="panel"><header class="panel-header"><div><h2>Repository routing</h2><p>Ownership and notification targets</p></div></header><div class="table-wrap"><table><thead><tr><th>Repository</th><th>Team</th><th>Criticality</th><th>Channels</th></tr></thead><tbody id="repositories"></tbody></table></div></article>
-<article class="panel"><header class="panel-header"><div><h2>Notification deliveries</h2><p>Latest attempts</p></div></header><div class="table-wrap"><table><thead><tr><th>Channel</th><th>Status</th><th>Attempts</th><th>Last error</th></tr></thead><tbody id="deliveries"></tbody></table></div></article>
-</section>
-<article class="panel"><header class="panel-header"><div><h2>Connected providers</h2><p id="provider-count"></p></div></header><div id="providers" class="provider-list"></div></article>
+<div class="operations-grid">
+<article class="panel"><header class="panel-header"><div><h2>Delivery metrics</h2><p>Selected period</p></div></header><div id="dora" class="definition-list"></div></article>
+<article class="panel"><header class="panel-header"><div><h2>Providers</h2><p id="provider-count"></p></div></header><div id="providers" class="provider-list"></div></article>
+</div>
+<article class="panel"><header class="panel-header"><div><h2>Repository routing</h2><p>Ownership, criticality and notification targets</p></div></header><div class="table-wrap"><table><thead><tr><th>Repository</th><th>Team</th><th>Criticality</th><th>Channels</th></tr></thead><tbody id="repositories"></tbody></table></div></article>
+<article class="panel"><header class="panel-header"><div><h2>Notification deliveries</h2><p>Latest delivery attempts</p></div></header><div class="table-wrap"><table><thead><tr><th>Channel</th><th>Status</th><th>Attempts</th><th>Last error</th></tr></thead><tbody id="deliveries"></tbody></table></div></article>
 </section>
 </main>
 </div>
 </div>
-<aside id="drawer" class="drawer" aria-hidden="true"><header class="drawer-head"><div><span id="drawer-kind"></span><h2 id="drawer-title"></h2></div><button id="drawer-close" type="button" aria-label="Close">Close</button></header><div id="drawer-body" class="drawer-body"></div></aside>
+<aside id="drawer" class="drawer" aria-hidden="true"><header class="drawer-head"><div><span id="drawer-kind"></span><h2 id="drawer-title"></h2></div><button id="drawer-close" type="button">Close</button></header><div id="drawer-body" class="drawer-body"></div></aside>
 <div id="backdrop" class="backdrop" hidden></div>
-<dialog id="action-dialog" class="action-dialog">
-<form id="action-form">
-<header><div><span id="action-kind"></span><h2 id="action-title"></h2></div><button id="action-close" type="button">Close</button></header>
-<p id="action-description"></p>
-<div id="action-fields" class="action-fields"></div>
-<footer><button id="action-cancel" type="button">Cancel</button><button id="action-submit" type="submit" class="primary">Save</button></footer>
-</form>
-</dialog>
+<dialog id="session-dialog" class="modal"><form method="dialog"><header><div><span>Authentication</span><h2>Session</h2></div><button value="cancel">Close</button></header><label>Tenant<input id="tenant" autocomplete="organization" value="default"></label><label>Admin token or API key<input id="token" type="password" autocomplete="off"></label><div class="modal-actions"><button id="logout" type="button">Sign out</button><button id="sso-login" type="button">Use SSO</button><button id="secure-login" type="button" class="primary">Sign in</button></div></form></dialog>
+<dialog id="action-dialog" class="modal"><form id="action-form"><header><div><span id="action-kind"></span><h2 id="action-title"></h2></div><button id="action-close" type="button">Close</button></header><p id="action-description"></p><div id="action-fields" class="action-fields"></div><div class="modal-actions"><button id="action-cancel" type="button">Cancel</button><button id="action-submit" type="submit" class="primary">Save</button></div></form></dialog>
 <script src="/assets/dashboard.js" defer></script>
 </body>
 </html>
