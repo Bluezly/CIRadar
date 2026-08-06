@@ -731,8 +731,6 @@ func (w *Worker) providerIncident(ctx context.Context, provider string) (bool, e
 }
 
 func (w *Worker) maybeCreateIncident(ctx context.Context, tenantID, repository string, r model.AnalysisResult, c db.CorrelationStats) (*model.Incident, bool, error) {
-	// CorrelationForTenant already includes the candidate analysis represented by r.
-	// Adding one here would double-count the current failure and trigger thresholds early.
 	repos := c.Repositories
 	orgs := c.Organizations
 	occ := c.Occurrences
