@@ -261,10 +261,6 @@ func observationPartitionStatements(now time.Time) []string {
 		from := month.AddDate(0, offset, 0)
 		to := from.AddDate(0, 1, 0)
 		name := fmt.Sprintf("ciradar_test_observations_%04d%02d", from.Year(), int(from.Month()))
-		// A DEFAULT partition may already contain rows for a newly-created
-		// month. Move those rows under an ACCESS EXCLUSIVE lock before attach;
-		// otherwise PostgreSQL rejects ATTACH PARTITION or scans an unsafe
-		// moving target.
 		out = append(out, `DO $ciradar_partition$
 BEGIN
   IF to_regclass(`+sqlLiteral(name)+`) IS NULL THEN
@@ -333,7 +329,6 @@ WHERE parent.relname='ciradar_test_observations'`)
 		return err
 	}
 	for _, name := range expiredObservationPartitions(rows, cutoff) {
-		// Names are accepted only after strict prefix + YYYYMM validation.
 		if err := c.Exec(ctx, `DROP TABLE IF EXISTS `+name); err != nil {
 			return fmt.Errorf("drop expired PostgreSQL observation partition %s: %w", name, err)
 		}

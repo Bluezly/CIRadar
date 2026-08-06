@@ -85,8 +85,6 @@ func postgresConnectionHealthy(c *pgwire.Client) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	// ROLLBACK is harmless outside a transaction and guarantees that a caller
-	// cannot return an aborted/open transaction to the shared pool.
 	if err := c.Exec(ctx, "ROLLBACK"); err != nil {
 		return false
 	}

@@ -6,10 +6,6 @@ import (
 	"strconv"
 )
 
-// PostgresHealthReport exposes operational facts that an operator can verify
-// before trusting a deployment. Counts are intentionally limited to small
-// metadata/default-partition queries; large telemetry tables use PostgreSQL's
-// estimates instead of a blocking COUNT(*).
 type PostgresHealthReport struct {
 	ServerVersion            string   `json:"server_version"`
 	SchemaVersion            int64    `json:"schema_version"`

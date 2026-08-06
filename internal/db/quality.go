@@ -142,8 +142,6 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 	defer s.mu.Unlock()
 	updated := map[string]model.TestCaseStats{}
 	for _, o := range observations {
-		// Observation IDs are idempotency keys. Replaying the same CI payload must
-		// not inflate historical confidence, transitions, or engineering time lost.
 		if _, exists := s.state.TestObservations[o.ID]; exists {
 			continue
 		}
@@ -154,8 +152,6 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 			stats = model.TestCaseStats{TenantID: tenantID, TestKey: key, Repository: o.Repository, Framework: o.Framework, Suite: o.Suite, ClassName: o.ClassName, File: o.File, Name: o.Name, Parameters: o.Parameters, FirstSeenAt: o.OccurredAt, CauseCounts: map[string]int{}}
 		}
 		if stats.ExecutedRuns == 0 && stats.Passes+stats.Failures > 0 {
-			// Backward-compatible recovery for state written before ExecutedRuns was
-			// introduced. Skips never count as evidence for flakiness.
 			stats.ExecutedRuns = stats.Passes + stats.Failures
 		}
 		chronological := stats.LastSeenAt.IsZero() || !o.OccurredAt.Before(stats.LastSeenAt)
@@ -425,9 +421,6 @@ func normalizeTestObservations(tenantID string, observations []model.TestObserva
 		}
 		if strings.TrimSpace(observation.ID) == "" {
 			parts := []string{tenantID, TestKey(observation), strconv.FormatInt(observation.RunID, 10), strings.TrimSpace(observation.CommitSHA), observation.Status}
-			// A CI run normally contains one result for a fully-qualified test key.
-			// When no run identity exists, time and payload details preserve distinct
-			// executions while still making exact delivery retries idempotent.
 			if observation.RunID == 0 {
 				parts = append(parts, observation.OccurredAt.Format(time.RFC3339Nano), strconv.FormatInt(observation.DurationMS, 10), observation.Message, observation.Details)
 			}
