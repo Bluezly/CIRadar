@@ -1,10 +1,13 @@
 package config
 
 import (
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -49,6 +52,7 @@ type SSOConfig struct {
 	SAMLIdPCertificate  string        `json:"saml_idp_certificate,omitempty"`
 	SAMLACSURL          string        `json:"saml_acs_url,omitempty"`
 	SAMLXMLSecPath      string        `json:"saml_xmlsec_path,omitempty"`
+	SAMLXMLSecSHA256    string        `json:"saml_xmlsec_sha256,omitempty"`
 	SAMLSecurityProfile string        `json:"saml_security_profile,omitempty"`
 	SAMLNameAttribute   string        `json:"saml_name_attribute,omitempty"`
 	SAMLEmailAttribute  string        `json:"saml_email_attribute,omitempty"`
@@ -92,17 +96,18 @@ type RepairConfig struct {
 }
 
 type ChatOpsConfig struct {
-	Enabled            bool     `json:"enabled"`
-	DefaultTenant      string   `json:"default_tenant,omitempty"`
-	SlackSigningSecret string   `json:"slack_signing_secret,omitempty"`
-	SlackAllowedUsers  []string `json:"slack_allowed_users,omitempty"`
-	SlackAllowedTeams  []string `json:"slack_allowed_teams,omitempty"`
-	TeamsSigningSecret string   `json:"teams_signing_secret,omitempty"`
-	TeamsAllowedUsers  []string `json:"teams_allowed_users,omitempty"`
-	AllowAcknowledge   bool     `json:"allow_acknowledge"`
-	AllowResolve       bool     `json:"allow_resolve"`
-	AllowQuarantine    bool     `json:"allow_quarantine"`
-	QuarantineDuration string   `json:"quarantine_duration,omitempty"`
+	Enabled            bool              `json:"enabled"`
+	DefaultTenant      string            `json:"default_tenant,omitempty"`
+	SlackSigningSecret string            `json:"slack_signing_secret,omitempty"`
+	SlackAllowedUsers  []string          `json:"slack_allowed_users,omitempty"`
+	SlackAllowedTeams  []string          `json:"slack_allowed_teams,omitempty"`
+	SlackTeamTenants   map[string]string `json:"slack_team_tenants,omitempty"`
+	TeamsSigningSecret string            `json:"teams_signing_secret,omitempty"`
+	TeamsAllowedUsers  []string          `json:"teams_allowed_users,omitempty"`
+	AllowAcknowledge   bool              `json:"allow_acknowledge"`
+	AllowResolve       bool              `json:"allow_resolve"`
+	AllowQuarantine    bool              `json:"allow_quarantine"`
+	QuarantineDuration string            `json:"quarantine_duration,omitempty"`
 }
 
 type CostConfig struct {
@@ -131,6 +136,19 @@ type PredictiveTestConfig struct {
 	MinimumScore    float64 `json:"minimum_score,omitempty"`
 	AlwaysRunFlaky  bool    `json:"always_run_flaky"`
 	AlwaysRunFailed bool    `json:"always_run_failed"`
+}
+
+func fileSHA256Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (c *Config) normalizeEnterprise() error {
@@ -214,12 +232,36 @@ func (c *Config) normalizeEnterprise() error {
 			if c.SSO.SAMLXMLSecPath == "" || !filepath.IsAbs(c.SSO.SAMLXMLSecPath) {
 				return errors.New("sso saml requires an absolute saml_xmlsec_path to a pinned xmlsec1 executable")
 			}
-			if info, statErr := os.Stat(c.SSO.SAMLXMLSecPath); statErr != nil || !info.Mode().IsRegular() {
-				return fmt.Errorf("saml_xmlsec_path is not a readable regular file: %w", statErr)
+			resolvedXMLSec, resolveErr := filepath.EvalSymlinks(c.SSO.SAMLXMLSecPath)
+			if resolveErr != nil {
+				return fmt.Errorf("resolve saml_xmlsec_path: %w", resolveErr)
 			}
-			if _, lookupErr := exec.LookPath(c.SSO.SAMLXMLSecPath); lookupErr != nil {
+			info, statErr := os.Stat(resolvedXMLSec)
+			if statErr != nil {
+				return fmt.Errorf("stat saml_xmlsec_path: %w", statErr)
+			}
+			if !info.Mode().IsRegular() {
+				return errors.New("saml_xmlsec_path is not a regular file")
+			}
+			if _, lookupErr := exec.LookPath(resolvedXMLSec); lookupErr != nil {
 				return fmt.Errorf("saml_xmlsec_path is not executable: %w", lookupErr)
 			}
+			wantedXMLSecHash := strings.ToLower(strings.TrimSpace(c.SSO.SAMLXMLSecSHA256))
+			if len(wantedXMLSecHash) != sha256.Size*2 {
+				return errors.New("sso saml requires saml_xmlsec_sha256 for executable integrity pinning")
+			}
+			if _, decodeErr := hex.DecodeString(wantedXMLSecHash); decodeErr != nil {
+				return errors.New("saml_xmlsec_sha256 must be a 64-character hexadecimal SHA-256 digest")
+			}
+			actualXMLSecHash, hashErr := fileSHA256Hex(resolvedXMLSec)
+			if hashErr != nil {
+				return fmt.Errorf("hash saml_xmlsec_path: %w", hashErr)
+			}
+			if actualXMLSecHash != wantedXMLSecHash {
+				return errors.New("saml_xmlsec_path SHA-256 does not match saml_xmlsec_sha256")
+			}
+			c.SSO.SAMLXMLSecPath = resolvedXMLSec
+			c.SSO.SAMLXMLSecSHA256 = wantedXMLSecHash
 			if !strings.Contains(c.SSO.SAMLIdPCertificate, "BEGIN CERTIFICATE") && !filepath.IsAbs(c.SSO.SAMLIdPCertificate) {
 				return errors.New("saml_idp_certificate must contain PEM data or use an absolute file path")
 			}
@@ -311,7 +353,7 @@ func (c *Config) normalizeEnterprise() error {
 		}
 	}
 	if c.LLM.Enabled && c.LLM.Provider != "anthropic" && strings.Contains(strings.ToLower(c.LLM.Endpoint), "anthropic.com") {
-		return errors.New("Anthropic endpoints require llm provider anthropic; the OpenAI compatibility layer is not accepted for production configuration")
+		return errors.New("anthropic endpoints require llm provider anthropic; the OpenAI compatibility layer is not accepted for production configuration")
 	}
 	if c.LLM.Enabled && c.LLM.DataPolicy == "local_only" && !isLoopbackEndpoint(c.LLM.Endpoint) {
 		return errors.New("llm data_policy local_only requires a loopback endpoint; use redacted_remote or metadata_only only after an explicit data review")
@@ -351,12 +393,42 @@ func (c *Config) normalizeEnterprise() error {
 	if c.ChatOps.QuarantineDuration == "" {
 		c.ChatOps.QuarantineDuration = "7d"
 	}
+	if c.ChatOps.SlackTeamTenants == nil {
+		c.ChatOps.SlackTeamTenants = map[string]string{}
+	}
+	normalizedSlackTeams := make(map[string]string, len(c.ChatOps.SlackTeamTenants))
+	for rawTeam, rawTenant := range c.ChatOps.SlackTeamTenants {
+		team := strings.TrimSpace(rawTeam)
+		tenant := strings.ToLower(strings.TrimSpace(rawTenant))
+		if team == "" || tenant == "" {
+			return errors.New("chatops slack_team_tenants requires non-empty team and tenant ids")
+		}
+		if existing, ok := normalizedSlackTeams[strings.ToLower(team)]; ok && existing != tenant {
+			return fmt.Errorf("chatops Slack team %q is mapped to multiple tenants", team)
+		}
+		normalizedSlackTeams[strings.ToLower(team)] = tenant
+	}
+	c.ChatOps.SlackTeamTenants = normalizedSlackTeams
 	if c.ChatOps.Enabled {
 		if c.ChatOps.SlackSigningSecret == "" && c.ChatOps.TeamsSigningSecret == "" {
 			return errors.New("chatops requires a Slack or Teams signing secret")
 		}
-		if c.ChatOps.SlackSigningSecret != "" && len(c.ChatOps.SlackAllowedUsers) == 0 && len(c.ChatOps.SlackAllowedTeams) == 0 {
-			return errors.New("chatops Slack requires slack_allowed_users or slack_allowed_teams")
+		if c.ChatOps.SlackSigningSecret != "" {
+			if len(c.ChatOps.SlackAllowedUsers) == 0 && len(c.ChatOps.SlackAllowedTeams) == 0 {
+				return errors.New("chatops Slack requires slack_allowed_users or slack_allowed_teams")
+			}
+			if len(c.ChatOps.SlackTeamTenants) == 0 {
+				return errors.New("chatops Slack requires explicit slack_team_tenants bindings")
+			}
+			for _, rawTeam := range c.ChatOps.SlackAllowedTeams {
+				team := strings.ToLower(strings.TrimSpace(rawTeam))
+				if team == "" {
+					return errors.New("chatops slack_allowed_teams contains an empty team id")
+				}
+				if _, ok := c.ChatOps.SlackTeamTenants[team]; !ok {
+					return fmt.Errorf("chatops Slack team %q has no tenant binding", rawTeam)
+				}
+			}
 		}
 		if c.ChatOps.TeamsSigningSecret != "" && len(c.ChatOps.TeamsAllowedUsers) == 0 {
 			return errors.New("chatops Teams requires teams_allowed_users")

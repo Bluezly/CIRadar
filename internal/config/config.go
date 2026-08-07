@@ -205,14 +205,14 @@ func Default() Config {
 		Semantic:                      SemanticConfig{Enabled: true, RemoteEmbeddings: false, VectorDimensions: 128, CandidateLimit: 500},
 		PredictiveTests:               PredictiveTestConfig{Enabled: true, DefaultLimit: 100, MinimumScore: 20, AlwaysRunFlaky: true, AlwaysRunFailed: true},
 		Notifications: NotificationConfig{Enabled: false, Channels: []NotificationChannel{
-			{Name: "slack-ops", Type: "slack", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "discord-ops", Type: "discord", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "telegram-ops", Type: "telegram", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "custom-webhook", Type: "webhook", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "teams-ops", Type: "teams", Enabled: false, Events: []string{"incident_opened", "incident_updated", "incident_resolved"}, MinimumScore: 70, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "slack-ops", Type: "slack", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "test_quarantined", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "discord-ops", Type: "discord", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "test_quarantined", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "telegram-ops", Type: "telegram", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "test_quarantined", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "custom-webhook", Type: "webhook", Enabled: false, Events: []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "test_quarantined", "repair_pr_created"}, MinimumScore: 60, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
+			{Name: "teams-ops", Type: "teams", Enabled: false, Events: []string{"incident_opened", "incident_updated", "incident_resolved", "test_quarantined"}, MinimumScore: 70, CooldownText: "15m", TimeoutText: "10s", MaxAttempts: 5},
 			{Name: "pagerduty-ops", Type: "pagerduty", Enabled: false, Events: []string{"incident_opened", "incident_updated", "incident_resolved"}, MinimumSeverity: "major", CooldownText: "5m", TimeoutText: "10s", MaxAttempts: 5},
 			{Name: "opsgenie-ops", Type: "opsgenie", Enabled: false, Events: []string{"incident_opened", "incident_updated", "incident_resolved"}, MinimumSeverity: "major", CooldownText: "5m", TimeoutText: "10s", MaxAttempts: 5},
-			{Name: "email-ops", Type: "email", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_resolved", "test_flaky"}, MinimumScore: 75, CooldownText: "15m", TimeoutText: "15s", MaxAttempts: 5, SMTPMode: "starttls", SMTPPort: 587},
+			{Name: "email-ops", Type: "email", Enabled: false, Events: []string{"analysis", "incident_opened", "incident_resolved", "test_flaky", "test_quarantined", "repair_pr_created"}, MinimumScore: 75, CooldownText: "15m", TimeoutText: "15s", MaxAttempts: 5, SMTPMode: "starttls", SMTPPort: 587},
 		}},
 		Connectors: []CIConnector{
 			{Name: "gitlab", Provider: "gitlab", Enabled: false, TenantID: "default", BaseURL: "https://gitlab.com"},
@@ -539,7 +539,7 @@ func (c *Config) normalize() error {
 			ch.MinimumScore = 100
 		}
 		if len(ch.Events) == 0 {
-			ch.Events = []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "repair_pr_created"}
+			ch.Events = []string{"analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test_flaky", "test_quarantined", "repair_pr_created"}
 		}
 		if ch.Timezone == "" {
 			ch.Timezone = "UTC"
@@ -748,7 +748,7 @@ func validSeverity(v string, allowEmpty bool) bool {
 
 func validNotificationEvent(v string) bool {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test", "test_flaky", "repair_pr_created":
+	case "analysis", "environment_changed", "incident_opened", "incident_updated", "incident_resolved", "test", "test_flaky", "test_quarantined", "repair_pr_created":
 		return true
 	default:
 		return false
