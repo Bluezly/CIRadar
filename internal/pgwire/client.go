@@ -24,6 +24,8 @@ import (
 
 const maxProtocolMessageBytes = 256 << 20
 const maxBoundParameterBytes = 64 << 20
+const maxSCRAMMessageBytes = 16 << 10
+const maxSCRAMAttributes = 32
 
 type Config struct {
 	Host             string
@@ -323,6 +325,7 @@ func (c *Client) startup() error {
 		return err
 	}
 	var scr *scramState
+	authenticated := false
 	for {
 		typ, p, err := c.readMessage()
 		if err != nil {
@@ -339,9 +342,16 @@ func (c *Client) startup() error {
 			code := binary.BigEndian.Uint32(p[:4])
 			switch code {
 			case 0:
+				if scr != nil && !scr.verified {
+					return errors.New("postgres authentication completed before SCRAM server verification")
+				}
+				authenticated = true
 			case 3, 5:
 				return errors.New("legacy PostgreSQL cleartext/MD5 password authentication is disabled; configure SCRAM-SHA-256")
 			case 10:
+				if scr != nil {
+					return errors.New("duplicate postgres SASL authentication start")
+				}
 				if !saslMechanismOffered(p[4:], "SCRAM-SHA-256") {
 					return errors.New("postgres server did not offer SCRAM-SHA-256")
 				}
@@ -372,6 +382,9 @@ func (c *Client) startup() error {
 		case 'E':
 			return parseError(p)
 		case 'Z':
+			if !authenticated {
+				return errors.New("postgres became ready before authentication completed")
+			}
 			if err := c.setReadyStatus(p); err != nil {
 				return err
 			}
@@ -383,7 +396,6 @@ func (c *Client) startup() error {
 	}
 }
 
-func (c *Client) sendPassword(s string) error { return c.sendMessage('p', []byte(s)) }
 func (c *Client) sendMessage(t byte, p []byte) error {
 	if len(p) > maxProtocolMessageBytes-4 {
 		return errors.New("postgres protocol message is too large")
@@ -856,6 +868,8 @@ func appendInt32(b []byte, v int32) []byte {
 type scramState struct {
 	user, password, nonce, clientFirstBare, serverFirst, clientFinalWithout string
 	serverSignature                                                         []byte
+	continued                                                               bool
+	verified                                                                bool
 }
 
 func newSCRAM(user, password string) (*scramState, error) {
@@ -875,6 +889,9 @@ func (s *scramState) sendInitial(c *Client) error {
 	return c.sendMessage('p', p)
 }
 func (s *scramState) continueAuth(c *Client, server string) error {
+	if s.continued {
+		return errors.New("duplicate scram server-first message")
+	}
 	s.serverFirst = server
 	m, err := parseSCRAMFields(server)
 	if err != nil {
@@ -914,13 +931,23 @@ func (s *scramState) continueAuth(c *Client, server string) error {
 	serverKey := hmacSHA(salted, []byte("Server Key"))
 	s.serverSignature = hmacSHA(serverKey, []byte(auth))
 	final := s.clientFinalWithout + ",p=" + base64.StdEncoding.EncodeToString(proof)
-	return c.sendMessage('p', []byte(final))
+	if err := c.sendMessage('p', []byte(final)); err != nil {
+		return err
+	}
+	s.continued = true
+	return nil
 }
 func validSCRAMIterationCount(iter int) bool {
 	return iter >= 4096 && iter <= 1_000_000
 }
 
 func (s *scramState) verifyFinal(final string) error {
+	if !s.continued {
+		return errors.New("scram server-final message arrived before server-first verification")
+	}
+	if s.verified {
+		return errors.New("duplicate scram server-final message")
+	}
 	m, err := parseSCRAMFields(final)
 	if err != nil {
 		return err
@@ -942,12 +969,23 @@ func (s *scramState) verifyFinal(final string) error {
 	if !hmac.Equal(v, s.serverSignature) {
 		return errors.New("scram server signature mismatch")
 	}
+	s.verified = true
 	return nil
 }
 
 func parseSCRAMFields(value string) (map[string]string, error) {
+	if value == "" {
+		return nil, errors.New("malformed scram attribute")
+	}
+	if len(value) > maxSCRAMMessageBytes {
+		return nil, errors.New("scram message is too large")
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) > maxSCRAMAttributes {
+		return nil, errors.New("scram message has too many attributes")
+	}
 	fields := map[string]string{}
-	for _, part := range strings.Split(value, ",") {
+	for _, part := range parts {
 		if len(part) < 2 || part[1] != '=' {
 			return nil, errors.New("malformed scram attribute")
 		}
