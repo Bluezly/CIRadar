@@ -677,6 +677,9 @@ func (s *Server) analysisFeedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
+	if analysis, lookupErr := s.store.GetAnalysisForTenant(r.Context(), p.TenantID, r.PathValue("id")); lookupErr == nil && analysis != nil {
+		s.analyzer.RememberFeedback(*analysis, f)
+	}
 	s.audit(r, "analysis.feedback", "analysis", r.PathValue("id"), map[string]string{"verdict": f.Verdict, "actual_category": string(f.ActualCategory), "actual_cause": string(f.ActualCause), "actual_provider": f.ActualProvider, "actual_error_family": f.ActualErrorFamily})
 	writeJSON(w, 200, f)
 }
@@ -1030,7 +1033,7 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	if in.Organization == "" && strings.Contains(in.Repository, "/") {
 		in.Organization = strings.SplitN(in.Repository, "/", 2)[0]
 	}
-	initial := s.analyzer.Analyze(in, analyzer.Context{})
+	initial := s.analyzer.AnalyzeWithMemory(in, analyzer.Context{})
 	corr, err := s.store.CorrelationForTenant(r.Context(), p.TenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-s.cfg.IncidentWindow), s.cfg.CrossTenantCorrelation)
 	if err != nil {
 		s.internalError(w, r, err)
@@ -1046,7 +1049,7 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	result := s.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: providerIncident, PreviousEnvironment: prev})
+	result := s.analyzer.AnalyzeWithMemory(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: providerIncident, PreviousEnvironment: prev})
 	if err := s.store.RecordAnalysisForTenant(r.Context(), p.TenantID, in, result, s.cfg.StoreRedactedExcerpts, s.cfg.StoreRawLogs); err != nil {
 		s.internalError(w, r, err)
 		return
