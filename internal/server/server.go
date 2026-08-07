@@ -713,6 +713,7 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auto := []model.TestQuarantine{}
+	autoQuarantined := map[string]struct{}{}
 	if s.cfg.TestIntelligence.Enabled && s.cfg.TestIntelligence.AutoQuarantine {
 		owner := "ci-radar"
 		profile, profileErr := s.store.GetRepositoryProfile(r.Context(), p.TenantID, q.Get("repository"))
@@ -732,8 +733,12 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 			qu, e := s.store.SetTestQuarantine(r.Context(), model.TestQuarantine{TenantID: p.TenantID, TestKey: st.TestKey, Reason: "Automatic quarantine: repeated pass/fail transitions", Owner: owner, CreatedBy: "system", ExpiresAt: time.Now().UTC().Add(s.cfg.TestIntelligence.AutoQuarantineDuration)})
 			if e == nil {
 				auto = append(auto, qu)
+				autoQuarantined[st.TestKey] = struct{}{}
 				if auditErr := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: "system", Role: model.RoleOperator, Action: "test.auto_quarantine", Resource: "test", ResourceID: st.TestKey, Metadata: map[string]string{"repository": st.Repository, "score": fmt.Sprintf("%.1f", st.FlakeScore)}}); auditErr != nil {
 					s.log.Error("record auto-quarantine audit failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", auditErr)
+				}
+				if enqueueErr := s.store.EnqueueForTenant(r.Context(), p.TenantID, "notify.event", notifications.TestQuarantinedEvent(st, qu, s.cfg.PublicBaseURL), time.Now().UTC()); enqueueErr != nil {
+					s.log.Error("enqueue auto-quarantine notification failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", enqueueErr)
 				}
 			} else {
 				s.log.Error("auto-quarantine test failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", e)
@@ -741,7 +746,8 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, st := range stats {
-		if st.Classification == "flaky" && !st.Quarantined {
+		_, quarantinedNow := autoQuarantined[st.TestKey]
+		if st.Classification == "flaky" && !st.Quarantined && !quarantinedNow {
 			if enqueueErr := s.store.EnqueueForTenant(r.Context(), p.TenantID, "notify.event", notifications.FlakyTestEvent(st, s.cfg.PublicBaseURL), time.Now().UTC()); enqueueErr != nil {
 				s.log.Error("enqueue flaky-test notification failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", enqueueErr)
 			}

@@ -69,6 +69,11 @@ func (s *Server) slackChatOps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 403, "Slack user or team is not allowed")
 		return
 	}
+	tenant, ok := s.slackTenant(payload.Team.ID)
+	if !ok {
+		writeError(w, 403, "Slack workspace is not bound to a tenant")
+		return
+	}
 	if len(payload.Actions) == 0 {
 		writeError(w, 400, "missing action")
 		return
@@ -84,7 +89,7 @@ func (s *Server) slackChatOps(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"response_type": "ephemeral", "text": "CI Radar: duplicate request ignored"})
 		return
 	}
-	msg, e := s.performChatAction(r, payload.Actions[0].Value, firstNonEmpty(payload.User.Username, payload.User.ID))
+	msg, e := s.performChatActionForTenant(r, payload.Actions[0].Value, firstNonEmpty(payload.User.Username, payload.User.ID), tenant)
 	if e != nil {
 		writeJSON(w, 200, map[string]any{"response_type": "ephemeral", "text": "CI Radar: " + e.Error()})
 		return
@@ -187,14 +192,34 @@ func allowed(v string, list []string) bool {
 	}
 	return false
 }
+func (s *Server) slackTenant(teamID string) (string, bool) {
+	teamID = strings.ToLower(strings.TrimSpace(teamID))
+	if teamID == "" {
+		return "", false
+	}
+	tenant, ok := s.cfg.ChatOps.SlackTeamTenants[teamID]
+	tenant = strings.ToLower(strings.TrimSpace(tenant))
+	return tenant, ok && tenant != ""
+}
+
 func (s *Server) performChatAction(r *http.Request, value, actor string) (string, error) {
+	return s.performChatActionForTenant(r, value, actor, "")
+}
+
+func (s *Server) performChatActionForTenant(r *http.Request, value, actor, boundTenant string) (string, error) {
 	parts := strings.SplitN(value, "|", 3)
 	if len(parts) != 3 {
 		return "", fmt.Errorf("invalid action")
 	}
-	tenant, action, id := parts[0], parts[1], parts[2]
-	if tenant == "" {
-		tenant = s.cfg.ChatOps.DefaultTenant
+	tenant, action, id := strings.ToLower(strings.TrimSpace(parts[0])), parts[1], parts[2]
+	boundTenant = strings.ToLower(strings.TrimSpace(boundTenant))
+	if boundTenant != "" {
+		if tenant != "" && tenant != boundTenant {
+			return "", fmt.Errorf("action tenant does not match Slack workspace")
+		}
+		tenant = boundTenant
+	} else if tenant == "" {
+		tenant = strings.ToLower(strings.TrimSpace(s.cfg.ChatOps.DefaultTenant))
 	}
 	switch action {
 	case "ack":

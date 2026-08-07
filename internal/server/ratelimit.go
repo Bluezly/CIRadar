@@ -93,11 +93,6 @@ func (l *rateLimiter) take(key string, now time.Time) (bool, time.Duration) {
 	return false, retry
 }
 
-func (l *rateLimiter) allow(key string, now time.Time) bool {
-	allowed, _ := l.take(key, now)
-	return allowed
-}
-
 func remoteIP(remote string) net.IP {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(remote))
 	if err != nil {
