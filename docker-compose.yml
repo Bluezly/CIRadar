@@ -18,7 +18,7 @@ services:
     build:
       context: .
       args:
-        VERSION: 1.3.2-oss-rc.9
+        VERSION: 1.3.2-oss-rc.11
     restart: unless-stopped
     depends_on:
       postgres:
@@ -26,6 +26,8 @@ services:
     ports:
       - "8787:8787"
     environment:
+      CIRADAR_LISTEN: 0.0.0.0:8787
+      CIRADAR_PUBLIC_BASE_URL: ${CIRADAR_PUBLIC_BASE_URL:?set CIRADAR_PUBLIC_BASE_URL to the externally reachable HTTPS origin}
       CIRADAR_DATABASE_DRIVER: postgres
       CIRADAR_DATABASE_URL: postgres://ciradar:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/ciradar?sslmode=disable
       CIRADAR_MASTER_KEY: ${CIRADAR_MASTER_KEY:?set CIRADAR_MASTER_KEY from ciradar secret key}

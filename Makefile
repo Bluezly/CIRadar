@@ -1,5 +1,5 @@
-.PHONY: test vet build windows linux darwin checksums clean
-VERSION ?= 1.3.2-oss-rc.9
+.PHONY: test vet staticcheck build windows linux darwin checksums clean
+VERSION ?= 1.3.2-oss-rc.11
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 STRIP ?= 1
@@ -10,6 +10,8 @@ test:
 	go test -race ./...
 vet:
 	go vet ./...
+staticcheck:
+	staticcheck ./...
 windows:
 	mkdir -p dist
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags "$(LDFLAGS)" -o dist/CIRadar-Windows-x64.exe ./cmd/ciradar
