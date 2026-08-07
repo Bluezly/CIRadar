@@ -318,6 +318,28 @@ func TestNegativeCodeScorePassesEvidenceFilter(t *testing.T) {
 	}
 }
 
+func TestAutomaticQuarantineEventIsDedicatedAndHasNoQuarantineButton(t *testing.T) {
+	now := time.Now().UTC()
+	st := model.TestCaseStats{TenantID: "alpha", TestKey: "test-key", Repository: "acme/api", Framework: "junit", Name: "Calc.adds", FlakeScore: 72.5, TotalRuns: 12}
+	q := model.TestQuarantine{TenantID: "alpha", TestKey: st.TestKey, Owner: "platform", Reason: "Automatic quarantine: repeated pass/fail transitions", CreatedBy: "system", CreatedAt: now, ExpiresAt: now.Add(48 * time.Hour), Active: true}
+	ev := TestQuarantinedEvent(st, q, "https://ciradar.example")
+	if ev.Type != "test_quarantined" || ev.TenantID != "alpha" || ev.Fingerprint != st.TestKey || ev.Operation != "test-quarantine" {
+		t.Fatalf("event=%#v", ev)
+	}
+	payload := slackPayload(config.NotificationChannel{}, ev)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "automatically quarantined") || !strings.Contains(text, "platform") {
+		t.Fatalf("Slack quarantine payload missing context: %s", text)
+	}
+	if strings.Contains(text, "Quarantine 7 days") || strings.Contains(text, "ciradar_quarantine") {
+		t.Fatalf("already-quarantined event exposed quarantine action: %s", text)
+	}
+}
+
 func TestRepairPRCreatedEventRoutesToSlackAndLinksDraft(t *testing.T) {
 	analysis := model.AnalysisResult{ID: "analysis-1", TenantID: "alpha", Category: model.CategoryCodeFailure, Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -88, EvidenceStrength: 88, CodeEvidenceScore: 88, Fingerprint: "fp-1"}
 	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", CommitSHA: "abc123"}
