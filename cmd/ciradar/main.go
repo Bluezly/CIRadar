@@ -508,6 +508,10 @@ func cmdServe(args []string) error {
 		return err
 	}
 	var githubClient *gh.Client
+	if cfg.SSO.Enabled && cfg.SSO.Mode == "saml" {
+		fmt.Println("  Native SAML profile:", cfg.SSO.SAMLSecurityProfile)
+		fmt.Println("  Native SAML warning: xmlsec1 verifies signatures, but protocol parsing remains project-maintained and needs independent security review")
+	}
 	if cfg.GitHubConfigured() {
 		githubClient, err = gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL, cfg.GitHubAllowPrivateNetwork)
 		if err != nil {
@@ -951,6 +955,7 @@ func cmdDoctor(args []string) error {
 	}
 	if cfg.DatabaseDriver == "postgres" {
 		fmt.Println("  Database: PostgreSQL")
+		fmt.Println("  PostgreSQL driver warning: built-in pgwire remains custom; use independent security review before high-risk production")
 	} else {
 		fmt.Println("  Database:", cfg.DatabasePath)
 	}
