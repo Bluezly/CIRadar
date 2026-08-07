@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"ciradar/internal/analyzer"
+	"ciradar/internal/benchmark"
 	"ciradar/internal/config"
 	"ciradar/internal/db"
 	gh "ciradar/internal/github"
@@ -54,6 +56,8 @@ func main() {
 		err = cmdDemo(os.Args[2:])
 	case "baseline":
 		err = cmdBaseline(os.Args[2:])
+	case "benchmark":
+		err = cmdBenchmark(os.Args[2:])
 	case "incidents":
 		err = cmdIncidents(os.Args[2:])
 	case "status":
@@ -120,6 +124,7 @@ Usage:
   ciradar analyze [--config ciradar.json] [--json] [--correlate] <log-file|->
   ciradar demo [--config ciradar.json] [--json] npm-econnreset|go-test-failure
   ciradar baseline [--config ciradar.json] --repo OWNER/REPO <successful-log>
+  ciradar benchmark --dataset PATH [--config ciradar.json] [--json] [thresholds]
   ciradar incidents [--config ciradar.json] [--json]
   ciradar status [--config ciradar.json] [--json]
   ciradar export [--config ciradar.json] --output report.json
@@ -150,6 +155,148 @@ Fast local test:
   ciradar demo npm-econnreset
   ciradar serve
 `)
+}
+
+func cmdBenchmark(args []string) error {
+	fs := flag.NewFlagSet("benchmark", flag.ContinueOnError)
+	datasetPath := fs.String("dataset", "", "labeled benchmark dataset JSON")
+	split := fs.String("split", "", "evaluate only train, dev, or test cases")
+	configPath := fs.String("config", "", "optional CI Radar configuration for custom rules and redaction")
+	jsonOutput := fs.Bool("json", false, "print the full benchmark report as JSON")
+	output := fs.String("output", "", "write the JSON report to a file")
+	minimumCases := fs.Int("min-cases", 0, "fail if the benchmark contains fewer labeled cases")
+	minimumAccuracy := fs.Float64("min-category-accuracy", 0, "fail if category accuracy is below this 0..1 threshold")
+	minimumMacroF1 := fs.Float64("min-macro-f1", 0, "fail if macro F1 is below this 0..1 threshold")
+	minimumCoverage := fs.Float64("min-coverage", 0, "fail if non-UNKNOWN coverage is below this 0..1 threshold")
+	maximumUnknown := fs.Float64("max-unknown-rate", 0, "fail if UNKNOWN rate exceeds this 0..1 threshold")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	maximumUnknownSet := false
+	fs.Visit(func(value *flag.Flag) {
+		if value.Name == "max-unknown-rate" {
+			maximumUnknownSet = true
+		}
+	})
+	if strings.TrimSpace(*datasetPath) == "" {
+		return errors.New("--dataset is required")
+	}
+	if *minimumCases < 0 {
+		return errors.New("--min-cases must be zero or greater")
+	}
+	for name, value := range map[string]float64{
+		"--min-category-accuracy": *minimumAccuracy,
+		"--min-macro-f1":          *minimumMacroF1,
+		"--min-coverage":          *minimumCoverage,
+		"--max-unknown-rate":      *maximumUnknown,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 1 {
+			return fmt.Errorf("%s must be a finite value between 0 and 1", name)
+		}
+	}
+
+	dataset, err := benchmark.Load(*datasetPath)
+	if err != nil {
+		return err
+	}
+	dataset, err = benchmark.Select(dataset, *split)
+	if err != nil {
+		return err
+	}
+	var engine *analyzer.Analyzer
+	if strings.TrimSpace(*configPath) == "" {
+		engine = analyzer.New("ciradar-public-benchmark-v1")
+	} else {
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		engine, err = buildAnalyzer(cfg)
+		if err != nil {
+			return err
+		}
+	}
+	report := benchmark.Evaluate(engine, dataset)
+	if strings.TrimSpace(*output) != "" {
+		body, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return err
+		}
+		body = append(body, '\n')
+		if err := os.WriteFile(filepath.Clean(*output), body, 0o600); err != nil {
+			return err
+		}
+	}
+	if *jsonOutput {
+		if err := printJSON(report); err != nil {
+			return err
+		}
+	} else {
+		printBenchmarkReport(report)
+	}
+	return benchmark.CheckThresholds(report, benchmark.Thresholds{
+		MinimumCases:              *minimumCases,
+		MinimumCategoryAccuracy:   *minimumAccuracy,
+		MinimumMacroF1:            *minimumMacroF1,
+		MinimumCoverage:           *minimumCoverage,
+		MaximumUnknownRate:        *maximumUnknown,
+		MaximumUnknownRateEnabled: maximumUnknownSet,
+	})
+}
+
+func printBenchmarkReport(report benchmark.Report) {
+	fmt.Printf("CI Radar benchmark: %s", report.Dataset)
+	if report.DatasetVersion != "" {
+		fmt.Printf(" %s", report.DatasetVersion)
+	}
+	if report.Split != "" {
+		fmt.Printf(" [%s]", report.Split)
+	}
+	fmt.Println()
+	fmt.Printf("Cases              : %d\n", report.Cases)
+	fmt.Printf("Dataset SHA-256    : %s\n", report.DatasetDigestSHA256)
+	fmt.Printf("Analyzer SHA-256   : %s\n", report.AnalyzerDigestSHA256)
+	fmt.Printf("Category accuracy  : %.2f%% (95%% CI %.2f%%..%.2f%%)\n", report.CategoryAccuracy*100, report.CategoryAccuracyCI95Low*100, report.CategoryAccuracyCI95High*100)
+	fmt.Printf("Macro precision    : %.2f%%\n", report.MacroPrecision*100)
+	fmt.Printf("Macro recall       : %.2f%%\n", report.MacroRecall*100)
+	fmt.Printf("Macro F1           : %.2f%%\n", report.MacroF1*100)
+	fmt.Printf("Coverage           : %.2f%% (95%% CI %.2f%%..%.2f%%)\n", report.Coverage*100, report.CoverageCI95Low*100, report.CoverageCI95High*100)
+	fmt.Printf("UNKNOWN rate       : %.2f%%\n", report.UnknownRate*100)
+	fmt.Printf("Covered accuracy   : %.2f%%\n", report.CoveredAccuracy*100)
+	fmt.Printf("Rule match coverage: %.2f%% (%d cases)\n", report.RuleMatchCoverage*100, report.CasesWithMatchedRules)
+	fmt.Printf("Rule utilization   : %.2f%% (%d/%d rules matched)\n", report.RuleUtilization*100, report.DistinctRulesMatched, report.RulesAvailable)
+	if report.AttributionCases > 0 {
+		fmt.Printf("Attribution accuracy: %.2f%% (%d labeled cases)\n", report.AttributionAccuracy*100, report.AttributionCases)
+	}
+	if report.ProviderCases > 0 {
+		fmt.Printf("Provider accuracy  : %.2f%% (%d labeled cases)\n", report.ProviderAccuracy*100, report.ProviderCases)
+	}
+	if report.ErrorFamilyCases > 0 {
+		fmt.Printf("Error-family accuracy: %.2f%% (%d labeled cases)\n", report.ErrorFamilyAccuracy*100, report.ErrorFamilyCases)
+	}
+	if len(report.ByCategory) > 0 {
+		fmt.Println("\nPer-category precision / recall / F1:")
+		for _, metric := range report.ByCategory {
+			fmt.Printf("  %-24s p=%6.2f%% r=%6.2f%% f1=%6.2f%% n=%d\n", metric.Label, metric.Precision*100, metric.Recall*100, metric.F1*100, metric.Support)
+		}
+	}
+	if len(report.Misclassified) > 0 {
+		fmt.Printf("\nMisclassified or secondary-label mismatches: %d\n", len(report.Misclassified))
+		limit := len(report.Misclassified)
+		if limit > 20 {
+			limit = 20
+		}
+		for _, failure := range report.Misclassified[:limit] {
+			fmt.Printf("  %s: category %s -> %s", failure.ID, failure.ExpectedCategory, failure.PredictedCategory)
+			if failure.ExpectedAttribution != "" && failure.ExpectedAttribution != failure.PredictedAttribution {
+				fmt.Printf(", attribution %s -> %s", failure.ExpectedAttribution, failure.PredictedAttribution)
+			}
+			fmt.Println()
+		}
+		if len(report.Misclassified) > limit {
+			fmt.Printf("  ... %d more; use --json or --output for the full list\n", len(report.Misclassified)-limit)
+		}
+	}
 }
 
 func cmdRepair(args []string) error {
