@@ -28,6 +28,7 @@ type Analyzer struct {
 	fingerprintKey      []byte
 	maxExcerpt          int
 	configurationDigest string
+	memory              *diagnosticMemory
 }
 
 func New(fingerprintKey string, extraRules ...Rule) *Analyzer {
@@ -37,7 +38,7 @@ func New(fingerprintKey string, extraRules ...Rule) *Analyzer {
 func NewConfigured(fingerprintKey string, redactionPatterns []string, entropyDetection bool, extraRules ...Rule) *Analyzer {
 	rules := BuiltinRules()
 	rules = append(rules, extraRules...)
-	return &Analyzer{rules: rules, redactor: NewRedactorWithPatterns(redactionPatterns, entropyDetection), fingerprintKey: []byte(strings.TrimSpace(fingerprintKey)), maxExcerpt: 5000, configurationDigest: configurationDigest(rules, redactionPatterns, entropyDetection)}
+	return &Analyzer{rules: rules, redactor: NewRedactorWithPatterns(redactionPatterns, entropyDetection), fingerprintKey: []byte(strings.TrimSpace(fingerprintKey)), maxExcerpt: 5000, configurationDigest: configurationDigest(rules, redactionPatterns, entropyDetection), memory: newDiagnosticMemory()}
 }
 
 func (a *Analyzer) ConfigurationDigest() string {

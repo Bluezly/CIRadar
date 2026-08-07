@@ -23,7 +23,7 @@ type Rule struct {
 func re(s string) *regexp.Regexp { return regexp.MustCompile(`(?i)` + s) }
 
 func BuiltinRules() []Rule {
-	return []Rule{
+	rules := []Rule{
 
 		{ID: "browser-no-display", Category: model.CategoryCodeFailure, Provider: "Browser test runner", Operation: "browser-launch", ErrorFamily: "display-server-missing", Weight: -58, SignalGroup: "deterministic", Summary: "A headed browser was launched without an available display server", Recommendation: "Run headless or start the job under Xvfb and verify the display configuration.", Patterns: []*regexp.Regexp{re(`headed browser without having (an? )?XServer|use ['\"]?xvfb-run|DISPLAY.*X11 server.*not working`)}},
 		{ID: "browser-test-timeout", Category: model.CategoryTestFlake, Provider: "Browser test runner", Operation: "test-execution", ErrorFamily: "browser-test-timeout", Weight: 38, SignalGroup: "test-flake", Summary: "A browser test or navigation exceeded its timeout", Recommendation: "Retry once, then inspect deterministic waits, page readiness, and runner load if it repeats.", Patterns: []*regexp.Regexp{re(`page\.(goto|waitFor|click).*Test timeout of \d+ms exceeded|The action .* has timed out after \d+ minutes|cy\.(then|visit|get).*timed out after \d+ms`)}},
@@ -194,4 +194,5 @@ func BuiltinRules() []Rule {
 		{ID: "test-assertion", Category: model.CategoryCodeFailure, Provider: "test-runner", Operation: "test", ErrorFamily: "assertion-failure", Weight: -38, SignalGroup: "deterministic", Summary: "A deterministic test assertion failed", Recommendation: "Inspect the failing assertion and changes affecting the tested behavior.", Patterns: []*regexp.Regexp{re(`AssertionError|expected .* (to equal|but got)|Tests:.*failed`)}, Excludes: []*regexp.Regexp{re(`timeout|ECONNRESET|EAI_AGAIN|connection refused`)}},
 		{ID: "test-flake-retry", Category: model.CategoryTestFlake, Provider: "test-runner", Operation: "test", ErrorFamily: "flaky-retry", Weight: 25, SignalGroup: "flake", Summary: "Test behavior indicates a possible flake", Recommendation: "Rerun the isolated test and inspect timing, ordering, network, or shared-state dependencies.", Patterns: []*regexp.Regexp{re(`flaky test|test.*is flaky|passed on retry|succeeds? on rerun|retrying failed test|test.*intermittent`)}},
 	}
+	return append(rules, ExtendedRules()...)
 }
