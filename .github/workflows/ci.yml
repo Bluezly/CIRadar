@@ -30,6 +30,8 @@ jobs:
         run: node --check internal/server/dashboard.js
       - name: Configuration syntax
         run: python3 -m json.tool ciradar.example.json >/dev/null
+      - name: Benchmark harness smoke test
+        run: go run ./cmd/ciradar benchmark --dataset benchmarks/example/dataset.json --split test --min-cases 3 --min-category-accuracy 1 --min-macro-f1 1 --min-coverage 0.66 --max-unknown-rate 0.34
 
   postgres-integration:
     runs-on: ubuntu-24.04
