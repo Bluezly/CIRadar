@@ -58,7 +58,8 @@
           "incident_opened",
           "incident_updated",
           "incident_resolved",
-          "test_flaky"
+          "test_flaky",
+          "repair_pr_created"
         ],
         "minimum_score": 60,
         "cooldown": "15m",
@@ -77,7 +78,8 @@
           "incident_opened",
           "incident_updated",
           "incident_resolved",
-          "test_flaky"
+          "test_flaky",
+          "repair_pr_created"
         ],
         "minimum_score": 60,
         "cooldown": "15m",
@@ -96,7 +98,8 @@
           "incident_opened",
           "incident_updated",
           "incident_resolved",
-          "test_flaky"
+          "test_flaky",
+          "repair_pr_created"
         ],
         "minimum_score": 60,
         "cooldown": "15m",
@@ -116,7 +119,8 @@
           "incident_opened",
           "incident_updated",
           "incident_resolved",
-          "test_flaky"
+          "test_flaky",
+          "repair_pr_created"
         ],
         "minimum_score": 60,
         "cooldown": "15m",
@@ -180,7 +184,8 @@
           "analysis",
           "incident_opened",
           "incident_resolved",
-          "test_flaky"
+          "test_flaky",
+          "repair_pr_created"
         ],
         "minimum_score": 75,
         "cooldown": "15m",

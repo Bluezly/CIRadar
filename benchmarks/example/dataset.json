@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "name": "synthetic-smoke-do-not-publish",
+  "version": "1",
+  "description": "Synthetic fixtures used only to validate the benchmark command and schema.",
+  "sources": [
+    {
+      "name": "synthetic",
+      "version": "1"
+    }
+  ],
+  "cases": [
+    {
+      "id": "npm-reset",
+      "source": "synthetic",
+      "split": "train",
+      "tags": ["npm", "registry"],
+      "input": {
+        "source_provider": "github",
+        "repository": "example/service",
+        "log": "npm ERR! code ECONNRESET\nrequest to https://registry.npmjs.org/pkg failed"
+      },
+      "expected": {
+        "category": "DEPENDENCY_REGISTRY",
+        "attribution": "EXTERNAL",
+        "provider": "npm",
+        "error_family": "connection-reset"
+      }
+    },
+    {
+      "id": "assertion",
+      "source": "synthetic",
+      "split": "dev",
+      "tags": ["test", "assertion"],
+      "input": {
+        "source_provider": "github",
+        "repository": "example/service",
+        "log": "--- FAIL: TestTotal\nexpected 4, got 5"
+      },
+      "expected": {
+        "category": "CODE_FAILURE"
+      }
+    },
+    {
+      "id": "dns-test",
+      "source": "synthetic",
+      "split": "test",
+      "tags": ["network", "dns"],
+      "input": {
+        "source_provider": "github",
+        "repository": "example/service",
+        "log": "getaddrinfo ENOTFOUND oauth2.googleapis.com"
+      },
+      "expected": {
+        "category": "NETWORK_FAILURE",
+        "attribution": "EXTERNAL"
+      }
+    },
+    {
+      "id": "explicit-flake-test",
+      "source": "synthetic",
+      "split": "test",
+      "tags": ["test", "flaky"],
+      "input": {
+        "source_provider": "github",
+        "repository": "example/service",
+        "log": "This test is flaky and succeeds on rerun."
+      },
+      "expected": {
+        "category": "TEST_FLAKE"
+      }
+    },
+    {
+      "id": "private-tool-unknown",
+      "source": "synthetic",
+      "split": "test",
+      "tags": ["unknown", "private-tool"],
+      "input": {
+        "source_provider": "github",
+        "repository": "example/service",
+        "log": "frobnitz-runner returned internal status blue-17"
+      },
+      "expected": {
+        "category": "UNKNOWN"
+      }
+    }
+  ]
+}

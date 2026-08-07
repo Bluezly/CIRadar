@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ciradar.example/schemas/benchmark-dataset-v1.json",
+  "title": "CI Radar benchmark dataset v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "cases"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "minLength": 1},
+    "version": {"type": "string"},
+    "description": {"type": "string"},
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "url": {"type": "string"},
+          "license": {"type": "string"},
+          "version": {"type": "string"}
+        }
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "items": {"$ref": "#/$defs/case"}
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "input", "expected"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "source": {"type": "string"},
+        "split": {"enum": ["train", "dev", "test"]},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "input": {"$ref": "#/$defs/input"},
+        "log_file": {"type": "string"},
+        "context": {"$ref": "#/$defs/context"},
+        "expected": {"$ref": "#/$defs/expected"}
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_provider": {"type": "string"},
+        "source_run_url": {"type": "string"},
+        "pull_request_number": {"type": "integer"},
+        "merge_request_number": {"type": "integer"},
+        "tenant_id": {"type": "string"},
+        "repository": {"type": "string"},
+        "organization": {"type": "string"},
+        "workflow": {"type": "string"},
+        "job": {"type": "string"},
+        "run_id": {"type": "integer"},
+        "job_id": {"type": "integer"},
+        "commit_sha": {"type": "string"},
+        "previous_success": {"type": "boolean"},
+        "change_info_available": {"type": "boolean"},
+        "workflow_changed": {"type": "boolean"},
+        "dependency_changed": {"type": "boolean"},
+        "log": {"type": "string"},
+        "occurred_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "runner_os": {"type": "string"},
+        "runner_image": {"type": "string"},
+        "runner_arch": {"type": "string"},
+        "tool_versions": {"type": "object", "additionalProperties": {"type": "string"}},
+        "container_refs": {"type": "array", "items": {"type": "string"}},
+        "action_versions": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cross_repo_count": {"type": "integer"},
+        "cross_org_count": {"type": "integer"},
+        "recent_occurrences": {"type": "integer"},
+        "provider_incident": {"type": "boolean"},
+        "previous_environment": {"$ref": "#/$defs/environment"}
+      }
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category"],
+      "properties": {
+        "category": {
+          "enum": ["CODE_FAILURE", "TEST_FLAKE", "DEPENDENCY_REGISTRY", "NETWORK_FAILURE", "RUNNER_FAILURE", "RUNNER_IMAGE_DRIFT", "CACHE_FAILURE", "RESOURCE_EXHAUSTION", "PROVIDER_INCIDENT", "CONCURRENCY_CONFLICT", "TOOLCHAIN_FAILURE", "UNKNOWN"]
+        },
+        "attribution": {"enum": ["EXTERNAL", "CODE", "MIXED", "TOOLCHAIN", "UNKNOWN"]},
+        "provider": {"type": "string"},
+        "error_family": {"type": "string"}
+      }
+    }
+  }
+}
