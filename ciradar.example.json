@@ -59,6 +59,7 @@
           "incident_updated",
           "incident_resolved",
           "test_flaky",
+          "test_quarantined",
           "repair_pr_created"
         ],
         "minimum_score": 60,
@@ -79,6 +80,7 @@
           "incident_updated",
           "incident_resolved",
           "test_flaky",
+          "test_quarantined",
           "repair_pr_created"
         ],
         "minimum_score": 60,
@@ -99,6 +101,7 @@
           "incident_updated",
           "incident_resolved",
           "test_flaky",
+          "test_quarantined",
           "repair_pr_created"
         ],
         "minimum_score": 60,
@@ -120,6 +123,7 @@
           "incident_updated",
           "incident_resolved",
           "test_flaky",
+          "test_quarantined",
           "repair_pr_created"
         ],
         "minimum_score": 60,
@@ -135,7 +139,8 @@
         "events": [
           "incident_opened",
           "incident_updated",
-          "incident_resolved"
+          "incident_resolved",
+          "test_quarantined"
         ],
         "minimum_score": 70,
         "cooldown": "15m",
@@ -185,6 +190,7 @@
           "incident_opened",
           "incident_resolved",
           "test_flaky",
+          "test_quarantined",
           "repair_pr_created"
         ],
         "minimum_score": 75,
@@ -405,6 +411,7 @@
     "saml_idp_certificate": "/run/secrets/idp-signing-cert.pem",
     "saml_acs_url": "https://ci-radar.example.com/auth/callback",
     "saml_xmlsec_path": "/usr/bin/xmlsec1",
+    "saml_xmlsec_sha256": "",
     "saml_security_profile": "strict",
     "saml_name_attribute": "name",
     "saml_email_attribute": "email",
@@ -438,6 +445,7 @@
     "slack_signing_secret": "env:CIRADAR_SLACK_SIGNING_SECRET",
     "slack_allowed_users": [],
     "slack_allowed_teams": [],
+    "slack_team_tenants": {},
     "teams_signing_secret": "env:CIRADAR_TEAMS_SIGNING_SECRET",
     "teams_allowed_users": [],
     "allow_acknowledge": true,
