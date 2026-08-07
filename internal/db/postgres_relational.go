@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +20,7 @@ import (
 
 const (
 	pgSystemTenant              = "__system__"
-	postgresSchemaVersion int64 = 5
+	postgresSchemaVersion int64 = 8
 )
 
 const (
@@ -81,20 +82,50 @@ func pgAll(kind string) pgSpec {
 	return pgSpec{Kind: kind, All: true}
 }
 
-func sqlLiteral(value string) string {
-	value = strings.ReplaceAll(value, "\x00", "")
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
-}
-
-func sqlTime(value time.Time) string {
-	if value.IsZero() {
-		return "NULL"
+func nullableTextParam(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
 	}
-	return sqlLiteral(value.UTC().Format(time.RFC3339Nano)) + "::timestamptz"
+	return value
 }
 
-func jsonExpr(b []byte) string {
-	return `convert_from(decode('` + base64.StdEncoding.EncodeToString(b) + `','base64'),'UTF8')::jsonb`
+func nullableInt64Param(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullableTimeParam(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC()
+}
+
+var observationPartitionNamePattern = regexp.MustCompile(`^ciradar_test_observations_[0-9]{6}$`)
+
+func observationPartitionDDL(name string, from, to time.Time) (string, error) {
+	if !observationPartitionNamePattern.MatchString(name) {
+		return "", fmt.Errorf("invalid observation partition name %q", name)
+	}
+	fromText := from.UTC().Format(time.RFC3339)
+	toText := to.UTC().Format(time.RFC3339)
+	return `DO $ciradar_partition$
+BEGIN
+  IF to_regclass('` + name + `') IS NULL THEN
+    LOCK TABLE ciradar_test_observations IN ACCESS EXCLUSIVE MODE;
+    CREATE TABLE ` + name + ` (LIKE ciradar_test_observations INCLUDING ALL);
+    INSERT INTO ` + name + ` SELECT * FROM ciradar_test_observations_default
+      WHERE occurred_at >= '` + fromText + `'::timestamptz AND occurred_at < '` + toText + `'::timestamptz
+      ON CONFLICT DO NOTHING;
+    DELETE FROM ciradar_test_observations_default
+      WHERE occurred_at >= '` + fromText + `'::timestamptz AND occurred_at < '` + toText + `'::timestamptz;
+    ALTER TABLE ciradar_test_observations ATTACH PARTITION ` + name + `
+      FOR VALUES FROM ('` + fromText + `') TO ('` + toText + `');
+  END IF;
+END
+$ciradar_partition$`, nil
 }
 
 func decodePGBase64(s string) ([]byte, error) {
@@ -151,23 +182,28 @@ func normalizeSpecs(specs []pgSpec) []pgSpec {
 	return out
 }
 
-func specWhere(specs []pgSpec) string {
+func specWhere(specs []pgSpec) (string, []any) {
 	parts := make([]string, 0, len(specs))
+	args := make([]any, 0, len(specs)*3)
+	add := func(value any) string {
+		args = append(args, value)
+		return "$" + strconv.Itoa(len(args))
+	}
 	for _, spec := range specs {
 		if spec.All {
-			parts = append(parts, "kind="+sqlLiteral(spec.Kind))
-		} else {
-			part := "(tenant_id=" + sqlLiteral(spec.Tenant) + " AND kind=" + sqlLiteral(spec.Kind)
-			if spec.ObjectID != "" {
-				part += " AND object_id=" + sqlLiteral(spec.ObjectID)
-			}
-			parts = append(parts, part+")")
+			parts = append(parts, "kind="+add(spec.Kind))
+			continue
 		}
+		part := "(tenant_id=" + add(spec.Tenant) + " AND kind=" + add(spec.Kind)
+		if spec.ObjectID != "" {
+			part += " AND object_id=" + add(spec.ObjectID)
+		}
+		parts = append(parts, part+")")
 	}
 	if len(parts) == 0 {
-		return "FALSE"
+		return "FALSE", nil
 	}
-	return strings.Join(parts, " OR ")
+	return strings.Join(parts, " OR "), args
 }
 
 func matchesSpec(specs []pgSpec, object pgObject) bool {
@@ -214,6 +250,12 @@ func (p *PostgresBackend) migrateRelational(ctx context.Context, c *pgwire.Clien
 		`CREATE INDEX IF NOT EXISTS ciradar_jobs_claim_idx ON ciradar_jobs (status,available_at,id)`,
 		`CREATE INDEX IF NOT EXISTS ciradar_jobs_tenant_idx ON ciradar_jobs (tenant_id,status,available_at)`,
 		`CREATE TABLE IF NOT EXISTS ciradar_webhook_deliveries (id text PRIMARY KEY, event_type text NOT NULL, received_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL, error text NOT NULL DEFAULT '')`,
+		`CREATE UNLOGGED TABLE IF NOT EXISTS ciradar_rate_limits (scope text NOT NULL, key_hash text NOT NULL, window_start timestamptz NOT NULL, count bigint NOT NULL, updated_at timestamptz NOT NULL, PRIMARY KEY (scope,key_hash))`,
+		`CREATE INDEX IF NOT EXISTS ciradar_rate_limits_updated_idx ON ciradar_rate_limits (updated_at)`,
+		`CREATE TABLE IF NOT EXISTS ciradar_auth_failures (key_hash text PRIMARY KEY, window_start timestamptz NOT NULL, failures integer NOT NULL, blocked_until timestamptz, updated_at timestamptz NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS ciradar_auth_failures_updated_idx ON ciradar_auth_failures (updated_at)`,
+		`CREATE TABLE IF NOT EXISTS ciradar_sso_replays (key_hash text PRIMARY KEY, expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL)`,
+		`CREATE INDEX IF NOT EXISTS ciradar_sso_replays_expires_idx ON ciradar_sso_replays (expires_at)`,
 		`CREATE TABLE IF NOT EXISTS ciradar_test_observations (tenant_id text NOT NULL, id text NOT NULL, repository text NOT NULL, test_key text NOT NULL, framework text, workflow text, job text, run_id bigint, commit_sha text, branch text, status text NOT NULL, duration_ms bigint NOT NULL DEFAULT 0, occurred_at timestamptz NOT NULL, payload jsonb NOT NULL, ingested_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id,id,occurred_at)) PARTITION BY RANGE (occurred_at)`,
 	}
 	for _, statement := range statements {
@@ -250,10 +292,10 @@ func (p *PostgresBackend) migrateRelational(ctx context.Context, c *pgwire.Clien
 	if err := insertPGObjectIfMissing(ctx, c, object); err != nil {
 		return err
 	}
-	return c.Exec(ctx, `INSERT INTO ciradar_schema_migrations(version) VALUES (`+strconv.FormatInt(postgresSchemaVersion, 10)+`) ON CONFLICT (version) DO NOTHING`)
+	return c.ExecParams(ctx, `INSERT INTO ciradar_schema_migrations(version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, postgresSchemaVersion)
 }
 
-func observationPartitionStatements(now time.Time) []string {
+func observationPartitionStatements(now time.Time) ([]string, error) {
 	now = now.UTC()
 	month := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	out := make([]string, 0, 4)
@@ -261,27 +303,21 @@ func observationPartitionStatements(now time.Time) []string {
 		from := month.AddDate(0, offset, 0)
 		to := from.AddDate(0, 1, 0)
 		name := fmt.Sprintf("ciradar_test_observations_%04d%02d", from.Year(), int(from.Month()))
-		out = append(out, `DO $ciradar_partition$
-BEGIN
-  IF to_regclass(`+sqlLiteral(name)+`) IS NULL THEN
-    LOCK TABLE ciradar_test_observations IN ACCESS EXCLUSIVE MODE;
-    CREATE TABLE `+name+` (LIKE ciradar_test_observations INCLUDING ALL);
-    INSERT INTO `+name+` SELECT * FROM ciradar_test_observations_default
-      WHERE occurred_at >= `+sqlTime(from)+` AND occurred_at < `+sqlTime(to)+`
-      ON CONFLICT DO NOTHING;
-    DELETE FROM ciradar_test_observations_default
-      WHERE occurred_at >= `+sqlTime(from)+` AND occurred_at < `+sqlTime(to)+`;
-    ALTER TABLE ciradar_test_observations ATTACH PARTITION `+name+`
-      FOR VALUES FROM (`+sqlLiteral(from.Format(time.RFC3339))+`) TO (`+sqlLiteral(to.Format(time.RFC3339))+`);
-  END IF;
-END
-$ciradar_partition$`)
+		statement, err := observationPartitionDDL(name, from, to)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, statement)
 	}
-	return out
+	return out, nil
 }
 
 func ensureObservationPartitions(ctx context.Context, c *pgwire.Client, now time.Time) error {
-	for _, statement := range observationPartitionStatements(now) {
+	statements, err := observationPartitionStatements(now)
+	if err != nil {
+		return err
+	}
+	for _, statement := range statements {
 		if err := c.Exec(ctx, statement); err != nil {
 			return fmt.Errorf("ensure PostgreSQL observation partition: %w", err)
 		}
@@ -339,7 +375,7 @@ WHERE parent.relname='ciradar_test_observations'`)
 func backfillNativeTestObservations(ctx context.Context, c *pgwire.Client) error {
 	query := `INSERT INTO ciradar_test_observations(tenant_id,id,repository,test_key,framework,workflow,job,run_id,commit_sha,branch,status,duration_ms,occurred_at,payload)
 SELECT tenant_id,object_id,coalesce(repository,''),coalesce(payload->>'test_key',''),nullif(payload->>'framework',''),nullif(payload->>'workflow',''),nullif(payload->>'job',''),CASE WHEN coalesce(payload->>'run_id','') ~ '^[0-9]+$' THEN (payload->>'run_id')::bigint END,nullif(payload->>'commit_sha',''),nullif(payload->>'branch',''),coalesce(status,payload->>'status','unknown'),CASE WHEN coalesce(payload->>'duration_ms','') ~ '^[0-9]+$' THEN (payload->>'duration_ms')::bigint ELSE 0 END,coalesce(event_time,created_at),payload
-FROM ciradar_objects WHERE kind=` + sqlLiteral(pgKindObservation) + ` ON CONFLICT DO NOTHING`
+FROM ciradar_objects WHERE kind='test_observation' ON CONFLICT DO NOTHING`
 	return c.Exec(ctx, query)
 }
 
@@ -392,7 +428,7 @@ func (p *PostgresBackend) migrateLegacyState(ctx context.Context, c *pgwire.Clie
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
 	for _, object := range objects {
@@ -401,14 +437,14 @@ func (p *PostgresBackend) migrateLegacyState(ctx context.Context, c *pgwire.Clie
 		}
 	}
 	for _, job := range store.state.Jobs {
-		query := `INSERT INTO ciradar_jobs(id,tenant_id,type,payload,status,attempts,available_at,locked_at,locked_by,last_error,created_at,updated_at) VALUES (` + strconv.FormatInt(job.ID, 10) + `,` + sqlLiteral(normalizeTenant(job.TenantID)) + `,` + sqlLiteral(job.Type) + `,` + jsonExpr(job.Payload) + `,` + sqlLiteral(job.Status) + `,` + strconv.Itoa(job.Attempts) + `,` + sqlTime(job.AvailableAt) + `,` + sqlTime(job.LockedAt) + `,` + nullableText(job.LockedBy) + `,` + nullableText(job.LastError) + `,` + sqlTime(job.CreatedAt) + `,` + sqlTime(job.UpdatedAt) + `) ON CONFLICT (id) DO NOTHING`
-		if err = c.Exec(ctx, query); err != nil {
+		query := `INSERT INTO ciradar_jobs(id,tenant_id,type,payload,status,attempts,available_at,locked_at,locked_by,last_error,created_at,updated_at) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO NOTHING`
+		if err = c.ExecParams(ctx, query, job.ID, normalizeTenant(job.TenantID), job.Type, string(job.Payload), job.Status, job.Attempts, nullableTimeParam(job.AvailableAt), nullableTimeParam(job.LockedAt), nullableTextParam(job.LockedBy), nullableTextParam(job.LastError), nullableTimeParam(job.CreatedAt), nullableTimeParam(job.UpdatedAt)); err != nil {
 			return err
 		}
 	}
 	for id, delivery := range store.state.Deliveries {
-		query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,received_at,status,error) VALUES (` + sqlLiteral(id) + `,` + sqlLiteral(delivery.EventType) + `,` + sqlTime(delivery.ReceivedAt) + `,` + sqlLiteral(delivery.Status) + `,` + sqlLiteral(delivery.Error) + `) ON CONFLICT (id) DO NOTHING`
-		if err = c.Exec(ctx, query); err != nil {
+		query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,received_at,status,error) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`
+		if err = c.ExecParams(ctx, query, id, delivery.EventType, nullableTimeParam(delivery.ReceivedAt), delivery.Status, delivery.Error); err != nil {
 			return err
 		}
 	}
@@ -436,11 +472,15 @@ func filterExistingNativeTestObservations(ctx context.Context, c *pgwire.Client,
 		if end > len(observations) {
 			end = len(observations)
 		}
-		literals := make([]string, 0, end-start)
+		args := make([]any, 0, 1+end-start)
+		args = append(args, normalizeTenant(tenantID))
+		placeholders := make([]string, 0, end-start)
 		for _, observation := range observations[start:end] {
-			literals = append(literals, sqlLiteral(observation.ID))
+			args = append(args, observation.ID)
+			placeholders = append(placeholders, "$"+strconv.Itoa(len(args)))
 		}
-		rows, err := c.Query(ctx, `SELECT DISTINCT id FROM ciradar_test_observations WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID))+` AND id IN (`+strings.Join(literals, ",")+`)`)
+		query := `SELECT DISTINCT id FROM ciradar_test_observations WHERE tenant_id=$1 AND id IN (` + strings.Join(placeholders, ",") + `)`
+		rows, err := c.QueryParams(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -464,35 +504,32 @@ func insertNativeTestObservation(ctx context.Context, c *pgwire.Client, observat
 	if err != nil {
 		return err
 	}
-	query := `INSERT INTO ciradar_test_observations(tenant_id,id,repository,test_key,framework,workflow,job,run_id,commit_sha,branch,status,duration_ms,occurred_at,payload) VALUES (` +
-		sqlLiteral(normalizeTenant(observation.TenantID)) + `,` + sqlLiteral(observation.ID) + `,` + sqlLiteral(strings.TrimSpace(observation.Repository)) + `,` + sqlLiteral(TestKey(observation)) + `,` + nullableText(observation.Framework) + `,` + nullableText(observation.Workflow) + `,` + nullableText(observation.Job) + `,` + nullableInt64(observation.RunID) + `,` + nullableText(observation.CommitSHA) + `,` + nullableText(observation.Branch) + `,` + sqlLiteral(observation.Status) + `,` + strconv.FormatInt(maxInt64(0, observation.DurationMS), 10) + `,` + sqlTime(observation.OccurredAt) + `,` + jsonExpr(payload) + `) ON CONFLICT DO NOTHING`
-	return c.Exec(ctx, query)
-}
-
-func nullableInt64(value int64) string {
-	if value == 0 {
-		return "NULL"
-	}
-	return strconv.FormatInt(value, 10)
+	query := `INSERT INTO ciradar_test_observations(tenant_id,id,repository,test_key,framework,workflow,job,run_id,commit_sha,branch,status,duration_ms,occurred_at,payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb) ON CONFLICT DO NOTHING`
+	return c.ExecParams(ctx, query,
+		normalizeTenant(observation.TenantID), observation.ID, strings.TrimSpace(observation.Repository), TestKey(observation),
+		nullableTextParam(observation.Framework), nullableTextParam(observation.Workflow), nullableTextParam(observation.Job), nullableInt64Param(observation.RunID),
+		nullableTextParam(observation.CommitSHA), nullableTextParam(observation.Branch), observation.Status, maxInt64(0, observation.DurationMS),
+		nullableTimeParam(observation.OccurredAt), string(payload),
+	)
 }
 
 func lockSpecs(ctx context.Context, c *pgwire.Client, specs []pgSpec) error {
 	for _, spec := range specs {
 		globalKey := "ciradar:" + spec.Kind + ":*"
 		if spec.All {
-			if err := c.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(`+sqlLiteral(globalKey)+`))`); err != nil {
+			if err := c.ExecParams(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, advisoryLockKey(globalKey)); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := c.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtext(`+sqlLiteral(globalKey)+`))`); err != nil {
+		if err := c.ExecParams(ctx, `SELECT pg_advisory_xact_lock_shared($1::bigint)`, advisoryLockKey(globalKey)); err != nil {
 			return err
 		}
 		lockKey := "ciradar:" + spec.Kind + ":" + spec.Tenant
 		if spec.ObjectID != "" {
 			lockKey += ":" + spec.ObjectID
 		}
-		if err := c.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(`+sqlLiteral(lockKey)+`))`); err != nil {
+		if err := c.ExecParams(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, advisoryLockKey(lockKey)); err != nil {
 			return err
 		}
 	}
@@ -500,11 +537,12 @@ func lockSpecs(ctx context.Context, c *pgwire.Client, specs []pgSpec) error {
 }
 
 func loadPGObjects(ctx context.Context, c *pgwire.Client, specs []pgSpec, forUpdate bool) ([]pgObject, error) {
-	query := `SELECT tenant_id,kind,object_id,encode(convert_to(payload::text,'UTF8'),'base64'),coalesce(event_time::text,''),coalesce(repository,''),coalesce(organization,''),coalesce(fingerprint,''),coalesce(state,''),coalesce(status,''),coalesce(dedupe_key,''),coalesce(expires_at::text,'') FROM ciradar_objects WHERE ` + specWhere(specs)
+	where, args := specWhere(specs)
+	query := `SELECT tenant_id,kind,object_id,encode(convert_to(payload::text,'UTF8'),'base64'),coalesce(event_time::text,''),coalesce(repository,''),coalesce(organization,''),coalesce(fingerprint,''),coalesce(state,''),coalesce(status,''),coalesce(dedupe_key,''),coalesce(expires_at::text,'') FROM ciradar_objects WHERE ` + where
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
-	rows, err := c.Query(ctx, query)
+	rows, err := c.QueryParams(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -528,23 +566,22 @@ func loadPGObjects(ctx context.Context, c *pgwire.Client, specs []pgSpec, forUpd
 	return out, nil
 }
 
+func pgObjectParams(object pgObject) []any {
+	return []any{
+		object.Tenant, object.Kind, object.ID, string(object.Payload), nullableTimeParam(object.EventTime),
+		nullableTextParam(object.Repository), nullableTextParam(object.Organization), nullableTextParam(object.Fingerprint),
+		nullableTextParam(object.State), nullableTextParam(object.Status), nullableTextParam(object.DedupeKey), nullableTimeParam(object.ExpiresAt),
+	}
+}
+
 func insertPGObjectIfMissing(ctx context.Context, c *pgwire.Client, object pgObject) error {
-	query := `INSERT INTO ciradar_objects(tenant_id,kind,object_id,payload,event_time,repository,organization,fingerprint,state,status,dedupe_key,expires_at,updated_at) VALUES (` +
-		sqlLiteral(object.Tenant) + `,` + sqlLiteral(object.Kind) + `,` + sqlLiteral(object.ID) + `,` + jsonExpr(object.Payload) + `,` + sqlTime(object.EventTime) + `,` + nullableText(object.Repository) + `,` + nullableText(object.Organization) + `,` + nullableText(object.Fingerprint) + `,` + nullableText(object.State) + `,` + nullableText(object.Status) + `,` + nullableText(object.DedupeKey) + `,` + sqlTime(object.ExpiresAt) + `,now()) ON CONFLICT (tenant_id,kind,object_id) DO NOTHING`
-	return c.Exec(ctx, query)
+	query := `INSERT INTO ciradar_objects(tenant_id,kind,object_id,payload,event_time,repository,organization,fingerprint,state,status,dedupe_key,expires_at,updated_at) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,now()) ON CONFLICT (tenant_id,kind,object_id) DO NOTHING`
+	return c.ExecParams(ctx, query, pgObjectParams(object)...)
 }
 
 func upsertPGObject(ctx context.Context, c *pgwire.Client, object pgObject) error {
-	query := `INSERT INTO ciradar_objects(tenant_id,kind,object_id,payload,event_time,repository,organization,fingerprint,state,status,dedupe_key,expires_at,updated_at) VALUES (` +
-		sqlLiteral(object.Tenant) + `,` + sqlLiteral(object.Kind) + `,` + sqlLiteral(object.ID) + `,` + jsonExpr(object.Payload) + `,` + sqlTime(object.EventTime) + `,` + nullableText(object.Repository) + `,` + nullableText(object.Organization) + `,` + nullableText(object.Fingerprint) + `,` + nullableText(object.State) + `,` + nullableText(object.Status) + `,` + nullableText(object.DedupeKey) + `,` + sqlTime(object.ExpiresAt) + `,now()) ON CONFLICT (tenant_id,kind,object_id) DO UPDATE SET payload=excluded.payload,event_time=excluded.event_time,repository=excluded.repository,organization=excluded.organization,fingerprint=excluded.fingerprint,state=excluded.state,status=excluded.status,dedupe_key=excluded.dedupe_key,expires_at=excluded.expires_at,updated_at=now()`
-	return c.Exec(ctx, query)
-}
-
-func nullableText(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "NULL"
-	}
-	return sqlLiteral(value)
+	query := `INSERT INTO ciradar_objects(tenant_id,kind,object_id,payload,event_time,repository,organization,fingerprint,state,status,dedupe_key,expires_at,updated_at) VALUES ($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12,now()) ON CONFLICT (tenant_id,kind,object_id) DO UPDATE SET payload=excluded.payload,event_time=excluded.event_time,repository=excluded.repository,organization=excluded.organization,fingerprint=excluded.fingerprint,state=excluded.state,status=excluded.status,dedupe_key=excluded.dedupe_key,expires_at=excluded.expires_at,updated_at=now()`
+	return c.ExecParams(ctx, query, pgObjectParams(object)...)
 }
 
 func hydrateStore(objects []pgObject) (*Store, error) {
@@ -795,7 +832,7 @@ func pgStateWith[T any](ctx context.Context, p *PostgresBackend, write bool, spe
 		}
 		defer func() {
 			if err != nil {
-				_ = c.Exec(context.Background(), "ROLLBACK")
+				rollbackPostgres(c)
 			}
 		}()
 		if err = lockSpecs(ctx, c, specs); err != nil {
@@ -841,7 +878,7 @@ func pgStateWith[T any](ctx context.Context, p *PostgresBackend, write bool, spe
 			delete(existing, key)
 		}
 		for _, object := range existing {
-			if err = c.Exec(ctx, `DELETE FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(object.Tenant)+` AND kind=`+sqlLiteral(object.Kind)+` AND object_id=`+sqlLiteral(object.ID)); err != nil {
+			if err = c.ExecParams(ctx, `DELETE FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 AND object_id=$3`, object.Tenant, object.Kind, object.ID); err != nil {
 				return out, err
 			}
 		}

@@ -1214,6 +1214,7 @@ func (s *Store) Cleanup(ctx context.Context, retentionDays int) error {
 	oldNotificationOrder := append([]string(nil), s.state.NotificationOrder...)
 	oldIncidents := cloneMap(s.state.Incidents)
 	oldDeliveries := cloneMap(s.state.Deliveries)
+	oldExtensions := cloneMap(s.state.Extensions)
 	cut := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
 	newOrder := s.state.AnalysisOrder[:0]
 	for _, id := range s.state.AnalysisOrder {
@@ -1278,6 +1279,26 @@ func (s *Store) Cleanup(ctx context.Context, retentionDays int) error {
 			delete(s.state.Deliveries, id)
 		}
 	}
+	now := time.Now().UTC()
+	for key, object := range s.state.Extensions {
+		switch {
+		case object.TenantID == "__system__" && object.Kind == ssoReplayExtensionKind:
+			var record ssoReplayRecord
+			if json.Unmarshal(object.Value, &record) != nil || !record.ExpiresAt.After(now) {
+				delete(s.state.Extensions, key)
+			}
+		case object.Kind == "oauth_revocation":
+			var record struct {
+				ExpiresAt time.Time `json:"expires_at"`
+			}
+			decodeErr := json.Unmarshal(object.Value, &record)
+			expired := !record.ExpiresAt.IsZero() && !record.ExpiresAt.After(now)
+			legacyExpired := record.ExpiresAt.IsZero() && object.UpdatedAt.Before(now.Add(-2*time.Hour))
+			if decodeErr != nil || expired || legacyExpired {
+				delete(s.state.Extensions, key)
+			}
+		}
+	}
 	if err := s.persistLocked(); err != nil {
 		s.state.Analyses = oldAnalyses
 		s.state.AnalysisOrder = oldAnalysisOrder
@@ -1289,6 +1310,7 @@ func (s *Store) Cleanup(ctx context.Context, retentionDays int) error {
 		s.state.NotificationOrder = oldNotificationOrder
 		s.state.Incidents = oldIncidents
 		s.state.Deliveries = oldDeliveries
+		s.state.Extensions = oldExtensions
 		return err
 	}
 	return nil

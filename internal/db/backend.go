@@ -52,6 +52,7 @@ type Backend interface {
 	SetTenantEnabled(context.Context, string, bool) error
 	CreateAPIKey(context.Context, string, string, model.Role) (model.APIKey, string, error)
 	AuthenticateAPIKey(context.Context, string) (*model.Principal, error)
+	GetAPIKey(context.Context, string, string) (*model.APIKey, error)
 	ListAPIKeys(context.Context, string) ([]model.APIKey, error)
 	RevokeAPIKey(context.Context, string, string) error
 	RecordAudit(context.Context, model.AuditEvent) error
@@ -81,6 +82,7 @@ type Backend interface {
 	RemoveTestQuarantine(context.Context, string, string) error
 	ListTestQuarantines(context.Context, string) ([]model.TestQuarantine, error)
 	PutObject(context.Context, string, string, string, any) error
+	PutObjectIfKindBelowLimit(context.Context, string, string, string, any, int) (bool, error)
 	GetObject(context.Context, string, string, string, any) (bool, error)
 	ListObjects(context.Context, string, string, int) ([]ExtensionObject, error)
 	DeleteObject(context.Context, string, string, string) error
@@ -88,3 +90,11 @@ type Backend interface {
 }
 
 var _ Backend = (*Store)(nil)
+
+type DistributedRateLimiter interface {
+	TakeRateLimit(context.Context, string, string, int, time.Duration, time.Time) (bool, time.Duration, error)
+	AuthFailureRetryAfter(context.Context, string, time.Time) (time.Duration, error)
+	RecordAuthFailure(context.Context, string, int, time.Duration, time.Duration, time.Duration, time.Time) (time.Duration, error)
+}
+
+var _ DistributedRateLimiter = (*PostgresBackend)(nil)

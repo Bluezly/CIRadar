@@ -492,12 +492,6 @@ func maxInt(a, b int) int {
 	}
 	return b
 }
-func absFloat(v float64) float64 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
 func clampFloat(v, min, max float64) float64 {
 	if v < min {
 		return min

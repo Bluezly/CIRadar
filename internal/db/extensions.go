@@ -48,6 +48,54 @@ func (s *Store) PutObject(ctx context.Context, tenant, kind, id string, value an
 	return s.persistLocked()
 }
 
+func (s *Store) PutObjectIfKindBelowLimit(ctx context.Context, tenant, kind, id string, value any, limit int) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	tenant = normalizeTenant(tenant)
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	id = strings.TrimSpace(id)
+	if kind == "" || id == "" || limit < 1 {
+		return false, fmt.Errorf("kind, id, and a positive limit are required")
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := extensionKey(tenant, kind, id)
+	old, existed := s.state.Extensions[key]
+	if !existed {
+		count := 0
+		for _, object := range s.state.Extensions {
+			if object.TenantID == tenant && object.Kind == kind {
+				count++
+			}
+		}
+		if count >= limit {
+			return false, nil
+		}
+	}
+	object := old
+	if !existed {
+		object = ExtensionObject{TenantID: tenant, Kind: kind, ID: id, CreatedAt: now}
+	}
+	object.Value = append(object.Value[:0], b...)
+	object.UpdatedAt = now
+	s.state.Extensions[key] = object
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.Extensions[key] = old
+		} else {
+			delete(s.state.Extensions, key)
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) GetObject(ctx context.Context, tenant, kind, id string, out any) (bool, error) {
 	_ = ctx
 	s.mu.Lock()

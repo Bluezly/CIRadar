@@ -169,6 +169,22 @@ func (s *Store) AuthenticateAPIKey(ctx context.Context, token string) (*model.Pr
 	return &model.Principal{TenantID: matched.Key.TenantID, Name: matched.Key.Name, Role: matched.Key.Role, APIKeyID: matchedID}, nil
 }
 
+func (s *Store) GetAPIKey(ctx context.Context, tenantID, id string) (*model.APIKey, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	tenantID = normalizeTenant(tenantID)
+	id = strings.TrimSpace(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.state.APIKeys[id]
+	if !ok || record.Key.TenantID != tenantID {
+		return nil, nil
+	}
+	key := record.Key
+	return &key, nil
+}
+
 func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]model.APIKey, error) {
 	_ = ctx
 	tenantID = normalizeTenant(tenantID)

@@ -118,10 +118,7 @@ func postgresConnectionHealthy(c *pgwire.Client) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := c.Exec(ctx, "ROLLBACK"); err != nil {
-		return false
-	}
-	return c.Exec(ctx, "SELECT 1") == nil
+	return c.Reset(ctx) == nil
 }
 
 func (p *postgresPool) close() error {

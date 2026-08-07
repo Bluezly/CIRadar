@@ -55,17 +55,54 @@ func (p *PostgresBackend) release(c *pgwire.Client) {
 	}
 }
 
-func (p *PostgresBackend) Migrate(ctx context.Context) error {
+func rollbackPostgres(c *pgwire.Client) {
+	if c == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = c.Exec(ctx, "ROLLBACK")
+}
+
+func unlockPostgresMigration(c *pgwire.Client) error {
+	if c == nil {
+		return errors.New("postgres migration connection is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := c.QueryParams(ctx, `SELECT pg_advisory_unlock($1::bigint)::text`, advisoryLockKey("ciradar:schema:migrate"))
+	if err != nil {
+		_ = c.Close()
+		return err
+	}
+	row, err := requireRow(rows, 1)
+	if err != nil {
+		_ = c.Close()
+		return err
+	}
+	if !pgBool(row[0]) {
+		_ = c.Close()
+		return errors.New("postgres migration advisory lock was not held during unlock")
+	}
+	return nil
+}
+
+func (p *PostgresBackend) Migrate(ctx context.Context) (err error) {
 	c, err := p.connect(ctx)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}
 	defer p.release(c)
-	if err := c.Exec(ctx, `SELECT pg_advisory_lock(hashtext('ciradar:schema:migrate'))`); err != nil {
-		return fmt.Errorf("lock postgres migration: %w", err)
+	lockCtx, cancelLock := context.WithTimeout(ctx, time.Minute)
+	lockErr := c.ExecParams(lockCtx, `SELECT pg_advisory_lock($1::bigint)`, advisoryLockKey("ciradar:schema:migrate"))
+	cancelLock()
+	if lockErr != nil {
+		return fmt.Errorf("lock postgres migration: %w", lockErr)
 	}
 	defer func() {
-		_ = c.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('ciradar:schema:migrate'))`)
+		if unlockErr := unlockPostgresMigration(c); unlockErr != nil && err == nil {
+			err = fmt.Errorf("unlock postgres migration: %w", unlockErr)
+		}
 	}()
 	if err := p.migrateRelational(ctx, c); err != nil {
 		return fmt.Errorf("migrate postgres: %w", err)
@@ -118,21 +155,21 @@ func (p *PostgresBackend) EnqueueForTenant(ctx context.Context, tenantID, typ st
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
 	if err = lockSpecs(ctx, c, []pgSpec{pgGlobal(pgKindTenant)}); err != nil {
 		return err
 	}
-	rows, err := c.Query(ctx, `SELECT status FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(pgSystemTenant)+` AND kind=`+sqlLiteral(pgKindTenant)+` AND object_id=`+sqlLiteral(tenantID)+` FOR SHARE`)
+	rows, err := c.QueryParams(ctx, `SELECT status FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 AND object_id=$3 FOR SHARE`, pgSystemTenant, pgKindTenant, tenantID)
 	if err != nil {
 		return err
 	}
 	if len(rows.Values) != 1 || len(rows.Values[0]) < 1 || rows.Values[0][0] == nil || *rows.Values[0][0] != "enabled" {
 		return fmt.Errorf("tenant %q not found or disabled", tenantID)
 	}
-	query := `INSERT INTO ciradar_jobs(tenant_id,type,payload,status,attempts,available_at,created_at,updated_at) VALUES (` + sqlLiteral(tenantID) + `,` + sqlLiteral(typ) + `,` + jsonExpr(data) + `,'queued',0,` + sqlTime(availableAt) + `,now(),now())`
-	if err = c.Exec(ctx, query); err != nil {
+	query := `INSERT INTO ciradar_jobs(tenant_id,type,payload,status,attempts,available_at,created_at,updated_at) VALUES ($1,$2,$3::jsonb,'queued',0,$4,now(),now())`
+	if err = c.ExecParams(ctx, query, tenantID, typ, string(data), availableAt.UTC()); err != nil {
 		return err
 	}
 	return c.Exec(ctx, "COMMIT")
@@ -161,11 +198,11 @@ func (p *PostgresBackend) ClaimJob(ctx context.Context, workerID string) (job *J
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
-	query := `SELECT j.id::text,j.tenant_id,j.type,encode(convert_to(j.payload::text,'UTF8'),'base64'),j.attempts::text FROM ciradar_jobs j JOIN ciradar_objects t ON t.tenant_id=` + sqlLiteral(pgSystemTenant) + ` AND t.kind=` + sqlLiteral(pgKindTenant) + ` AND t.object_id=j.tenant_id AND t.status='enabled' WHERE j.status='queued' AND j.available_at<=now() ORDER BY j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`
-	rows, err := c.Query(ctx, query)
+	query := `SELECT j.id::text,j.tenant_id,j.type,encode(convert_to(j.payload::text,'UTF8'),'base64'),j.attempts::text FROM ciradar_jobs j JOIN ciradar_objects t ON t.tenant_id=$1 AND t.kind=$2 AND t.object_id=j.tenant_id AND t.status='enabled' WHERE j.status='queued' AND j.available_at<=now() ORDER BY j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED`
+	rows, err := c.QueryParams(ctx, query, pgSystemTenant, pgKindTenant)
 	if err != nil {
 		return nil, err
 	}
@@ -192,8 +229,8 @@ func (p *PostgresBackend) ClaimJob(ctx context.Context, workerID string) (job *J
 		return nil, err
 	}
 	attempts++
-	update := `UPDATE ciradar_jobs SET status='running',attempts=` + strconv.Itoa(attempts) + `,locked_at=now(),locked_by=` + sqlLiteral(lease) + `,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10)
-	if err = c.Exec(ctx, update); err != nil {
+	update := `UPDATE ciradar_jobs SET status='running',attempts=$1,locked_at=now(),locked_by=$2,updated_at=now() WHERE id=$3`
+	if err = c.ExecParams(ctx, update, attempts, lease, id); err != nil {
 		return nil, err
 	}
 	if err = c.Exec(ctx, "COMMIT"); err != nil {
@@ -222,13 +259,13 @@ func (p *PostgresBackend) RenewJobLease(ctx context.Context, id int64, leaseToke
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	query := `UPDATE ciradar_jobs SET locked_at=now(),updated_at=now() WHERE id=` + strconv.FormatInt(id, 10) + ` AND status='running' AND locked_by=` + sqlLiteral(leaseToken) + ` RETURNING id::text`
+	query := `UPDATE ciradar_jobs SET locked_at=now(),updated_at=now() WHERE id=$1 AND status='running' AND locked_by=$2 RETURNING id::text`
 	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
 	defer p.release(c)
-	rows, err := c.Query(ctx, query)
+	rows, err := c.QueryParams(ctx, query, id, leaseToken)
 	if err != nil {
 		return err
 	}
@@ -242,13 +279,13 @@ func (p *PostgresBackend) CompleteJob(ctx context.Context, id int64, leaseToken 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	query := `UPDATE ciradar_jobs SET status='done',locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10) + ` AND status='running' AND locked_by=` + sqlLiteral(leaseToken) + ` RETURNING id::text`
+	query := `UPDATE ciradar_jobs SET status='done',locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=$1 AND status='running' AND locked_by=$2 RETURNING id::text`
 	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
 	defer p.release(c)
-	rows, err := c.Query(ctx, query)
+	rows, err := c.QueryParams(ctx, query, id, leaseToken)
 	if err != nil {
 		return err
 	}
@@ -267,13 +304,13 @@ func (p *PostgresBackend) FailJob(ctx context.Context, id int64, leaseToken stri
 		status = "failed"
 	}
 	seconds := attempts * attempts * 10
-	query := `UPDATE ciradar_jobs SET status=` + sqlLiteral(status) + `,last_error=` + sqlLiteral(trim(errText, 4000)) + `,available_at=now()+interval ` + sqlLiteral(strconv.Itoa(seconds)+" seconds") + `,locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=` + strconv.FormatInt(id, 10) + ` AND status='running' AND locked_by=` + sqlLiteral(leaseToken) + ` RETURNING id::text`
+	query := `UPDATE ciradar_jobs SET status=$1,last_error=$2,available_at=now()+($3::bigint * interval '1 second'),locked_at=NULL,locked_by=NULL,updated_at=now() WHERE id=$4 AND status='running' AND locked_by=$5 RETURNING id::text`
 	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
 	defer p.release(c)
-	rows, err := c.Query(ctx, query)
+	rows, err := c.QueryParams(ctx, query, status, trim(errText, 4000), seconds, id, leaseToken)
 	if err != nil {
 		return err
 	}
@@ -294,17 +331,17 @@ func (p *PostgresBackend) RequeueStaleJobs(ctx context.Context, olderThan time.D
 	if seconds < 1 {
 		seconds = 1
 	}
-	query := `UPDATE ciradar_jobs SET status='queued',locked_at=NULL,locked_by=NULL,updated_at=now() WHERE status='running' AND locked_at<now()-interval ` + sqlLiteral(strconv.FormatInt(seconds, 10)+" seconds")
-	return p.exec(ctx, query)
+	query := `UPDATE ciradar_jobs SET status='queued',locked_at=NULL,locked_by=NULL,updated_at=now() WHERE status='running' AND locked_at<now()-($1::bigint * interval '1 second')`
+	return p.execParams(ctx, query, seconds)
 }
 
-func (p *PostgresBackend) exec(ctx context.Context, query string) error {
+func (p *PostgresBackend) execParams(ctx context.Context, query string, args ...any) error {
 	c, err := p.connect(ctx)
 	if err != nil {
 		return err
 	}
 	defer p.release(c)
-	return c.Exec(ctx, query)
+	return c.ExecParams(ctx, query, args...)
 }
 
 func (p *PostgresBackend) RecordDelivery(ctx context.Context, id, eventType string) (bool, error) {
@@ -320,8 +357,8 @@ func (p *PostgresBackend) RecordDelivery(ctx context.Context, id, eventType stri
 		return false, err
 	}
 	defer p.release(c)
-	query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status) VALUES (` + sqlLiteral(id) + `,` + sqlLiteral(eventType) + `,'received') ON CONFLICT (id) DO NOTHING RETURNING id`
-	rows, err := c.Query(ctx, query)
+	query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status) VALUES ($1,$2,'received') ON CONFLICT (id) DO NOTHING RETURNING id`
+	rows, err := c.QueryParams(ctx, query, id, eventType)
 	if err != nil {
 		return false, err
 	}
@@ -345,8 +382,8 @@ func (p *PostgresBackend) RecordTerminalDelivery(ctx context.Context, id, eventT
 		return false, err
 	}
 	defer p.release(c)
-	query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES (` + sqlLiteral(id) + `,` + sqlLiteral(strings.TrimSpace(eventType)) + `,` + sqlLiteral(status) + `,` + sqlLiteral(trim(errText, 4000)) + `) ON CONFLICT (id) DO NOTHING RETURNING id`
-	rows, err := c.Query(ctx, query)
+	query := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING RETURNING id`
+	rows, err := c.QueryParams(ctx, query, id, strings.TrimSpace(eventType), status, trim(errText, 4000))
 	if err != nil {
 		return false, err
 	}
@@ -374,11 +411,11 @@ func (p *PostgresBackend) ClaimDelivery(ctx context.Context, id, eventType strin
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
-	insert := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES (` + sqlLiteral(id) + `,` + sqlLiteral(strings.TrimSpace(eventType)) + `,'processing','') ON CONFLICT (id) DO NOTHING RETURNING id`
-	rows, err := c.Query(ctx, insert)
+	insert := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES ($1,$2,'processing','') ON CONFLICT (id) DO NOTHING RETURNING id`
+	rows, err := c.QueryParams(ctx, insert, id, strings.TrimSpace(eventType))
 	if err != nil {
 		return false, err
 	}
@@ -392,8 +429,8 @@ func (p *PostgresBackend) ClaimDelivery(ctx context.Context, id, eventType strin
 	if seconds < 1 {
 		seconds = 1
 	}
-	update := `UPDATE ciradar_webhook_deliveries SET event_type=` + sqlLiteral(strings.TrimSpace(eventType)) + `,received_at=now(),status='processing',error='' WHERE id=` + sqlLiteral(id) + ` AND (status='error' OR ((status='processing' OR status='received') AND received_at<now()-interval ` + sqlLiteral(strconv.FormatInt(seconds, 10)+" seconds") + `)) RETURNING id`
-	rows, err = c.Query(ctx, update)
+	update := `UPDATE ciradar_webhook_deliveries SET event_type=$1,received_at=now(),status='processing',error='' WHERE id=$2 AND (status='error' OR ((status='processing' OR status='received') AND received_at<now()-($3::bigint * interval '1 second'))) RETURNING id`
+	rows, err = c.QueryParams(ctx, update, strings.TrimSpace(eventType), id, seconds)
 	if err != nil {
 		return false, err
 	}
@@ -433,21 +470,21 @@ func (p *PostgresBackend) EnqueueDeliveryForTenant(ctx context.Context, delivery
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
 	if err = lockSpecs(ctx, c, []pgSpec{pgGlobal(pgKindTenant)}); err != nil {
 		return false, err
 	}
-	tenantRows, err := c.Query(ctx, `SELECT status FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(pgSystemTenant)+` AND kind=`+sqlLiteral(pgKindTenant)+` AND object_id=`+sqlLiteral(tenantID)+` FOR SHARE`)
+	tenantRows, err := c.QueryParams(ctx, `SELECT status FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 AND object_id=$3 FOR SHARE`, pgSystemTenant, pgKindTenant, tenantID)
 	if err != nil {
 		return false, err
 	}
 	if len(tenantRows.Values) != 1 || len(tenantRows.Values[0]) < 1 || tenantRows.Values[0][0] == nil || *tenantRows.Values[0][0] != "enabled" {
 		return false, fmt.Errorf("tenant %q not found or disabled", tenantID)
 	}
-	insertDelivery := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES (` + sqlLiteral(deliveryID) + `,` + sqlLiteral(strings.TrimSpace(eventType)) + `,'queued','') ON CONFLICT (id) DO NOTHING RETURNING id`
-	deliveryRows, err := c.Query(ctx, insertDelivery)
+	insertDelivery := `INSERT INTO ciradar_webhook_deliveries(id,event_type,status,error) VALUES ($1,$2,'queued','') ON CONFLICT (id) DO NOTHING RETURNING id`
+	deliveryRows, err := c.QueryParams(ctx, insertDelivery, deliveryID, strings.TrimSpace(eventType))
 	if err != nil {
 		return false, err
 	}
@@ -457,8 +494,8 @@ func (p *PostgresBackend) EnqueueDeliveryForTenant(ctx context.Context, delivery
 		}
 		return false, nil
 	}
-	insertJob := `INSERT INTO ciradar_jobs(tenant_id,type,payload,status,attempts,available_at,created_at,updated_at) VALUES (` + sqlLiteral(tenantID) + `,` + sqlLiteral(typ) + `,` + jsonExpr(data) + `,'queued',0,` + sqlTime(availableAt) + `,now(),now())`
-	if err = c.Exec(ctx, insertJob); err != nil {
+	insertJob := `INSERT INTO ciradar_jobs(tenant_id,type,payload,status,attempts,available_at,created_at,updated_at) VALUES ($1,$2,$3::jsonb,'queued',0,$4,now(),now())`
+	if err = c.ExecParams(ctx, insertJob, tenantID, typ, string(data), availableAt.UTC()); err != nil {
 		return false, err
 	}
 	if err = c.Exec(ctx, "COMMIT"); err != nil {
@@ -468,7 +505,7 @@ func (p *PostgresBackend) EnqueueDeliveryForTenant(ctx context.Context, delivery
 }
 
 func (p *PostgresBackend) UpdateDelivery(ctx context.Context, id, status, errText string) error {
-	return p.exec(ctx, `UPDATE ciradar_webhook_deliveries SET status=`+sqlLiteral(status)+`,error=`+sqlLiteral(trim(errText, 4000))+` WHERE id=`+sqlLiteral(id))
+	return p.execParams(ctx, `UPDATE ciradar_webhook_deliveries SET status=$1,error=$2 WHERE id=$3`, status, trim(errText, 4000), id)
 }
 
 func (p *PostgresBackend) RecordAnalysisForTenant(ctx context.Context, tenantID string, input model.AnalysisInput, result model.AnalysisResult, storeExcerpt, storeRaw bool) error {
@@ -493,17 +530,18 @@ func (p *PostgresBackend) CorrelationForTenant(ctx context.Context, tenantID, fi
 	tenantID = normalizeTenant(tenantID)
 	repository = strings.TrimSpace(repository)
 	organization = strings.TrimSpace(organization)
-	where := `kind=` + sqlLiteral(pgKindAnalysis) + ` AND fingerprint=` + sqlLiteral(strings.TrimSpace(fingerprint)) + ` AND event_time>=` + sqlTime(since)
-	if !crossTenant {
-		where += ` AND tenant_id=` + sqlLiteral(tenantID)
-	}
 	c, err := p.connect(ctx)
 	if err != nil {
 		return CorrelationStats{}, err
 	}
 	defer p.release(c)
-	query := `SELECT count(*)::text,count(DISTINCT CASE WHEN repository<>'' THEN tenant_id||'|'||repository END)::text,count(DISTINCT CASE WHEN organization<>'' THEN tenant_id||'|'||organization END)::text,count(*) FILTER (WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND repository=` + sqlLiteral(repository) + `)::text,count(*) FILTER (WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND organization=` + sqlLiteral(organization) + `)::text FROM ciradar_objects WHERE ` + where
-	rows, err := c.Query(ctx, query)
+	query := `SELECT count(*)::text,count(DISTINCT CASE WHEN repository<>'' THEN tenant_id||'|'||repository END)::text,count(DISTINCT CASE WHEN organization<>'' THEN tenant_id||'|'||organization END)::text,count(*) FILTER (WHERE tenant_id=$1 AND repository=$2)::text,count(*) FILTER (WHERE tenant_id=$1 AND organization=$3)::text FROM ciradar_objects WHERE kind=$4 AND fingerprint=$5 AND event_time>=$6`
+	args := []any{tenantID, repository, organization, pgKindAnalysis, strings.TrimSpace(fingerprint), since.UTC()}
+	if !crossTenant {
+		query += ` AND tenant_id=$7`
+		args = append(args, tenantID)
+	}
+	rows, err := c.QueryParams(ctx, query, args...)
 	if err != nil {
 		return CorrelationStats{}, err
 	}
@@ -667,11 +705,11 @@ func (p *PostgresBackend) AuthenticateAPIKey(ctx context.Context, token string) 
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
-	query := `SELECT k.tenant_id,k.object_id,encode(convert_to(k.payload::text,'UTF8'),'base64') FROM ciradar_objects k JOIN ciradar_objects t ON t.tenant_id=` + sqlLiteral(pgSystemTenant) + ` AND t.kind=` + sqlLiteral(pgKindTenant) + ` AND t.object_id=k.tenant_id AND t.status='enabled' WHERE k.kind=` + sqlLiteral(pgKindAPIKey) + ` AND k.fingerprint=` + sqlLiteral(fingerprint) + ` AND k.status='active' LIMIT 1 FOR UPDATE OF k`
-	rows, err := c.Query(ctx, query)
+	query := `SELECT k.tenant_id,k.object_id,encode(convert_to(k.payload::text,'UTF8'),'base64') FROM ciradar_objects k JOIN ciradar_objects t ON t.tenant_id=$1 AND t.kind=$2 AND t.object_id=k.tenant_id AND t.status='enabled' WHERE k.kind=$3 AND k.fingerprint=$4 AND k.status='active' LIMIT 1 FOR UPDATE OF k`
+	rows, err := c.QueryParams(ctx, query, pgSystemTenant, pgKindTenant, pgKindAPIKey, fingerprint)
 	if err != nil {
 		return nil, err
 	}
@@ -706,7 +744,7 @@ func (p *PostgresBackend) AuthenticateAPIKey(ctx context.Context, token string) 
 		if marshalErr != nil {
 			return nil, marshalErr
 		}
-		if err = c.Exec(ctx, `UPDATE ciradar_objects SET payload=`+jsonExpr(encoded)+`,updated_at=now() WHERE tenant_id=`+sqlLiteral(valueOf(row[0]))+` AND kind=`+sqlLiteral(pgKindAPIKey)+` AND object_id=`+sqlLiteral(valueOf(row[1]))); err != nil {
+		if err = c.ExecParams(ctx, `UPDATE ciradar_objects SET payload=$1::jsonb,updated_at=now() WHERE tenant_id=$2 AND kind=$3 AND object_id=$4`, string(encoded), valueOf(row[0]), pgKindAPIKey, valueOf(row[1])); err != nil {
 			return nil, err
 		}
 	}
@@ -714,6 +752,12 @@ func (p *PostgresBackend) AuthenticateAPIKey(ctx context.Context, token string) 
 		return nil, err
 	}
 	return &model.Principal{TenantID: record.Key.TenantID, Name: record.Key.Name, Role: record.Key.Role, APIKeyID: record.Key.ID}, nil
+}
+
+func (p *PostgresBackend) GetAPIKey(ctx context.Context, tenantID, id string) (*model.APIKey, error) {
+	return pgStateWith(ctx, p, false, []pgSpec{pgOne(tenantID, pgKindAPIKey, id)}, func(store *Store) (*model.APIKey, error) {
+		return store.GetAPIKey(ctx, tenantID, id)
+	})
 }
 
 func (p *PostgresBackend) ListAPIKeys(ctx context.Context, tenantID string) ([]model.APIKey, error) {
@@ -797,7 +841,7 @@ func (p *PostgresBackend) StatsForTenant(ctx context.Context, tenantID string) (
 		return Stats{}, err
 	}
 	defer p.release(c)
-	rows, err := c.Query(ctx, `SELECT count(*) FILTER (WHERE status='queued')::text,count(*) FILTER (WHERE status='running')::text,count(*) FILTER (WHERE status='failed')::text FROM ciradar_jobs WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID)))
+	rows, err := c.QueryParams(ctx, `SELECT count(*) FILTER (WHERE status='queued')::text,count(*) FILTER (WHERE status='running')::text,count(*) FILTER (WHERE status='failed')::text FROM ciradar_jobs WHERE tenant_id=$1`, normalizeTenant(tenantID))
 	if err != nil {
 		return Stats{}, err
 	}
@@ -829,7 +873,7 @@ func (p *PostgresBackend) Dashboard(ctx context.Context, tenantID string, since 
 		return model.DashboardSummary{}, err
 	}
 	defer p.release(c)
-	rows, err := c.Query(ctx, `SELECT occurred_at::date::text,count(*)::text FROM ciradar_test_observations WHERE tenant_id=`+sqlLiteral(tenantID)+` AND occurred_at>=`+sqlTime(since)+` AND status IN ('failed','error') GROUP BY occurred_at::date ORDER BY occurred_at::date`)
+	rows, err := c.QueryParams(ctx, `SELECT occurred_at::date::text,count(*)::text FROM ciradar_test_observations WHERE tenant_id=$1 AND occurred_at>=$2 AND status IN ('failed','error') GROUP BY occurred_at::date ORDER BY occurred_at::date`, tenantID, since.UTC())
 	if err != nil {
 		return model.DashboardSummary{}, err
 	}
@@ -892,7 +936,7 @@ func (p *PostgresBackend) RecordTestObservations(ctx context.Context, tenantID s
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
 	if err = lockSpecs(ctx, c, specs); err != nil {
@@ -965,8 +1009,8 @@ func (p *PostgresBackend) ListTestObservations(ctx context.Context, tenantID, te
 		return nil, err
 	}
 	defer p.release(c)
-	query := `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_test_observations WHERE tenant_id=` + sqlLiteral(tenantID) + ` AND test_key=` + sqlLiteral(testKey) + ` ORDER BY occurred_at DESC LIMIT ` + strconv.Itoa(limit)
-	rows, err := c.Query(ctx, query)
+	query := `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_test_observations WHERE tenant_id=$1 AND test_key=$2 ORDER BY occurred_at DESC LIMIT $3`
+	rows, err := c.QueryParams(ctx, query, tenantID, testKey, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1031,7 +1075,7 @@ func (p *PostgresBackend) PutObject(ctx context.Context, tenantID, kind, id stri
 	}
 	defer func() {
 		if err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+			rollbackPostgres(c)
 		}
 	}()
 	spec := pgSpec{Tenant: tenantID, Kind: extensionKind(kind), ObjectID: id}
@@ -1040,7 +1084,7 @@ func (p *PostgresBackend) PutObject(ctx context.Context, tenantID, kind, id stri
 	}
 	now := time.Now().UTC()
 	object := ExtensionObject{TenantID: tenantID, Kind: kind, ID: id, Value: data, CreatedAt: now, UpdatedAt: now}
-	rows, err := c.Query(ctx, `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(tenantID)+` AND kind=`+sqlLiteral(extensionKind(kind))+` AND object_id=`+sqlLiteral(id)+` FOR UPDATE`)
+	rows, err := c.QueryParams(ctx, `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 AND object_id=$3 FOR UPDATE`, tenantID, extensionKind(kind), id)
 	if err != nil {
 		return err
 	}
@@ -1060,13 +1104,91 @@ func (p *PostgresBackend) PutObject(ctx context.Context, tenantID, kind, id stri
 	return c.Exec(ctx, "COMMIT")
 }
 
+func (p *PostgresBackend) PutObjectIfKindBelowLimit(ctx context.Context, tenantID, kind, id string, value any, limit int) (created bool, err error) {
+	tenantID = normalizeTenant(tenantID)
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	id = strings.TrimSpace(id)
+	if kind == "" || id == "" || limit < 1 {
+		return false, errors.New("kind, id, and a positive limit are required")
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return false, err
+	}
+	c, err := p.connect(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer p.release(c)
+	if err = c.Exec(ctx, "BEGIN"); err != nil {
+		return false, err
+	}
+	defer func() {
+		if err != nil {
+			rollbackPostgres(c)
+		}
+	}()
+	kindName := extensionKind(kind)
+	if err = lockSpecs(ctx, c, []pgSpec{{Tenant: tenantID, Kind: kindName}}); err != nil {
+		return false, err
+	}
+	rows, err := c.QueryParams(ctx, `SELECT count(*)::text FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2`, tenantID, kindName)
+	if err != nil {
+		return false, err
+	}
+	row, err := requireRow(rows, 1)
+	if err != nil {
+		return false, err
+	}
+	if row[0] == nil {
+		return false, errors.New("postgres object quota count returned no value")
+	}
+	count, err := strconv.Atoi(*row[0])
+	if err != nil {
+		return false, fmt.Errorf("parse postgres object count: %w", err)
+	}
+	existingRows, err := c.QueryParams(ctx, `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 AND object_id=$3 FOR UPDATE`, tenantID, kindName, id)
+	if err != nil {
+		return false, err
+	}
+	exists := len(existingRows.Values) == 1 && len(existingRows.Values[0]) > 0 && existingRows.Values[0][0] != nil
+	if !exists && count >= limit {
+		if err = c.Exec(ctx, "ROLLBACK"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	now := time.Now().UTC()
+	object := ExtensionObject{TenantID: tenantID, Kind: kind, ID: id, Value: data, CreatedAt: now, UpdatedAt: now}
+	if exists {
+		oldData, decodeErr := decodePGBase64(*existingRows.Values[0][0])
+		if decodeErr == nil {
+			var old ExtensionObject
+			if json.Unmarshal(oldData, &old) == nil && !old.CreatedAt.IsZero() {
+				object.CreatedAt = old.CreatedAt
+			}
+		}
+	}
+	payload, err := json.Marshal(object)
+	if err != nil {
+		return false, err
+	}
+	if err = upsertPGObject(ctx, c, pgObject{Tenant: tenantID, Kind: kindName, ID: id, Payload: payload, EventTime: now, Status: "active"}); err != nil {
+		return false, err
+	}
+	if err = c.Exec(ctx, "COMMIT"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (p *PostgresBackend) GetObject(ctx context.Context, tenantID, kind, id string, out any) (bool, error) {
 	c, err := p.connect(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer p.release(c)
-	rows, err := c.Query(ctx, `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID))+` AND kind=`+sqlLiteral(extensionKind(kind))+` AND object_id=`+sqlLiteral(strings.TrimSpace(id)))
+	rows, err := c.QueryParams(ctx, `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 AND object_id=$3`, normalizeTenant(tenantID), extensionKind(kind), strings.TrimSpace(id))
 	if err != nil || len(rows.Values) == 0 {
 		return false, err
 	}
@@ -1099,8 +1221,8 @@ func (p *PostgresBackend) ListObjects(ctx context.Context, tenantID, kind string
 		return nil, err
 	}
 	defer p.release(c)
-	query := `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=` + sqlLiteral(normalizeTenant(tenantID)) + ` AND kind=` + sqlLiteral(extensionKind(kind)) + ` ORDER BY event_time DESC NULLS LAST,updated_at DESC LIMIT ` + strconv.Itoa(limit)
-	rows, err := c.Query(ctx, query)
+	query := `SELECT encode(convert_to(payload::text,'UTF8'),'base64') FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 ORDER BY event_time DESC NULLS LAST,updated_at DESC LIMIT $3`
+	rows, err := c.QueryParams(ctx, query, normalizeTenant(tenantID), extensionKind(kind), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1122,7 +1244,7 @@ func (p *PostgresBackend) ListObjects(ctx context.Context, tenantID, kind string
 }
 
 func (p *PostgresBackend) DeleteObject(ctx context.Context, tenantID, kind, id string) error {
-	return p.exec(ctx, `DELETE FROM ciradar_objects WHERE tenant_id=`+sqlLiteral(normalizeTenant(tenantID))+` AND kind=`+sqlLiteral(extensionKind(kind))+` AND object_id=`+sqlLiteral(strings.TrimSpace(id)))
+	return p.execParams(ctx, `DELETE FROM ciradar_objects WHERE tenant_id=$1 AND kind=$2 AND object_id=$3`, normalizeTenant(tenantID), extensionKind(kind), strings.TrimSpace(id))
 }
 
 func (p *PostgresBackend) Cleanup(ctx context.Context, retentionDays int) error {
@@ -1144,16 +1266,23 @@ func (p *PostgresBackend) Cleanup(ctx context.Context, retentionDays int) error 
 	if err := c.Exec(ctx, "BEGIN"); err != nil {
 		return err
 	}
-	queries := []string{
-		`DELETE FROM ciradar_test_observations WHERE occurred_at<` + sqlTime(cutoff),
-		`DELETE FROM ciradar_objects WHERE kind IN (` + sqlLiteral(pgKindAnalysis) + `,` + sqlLiteral(pgKindEnvironment) + `,` + sqlLiteral(pgKindAudit) + `,` + sqlLiteral(pgKindNotification) + `,` + sqlLiteral(pgKindObservation) + `) AND event_time<` + sqlTime(cutoff),
-		`DELETE FROM ciradar_objects WHERE kind=` + sqlLiteral(pgKindIncident) + ` AND state='resolved' AND event_time<` + sqlTime(cutoff),
-		`DELETE FROM ciradar_webhook_deliveries WHERE received_at<` + sqlTime(cutoff),
-		`DELETE FROM ciradar_jobs WHERE status NOT IN ('queued','running') AND updated_at<` + sqlTime(cutoff),
+	queries := []struct {
+		sql  string
+		args []any
+	}{
+		{`DELETE FROM ciradar_test_observations WHERE occurred_at<$1`, []any{cutoff}},
+		{`DELETE FROM ciradar_objects WHERE kind IN ($1,$2,$3,$4,$5) AND event_time<$6`, []any{pgKindAnalysis, pgKindEnvironment, pgKindAudit, pgKindNotification, pgKindObservation, cutoff}},
+		{`DELETE FROM ciradar_objects WHERE kind=$1 AND state='resolved' AND event_time<$2`, []any{pgKindIncident, cutoff}},
+		{`DELETE FROM ciradar_webhook_deliveries WHERE received_at<$1`, []any{cutoff}},
+		{`DELETE FROM ciradar_jobs WHERE status NOT IN ('queued','running') AND updated_at<$1`, []any{cutoff}},
+		{`DELETE FROM ciradar_rate_limits WHERE updated_at<$1`, []any{time.Now().UTC().Add(-48 * time.Hour)}},
+		{`DELETE FROM ciradar_auth_failures WHERE updated_at<$1`, []any{time.Now().UTC().Add(-48 * time.Hour)}},
+		{`DELETE FROM ciradar_sso_replays WHERE expires_at<$1`, []any{time.Now().UTC()}},
+		{`DELETE FROM ciradar_objects WHERE kind=$1 AND event_time<$2`, []any{extensionKind("oauth_revocation"), time.Now().UTC().Add(-2 * time.Hour)}},
 	}
 	for _, query := range queries {
-		if err := c.Exec(ctx, query); err != nil {
-			_ = c.Exec(context.Background(), "ROLLBACK")
+		if err := c.ExecParams(ctx, query.sql, query.args...); err != nil {
+			rollbackPostgres(c)
 			return err
 		}
 	}
