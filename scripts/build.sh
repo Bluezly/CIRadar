@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-VERSION="${VERSION:-1.3.2-oss-rc.12}"
+VERSION="${VERSION:-1.3.2-oss-rc.13}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 COMMIT="${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || printf unknown)}"
 STRIP="${STRIP:-1}"
