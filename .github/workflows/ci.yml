@@ -22,6 +22,10 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
+      - name: Install Staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2024.1.1
+      - name: Staticcheck
+        run: staticcheck ./...
       - name: Dashboard syntax
         run: node --check internal/server/dashboard.js
       - name: Configuration syntax
