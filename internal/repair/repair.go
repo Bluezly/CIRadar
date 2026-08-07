@@ -776,9 +776,9 @@ func cleanDiffPath(raw string) string {
 	if raw == "/dev/null" {
 		return raw
 	}
-	if strings.HasPrefix(raw, "a/") {
-		raw = strings.TrimPrefix(raw, "a/")
-	} else if strings.HasPrefix(raw, "b/") {
+	if trimmed, ok := strings.CutPrefix(raw, "a/"); ok {
+		raw = trimmed
+	} else {
 		raw = strings.TrimPrefix(raw, "b/")
 	}
 	return filepath.ToSlash(filepath.Clean(raw))
