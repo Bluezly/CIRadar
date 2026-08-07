@@ -58,11 +58,13 @@ type Server struct {
 	mcpRuntime  *mcpserver.Runtime
 	mcpServer   *mcpserver.Server
 	github      *gh.Client
+	webhookGate *admissionGate
+	reportGate  *admissionGate
 }
 
 func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Logger) *Server {
 	runtime := mcpserver.NewRuntime()
-	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store), marketplace: marketplace.New(cfg.GitHubMarketplace, store), ipResolver: newClientIPResolver(cfg.TrustedProxyCIDRs), mcpRuntime: runtime}
+	s := &Server{cfg: cfg, store: store, analyzer: a, log: log, llm: llm.New(cfg.LLM, store), marketplace: marketplace.New(cfg.GitHubMarketplace, store), ipResolver: newClientIPResolver(cfg.TrustedProxyCIDRs), mcpRuntime: runtime, webhookGate: newAdmissionGate(32), reportGate: newAdmissionGate(4)}
 	s.mcpServer = &mcpserver.Server{Store: store, Semantic: cfg.Semantic, LLM: cfg.LLM, Repair: cfg.Repair, Runtime: runtime}
 	if cfg.GitHubAppID > 0 && strings.TrimSpace(cfg.GitHubPrivateKeyPath) != "" {
 		client, err := gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL, cfg.GitHubAllowPrivateNetwork)
@@ -73,7 +75,11 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 		}
 	}
 	if cfg.SSO.Enabled {
-		mgr, err := sso.New(cfg.SSO)
+		var replayGuard sso.ReplayGuard
+		if candidate, ok := store.(sso.ReplayGuard); ok {
+			replayGuard = candidate
+		}
+		mgr, err := sso.New(cfg.SSO, replayGuard)
 		if err != nil {
 			log.Error("SSO initialization failed", "error", err)
 		} else {
@@ -105,7 +111,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /api/v1/providers", s.require(model.RoleViewer, s.providerStatuses))
 	mux.HandleFunc("GET /api/v1/analyses", s.require(model.RoleViewer, s.analyses))
 	mux.HandleFunc("GET /api/v1/analyses/{id}", s.require(model.RoleViewer, s.analysis))
-	mux.HandleFunc("POST /api/v1/analyze", s.require(model.RoleOperator, s.analyze))
+	mux.HandleFunc("POST /api/v1/analyze", s.reportGate.wrap(s.require(model.RoleOperator, s.analyze)))
 	mux.HandleFunc("POST /api/v1/analyses/{id}/feedback", s.require(model.RoleViewer, s.analysisFeedback))
 	mux.HandleFunc("GET /api/v1/analyses/{id}/llm", s.require(model.RoleViewer, s.getLLMEnhancement))
 	mux.HandleFunc("POST /api/v1/analyses/{id}/llm", s.require(model.RoleOperator, s.createLLMEnhancement))
@@ -117,14 +123,14 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("POST /api/v1/analyses/{id}/github-issue/comments", s.require(model.RoleOperator, s.commentAnalysisGitHubIssue))
 	mux.HandleFunc("GET /api/v1/analyses/{id}/similar", s.require(model.RoleViewer, s.similarAnalyses))
 	mux.HandleFunc("GET /api/v1/feedback", s.require(model.RoleViewer, s.feedbackList))
-	mux.HandleFunc("POST /api/v1/tests/junit", s.require(model.RoleOperator, s.ingestTestReport))
-	mux.HandleFunc("POST /api/v1/tests/report", s.require(model.RoleOperator, s.ingestTestReport))
+	mux.HandleFunc("POST /api/v1/tests/junit", s.reportGate.wrap(s.require(model.RoleOperator, s.ingestTestReport)))
+	mux.HandleFunc("POST /api/v1/tests/report", s.reportGate.wrap(s.require(model.RoleOperator, s.ingestTestReport)))
 	mux.HandleFunc("GET /api/v1/tests", s.require(model.RoleViewer, s.testCases))
 	mux.HandleFunc("GET /api/v1/tests/quarantines", s.require(model.RoleViewer, s.testQuarantines))
 	mux.HandleFunc("POST /api/v1/tests/select", s.require(model.RoleViewer, s.selectTests))
 	mux.HandleFunc("GET /api/v1/tests/impact", s.require(model.RoleViewer, s.getTestImpact))
-	mux.HandleFunc("PUT /api/v1/tests/impact", s.require(model.RoleOperator, s.putTestImpact))
-	mux.HandleFunc("POST /api/v1/tests/coverage", s.require(model.RoleOperator, s.putTestCoverage))
+	mux.HandleFunc("PUT /api/v1/tests/impact", s.reportGate.wrap(s.require(model.RoleOperator, s.putTestImpact)))
+	mux.HandleFunc("POST /api/v1/tests/coverage", s.reportGate.wrap(s.require(model.RoleOperator, s.putTestCoverage)))
 	mux.HandleFunc("GET /api/v1/tests/quarantine-manifest", s.require(model.RoleViewer, s.testQuarantineManifest))
 	mux.HandleFunc("GET /api/v1/tests/{key}", s.require(model.RoleViewer, s.testCaseDetail))
 	mux.HandleFunc("PUT /api/v1/tests/{key}/critical", s.require(model.RoleOperator, s.setTestCritical))
@@ -135,7 +141,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /api/v1/metrics/usage", s.require(model.RoleViewer, s.usageMetrics))
 	mux.HandleFunc("GET /api/v1/metrics/trends", s.require(model.RoleViewer, s.trendMetrics))
 
-	mux.HandleFunc("POST /api/v1/baselines", s.require(model.RoleOperator, s.baseline))
+	mux.HandleFunc("POST /api/v1/baselines", s.reportGate.wrap(s.require(model.RoleOperator, s.baseline)))
 	mux.HandleFunc("GET /api/v1/notifications/deliveries", s.require(model.RoleViewer, s.notificationDeliveries))
 	mux.HandleFunc("GET /api/v1/audit", s.require(model.RoleAdmin, s.auditEvents))
 	mux.HandleFunc("GET /api/v1/repositories", s.require(model.RoleViewer, s.repositoryProfiles))
@@ -158,30 +164,38 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", s.mcpProtectedResource)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.oauthAuthorizationServer)
 	mux.HandleFunc("POST /oauth/register", s.oauthRegister)
+	mux.HandleFunc("GET /api/v1/oauth/clients", s.requireRoot(s.oauthClients))
+	mux.HandleFunc("DELETE /api/v1/oauth/clients/{id}", s.requireRoot(s.deleteOAuthClient))
 	mux.HandleFunc("GET /oauth/authorize", s.oauthAuthorize)
 	mux.HandleFunc("POST /oauth/authorize", s.oauthAuthorize)
 	mux.HandleFunc("POST /oauth/token", s.oauthToken)
 	mux.HandleFunc("POST /oauth/revoke", s.oauthRevoke)
-	mux.HandleFunc("POST /webhooks/github", s.githubWebhook)
-	mux.HandleFunc("POST /webhooks/github/marketplace", s.githubMarketplaceWebhook)
-	mux.HandleFunc("POST /webhooks/gitlab", s.ciWebhook("gitlab"))
-	mux.HandleFunc("POST /webhooks/buildkite", s.ciWebhook("buildkite"))
-	mux.HandleFunc("POST /webhooks/circleci", s.ciWebhook("circleci"))
-	mux.HandleFunc("POST /webhooks/jenkins", s.ciWebhook("jenkins"))
-	mux.HandleFunc("POST /webhooks/azuredevops", s.ciWebhook("azuredevops"))
-	mux.HandleFunc("POST /webhooks/bitrise", s.ciWebhook("bitrise"))
-	mux.HandleFunc("POST /webhooks/teamcity", s.ciWebhook("teamcity"))
-	mux.HandleFunc("POST /webhooks/travis", s.ciWebhook("travis"))
-	mux.HandleFunc("POST /webhooks/codebuild", s.ciWebhook("codebuild"))
-	mux.HandleFunc("POST /webhooks/bitbucket", s.ciWebhook("bitbucket"))
-	mux.HandleFunc("POST /webhooks/drone", s.ciWebhook("drone"))
-	mux.HandleFunc("POST /webhooks/semaphore", s.ciWebhook("semaphore"))
-	mux.HandleFunc("POST /webhooks/appveyor", s.ciWebhook("appveyor"))
-	mux.HandleFunc("POST /webhooks/cloudbuild", s.ciWebhook("cloudbuild"))
-	mux.HandleFunc("POST /chatops/slack", s.slackChatOps)
-	mux.HandleFunc("POST /chatops/teams", s.teamsChatOps)
-	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, s.ipResolver, logging(log, rateLimit(newRateLimiter(600, time.Minute), s.ipResolver, authFailureRateLimit(newAuthFailureLimiter(defaultAuthFailureThreshold, defaultAuthFailureWindow, defaultAuthFailureBaseDelay, defaultAuthFailureMaxDelay), s.ipResolver, mux))))))
-	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
+	mux.HandleFunc("POST /webhooks/github", s.webhookGate.wrap(s.githubWebhook))
+	mux.HandleFunc("POST /webhooks/github/marketplace", s.webhookGate.wrap(s.githubMarketplaceWebhook))
+	mux.HandleFunc("POST /webhooks/gitlab", s.webhookGate.wrap(s.ciWebhook("gitlab")))
+	mux.HandleFunc("POST /webhooks/buildkite", s.webhookGate.wrap(s.ciWebhook("buildkite")))
+	mux.HandleFunc("POST /webhooks/circleci", s.webhookGate.wrap(s.ciWebhook("circleci")))
+	mux.HandleFunc("POST /webhooks/jenkins", s.webhookGate.wrap(s.ciWebhook("jenkins")))
+	mux.HandleFunc("POST /webhooks/azuredevops", s.webhookGate.wrap(s.ciWebhook("azuredevops")))
+	mux.HandleFunc("POST /webhooks/bitrise", s.webhookGate.wrap(s.ciWebhook("bitrise")))
+	mux.HandleFunc("POST /webhooks/teamcity", s.webhookGate.wrap(s.ciWebhook("teamcity")))
+	mux.HandleFunc("POST /webhooks/travis", s.webhookGate.wrap(s.ciWebhook("travis")))
+	mux.HandleFunc("POST /webhooks/codebuild", s.webhookGate.wrap(s.ciWebhook("codebuild")))
+	mux.HandleFunc("POST /webhooks/bitbucket", s.webhookGate.wrap(s.ciWebhook("bitbucket")))
+	mux.HandleFunc("POST /webhooks/drone", s.webhookGate.wrap(s.ciWebhook("drone")))
+	mux.HandleFunc("POST /webhooks/semaphore", s.webhookGate.wrap(s.ciWebhook("semaphore")))
+	mux.HandleFunc("POST /webhooks/appveyor", s.webhookGate.wrap(s.ciWebhook("appveyor")))
+	mux.HandleFunc("POST /webhooks/cloudbuild", s.webhookGate.wrap(s.ciWebhook("cloudbuild")))
+	mux.HandleFunc("POST /chatops/slack", s.webhookGate.wrap(s.slackChatOps))
+	mux.HandleFunc("POST /chatops/teams", s.webhookGate.wrap(s.teamsChatOps))
+	sharedLimiter, _ := store.(db.DistributedRateLimiter)
+	limiterSecret := cfg.FingerprintHMACKey
+	if strings.TrimSpace(limiterSecret) == "" {
+		limiterSecret = cfg.AdminToken
+	}
+	authHandler := authFailureRateLimitWithShared(newAuthFailureLimiter(defaultAuthFailureThreshold, defaultAuthFailureWindow, defaultAuthFailureBaseDelay, defaultAuthFailureMaxDelay), sharedLimiter, limiterSecret, s.ipResolver, log, mux)
+	h := requestID(securityHeaders(cfg.PublicBaseURL, s.ipResolver, csrfGuard(cfg, s.ipResolver, logging(log, rateLimitWithShared(newRateLimiter(600, time.Minute), sharedLimiter, limiterSecret, s.ipResolver, log, authHandler)))))
+	s.http = &http.Server{Addr: cfg.ListenAddress, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 64 << 10}
 	return s
 }
 
@@ -299,22 +313,22 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	st, err := s.store.StatsForTenant(r.Context(), p.TenantID)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	providerList, err := s.store.ListProviderStatuses(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	feedback, err := s.store.FeedbackMetrics(r.Context(), p.TenantID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	tests, err := s.store.ListTestCaseStats(r.Context(), p.TenantID, "", "", 5000)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	flaky, quarantined := 0, 0
@@ -347,22 +361,22 @@ func (s *Server) dashboardData(w http.ResponseWriter, r *http.Request) {
 	until := time.Now().UTC()
 	d, err := s.store.Dashboard(r.Context(), tenantID, since)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	dora, err := insights.DORA(r.Context(), s.store, tenantID, r.URL.Query().Get("environment"), since, until)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	usage, err := insights.Usage(r.Context(), s.store, tenantID, since, until)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	trends, err := insights.Trends(r.Context(), s.store, tenantID, since, until)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	d.DORA = dora
@@ -385,7 +399,7 @@ func (s *Server) recordDeployment(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := insights.RecordDeployment(r.Context(), s.store, ev)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	s.audit(r, "deployment.record", "deployment", out.ID, map[string]string{"repository": out.Repository, "environment": out.Environment, "status": out.Status})
@@ -425,7 +439,7 @@ func (s *Server) doraMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	m, e := insights.DORA(r.Context(), s.store, principal(r).TenantID, r.URL.Query().Get("environment"), since, until)
 	if e != nil {
-		writeError(w, 500, e.Error())
+		s.internalError(w, r, e)
 		return
 	}
 	writeJSON(w, 200, m)
@@ -438,7 +452,7 @@ func (s *Server) usageMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	m, e := insights.Usage(r.Context(), s.store, principal(r).TenantID, since, until)
 	if e != nil {
-		writeError(w, 500, e.Error())
+		s.internalError(w, r, e)
 		return
 	}
 	writeJSON(w, 200, m)
@@ -451,7 +465,7 @@ func (s *Server) trendMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	m, e := insights.Trends(r.Context(), s.store, principal(r).TenantID, since, until)
 	if e != nil {
-		writeError(w, 500, e.Error())
+		s.internalError(w, r, e)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"since": since, "until": until, "series": m})
@@ -461,7 +475,7 @@ func (s *Server) incidents(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListIncidentsForTenant(r.Context(), principal(r).TenantID, limit, r.URL.Query().Get("state"))
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"incidents": items})
@@ -469,7 +483,7 @@ func (s *Server) incidents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) providerStatuses(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListProviderStatuses(r.Context())
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"providers": items})
@@ -478,7 +492,7 @@ func (s *Server) analyses(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListAnalysesForTenant(r.Context(), principal(r).TenantID, limit)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"analyses": items})
@@ -486,7 +500,7 @@ func (s *Server) analyses(w http.ResponseWriter, r *http.Request) {
 func (s *Server) analysis(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.GetAnalysisForTenant(r.Context(), principal(r).TenantID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if item == nil {
@@ -508,7 +522,7 @@ func (s *Server) requestDraftRepairPR(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	analysis, err := s.store.GetAnalysisForTenant(r.Context(), p.TenantID, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if analysis == nil {
@@ -518,7 +532,7 @@ func (s *Server) requestDraftRepairPR(w http.ResponseWriter, r *http.Request) {
 	var enhancement model.LLMEnhancement
 	found, err := s.store.GetObject(r.Context(), p.TenantID, "llm_enhancement", id, &enhancement)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !found || strings.TrimSpace(enhancement.Patch) == "" {
@@ -526,7 +540,7 @@ func (s *Server) requestDraftRepairPR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.EnqueueForTenant(r.Context(), p.TenantID, "repair.draft_pr", map[string]any{"tenant_id": p.TenantID, "analysis_id": id}, time.Now().UTC()); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	s.audit(r, "repair.draft_pr_requested", "analysis", id, nil)
@@ -542,7 +556,7 @@ func (s *Server) getRepairResult(w http.ResponseWriter, r *http.Request) {
 	var result model.RepairResult
 	found, err := s.store.GetObject(r.Context(), principal(r).TenantID, "repair_result", id, &result)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !found {
@@ -559,7 +573,7 @@ func (s *Server) getLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := s.llm.Get(r.Context(), principal(r).TenantID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if item == nil {
@@ -577,7 +591,7 @@ func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	analysis, err := s.store.GetAnalysisForTenant(r.Context(), p.TenantID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if analysis == nil {
@@ -604,7 +618,7 @@ func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 		var source model.RepairSource
 		found, sourceErr := s.store.GetObject(r.Context(), p.TenantID, "analysis_source", analysis.ID, &source)
 		if sourceErr != nil {
-			writeError(w, http.StatusInternalServerError, sourceErr.Error())
+			s.internalError(w, r, sourceErr)
 			return
 		}
 		if found {
@@ -629,7 +643,7 @@ func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 	result.Warnings = append(result.Warnings, sourceWarnings...)
 	if len(sourceWarnings) > 0 {
 		if err := s.store.PutObject(r.Context(), p.TenantID, "llm_enhancement", analysis.ID, result); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 	}
@@ -667,12 +681,12 @@ func (s *Server) feedbackList(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListDiagnosisFeedback(r.Context(), principal(r).TenantID, limit)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	metrics, err := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"feedback": items, "metrics": metrics})
@@ -689,7 +703,7 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 	}
 	stats, err := s.store.RecordTestObservations(r.Context(), p.TenantID, obs)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	auto := []model.TestQuarantine{}
@@ -734,7 +748,7 @@ func (s *Server) testCases(w http.ResponseWriter, r *http.Request) {
 	l, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListTestCaseStats(r.Context(), principal(r).TenantID, r.URL.Query().Get("repository"), r.URL.Query().Get("classification"), l)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	enrichServerTestStats(items)
@@ -746,7 +760,7 @@ func (s *Server) testCaseDetail(w http.ResponseWriter, r *http.Request) {
 	testKey := strings.TrimSpace(r.PathValue("key"))
 	stats, err := s.store.GetTestCaseStats(r.Context(), p.TenantID, testKey)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if stats == nil {
@@ -758,12 +772,12 @@ func (s *Server) testCaseDetail(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	history, err := s.store.ListTestObservations(r.Context(), p.TenantID, testKey, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	audit, err := s.store.ListAudit(r.Context(), p.TenantID, 500)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	type testAuditEvent struct {
@@ -819,7 +833,7 @@ func enrichServerTestStats(items []model.TestCaseStats) {
 func (s *Server) testQuarantines(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListTestQuarantines(r.Context(), principal(r).TenantID)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"quarantines": items})
@@ -827,7 +841,7 @@ func (s *Server) testQuarantines(w http.ResponseWriter, r *http.Request) {
 func (s *Server) testQuarantineManifest(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListTestQuarantines(r.Context(), principal(r).TenantID)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	keys := make([]string, 0, len(items))
@@ -894,7 +908,7 @@ func (s *Server) similarAnalyses(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, e.Error())
 			return
 		}
-		writeError(w, 500, e.Error())
+		s.internalError(w, r, e)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"similar": items})
@@ -911,7 +925,7 @@ func (s *Server) selectTests(w http.ResponseWriter, r *http.Request) {
 	}
 	out, e := testselection.Select(r.Context(), s.store, principal(r).TenantID, req)
 	if e != nil {
-		writeError(w, 500, e.Error())
+		s.internalError(w, r, e)
 		return
 	}
 	writeJSON(w, 200, out)
@@ -925,7 +939,7 @@ func (s *Server) getTestImpact(w http.ResponseWriter, r *http.Request) {
 	}
 	graph, ok, err := testselection.LoadGraph(r.Context(), s.store, principal(r).TenantID, repository)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !ok {
@@ -968,7 +982,7 @@ func (s *Server) notificationDeliveries(w http.ResponseWriter, r *http.Request) 
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListNotificationDeliveriesForTenant(r.Context(), principal(r).TenantID, limit)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deliveries": items})
@@ -977,7 +991,7 @@ func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	items, err := s.store.ListAudit(r.Context(), principal(r).TenantID, limit)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"events": items})
@@ -985,7 +999,7 @@ func (s *Server) auditEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) repositoryProfiles(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListRepositoryProfiles(r.Context(), principal(r).TenantID)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"repositories": items})
@@ -1014,22 +1028,22 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	initial := s.analyzer.Analyze(in, analyzer.Context{})
 	corr, err := s.store.CorrelationForTenant(r.Context(), p.TenantID, initial.Fingerprint, in.Repository, in.Organization, time.Now().UTC().Add(-s.cfg.IncidentWindow), s.cfg.CrossTenantCorrelation)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	prev, err := s.store.LastSuccessfulEnvironmentForTenant(r.Context(), p.TenantID, in.Repository, in.Workflow, in.Job)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	providerIncident, err := s.providerIncident(r.Context(), initial.Provider)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	result := s.analyzer.Analyze(in, analyzer.Context{CrossRepoCount: corr.Repositories, CrossOrgCount: corr.Organizations, RecentOccurrences: corr.Occurrences, ProviderIncident: providerIncident, PreviousEnvironment: prev})
 	if err := s.store.RecordAnalysisForTenant(r.Context(), p.TenantID, in, result, s.cfg.StoreRedactedExcerpts, s.cfg.StoreRawLogs); err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if s.cfg.Notifications.Enabled {
@@ -1074,7 +1088,7 @@ func (s *Server) baseline(w http.ResponseWriter, r *http.Request) {
 	}
 	p := principal(r)
 	if err := s.store.RecordSuccessfulEnvironmentForTenant(r.Context(), p.TenantID, in.Repository, in.Workflow, in.Job, in.CommitSHA, env, time.Now().UTC()); err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	s.audit(r, "baseline.create", "repository", in.Repository, nil)
@@ -1150,7 +1164,7 @@ func (s *Server) upsertRepositoryProfile(w http.ResponseWriter, r *http.Request)
 func (s *Server) apiKeys(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListAPIKeys(r.Context(), principal(r).TenantID)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"api_keys": items})
@@ -1185,7 +1199,7 @@ func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 func (s *Server) tenants(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListTenants(r.Context())
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"tenants": items})
@@ -1222,7 +1236,7 @@ func (s *Server) updateTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	tenant, err := s.store.GetTenant(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if tenant == nil {
@@ -1274,17 +1288,17 @@ func (s *Server) unbindInstallation(w http.ResponseWriter, r *http.Request) {
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	st, err := s.store.StatsForTenant(r.Context(), principal(r).TenantID)
 	if err != nil {
-		writeError(w, 500, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	feedback, err := s.store.FeedbackMetrics(r.Context(), principal(r).TenantID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	tests, err := s.store.ListTestCaseStats(r.Context(), principal(r).TenantID, "", "", 5000)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	flaky, quarantined := 0, 0
@@ -1298,6 +1312,14 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "ciradar_analyses_total %d\nciradar_incidents_open %d\nciradar_jobs_queued %d\nciradar_jobs_running %d\nciradar_jobs_failed %d\nciradar_repositories %d\nciradar_notification_failures_total %d\nciradar_feedback_total %d\nciradar_feedback_precision_percent %.2f\nciradar_tests_tracked %d\nciradar_tests_flaky %d\nciradar_tests_quarantined %d\n", st.Analyses, st.OpenIncidents, st.QueuedJobs, st.RunningJobs, st.FailedJobs, st.Repositories, st.NotificationFailures, feedback.Total, feedback.PrecisionPercent, len(tests), flaky, quarantined)
+}
+
+func refreshStreamWriteDeadline(w http.ResponseWriter) error {
+	err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(30 * time.Second))
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) mcpGet(w http.ResponseWriter, r *http.Request) {
@@ -1331,7 +1353,13 @@ func (s *Server) mcpGet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("MCP-Session-Id", sessionID)
-	_, _ = io.WriteString(w, "event: endpoint\ndata: /mcp\n\n")
+	if err := refreshStreamWriteDeadline(w); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if _, err := io.WriteString(w, "event: endpoint\ndata: /mcp\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
@@ -1341,11 +1369,21 @@ func (s *Server) mcpGet(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
+			if err := refreshStreamWriteDeadline(w); err != nil {
+				return
+			}
 			encoded, _ := json.Marshal(string(payload))
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", encoded)
+			if _, err := fmt.Fprintf(w, "event: message\ndata: %s\n\n", encoded); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-ticker.C:
-			_, _ = io.WriteString(w, ": heartbeat\n\n")
+			if err := refreshStreamWriteDeadline(w); err != nil {
+				return
+			}
+			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
@@ -1494,7 +1532,7 @@ func (s *Server) ciWebhook(provider string) http.HandlerFunc {
 		}
 		fresh, err := s.store.EnqueueDeliveryForTenant(r.Context(), delivery, provider, ev.TenantID, "ci.event", ev, time.Now().UTC())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		if !fresh {
@@ -1523,7 +1561,7 @@ func failedCIConclusion(v string) bool {
 func (s *Server) marketplaceSubscription(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListObjects(r.Context(), principal(r).TenantID, "marketplace_subscription", 20)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": items, "feature_gates": false})
@@ -1532,7 +1570,7 @@ func (s *Server) marketplaceSubscription(w http.ResponseWriter, r *http.Request)
 func (s *Server) marketplaceSubscriptions(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListObjects(r.Context(), model.DefaultTenantID, "marketplace_account_index", 1000)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": items, "feature_gates": false})
@@ -1567,7 +1605,7 @@ func (s *Server) githubMarketplaceWebhook(w http.ResponseWriter, r *http.Request
 	}
 	fresh, err := s.store.ClaimDelivery(r.Context(), delivery, "github.marketplace_purchase", 5*time.Minute)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !fresh {
@@ -1652,7 +1690,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	fresh, err := s.store.EnqueueDeliveryForTenant(r.Context(), delivery, eventType, ev.TenantID, "github.workflow_run", ev, time.Now().UTC())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !fresh {
@@ -2028,6 +2066,16 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst 
 		return err
 	}
 	return nil
+}
+
+func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error) {
+	requestID := requestIDFrom(r)
+	s.log.Error("request failed", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "error", err)
+	message := "internal server error"
+	if requestID != "" {
+		message += "; request_id=" + requestID
+	}
+	writeError(w, http.StatusInternalServerError, message)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

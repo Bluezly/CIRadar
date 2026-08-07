@@ -17,6 +17,16 @@ import (
 	"ciradar/internal/secrets"
 )
 
+const (
+	oauthClientNameMaxBytes    = 128
+	oauthClientURIMaxBytes     = 2048
+	oauthSoftwareFieldMaxBytes = 128
+	oauthRedirectURIMaxBytes   = 2048
+	oauthDynamicClientLimit    = 1000
+	oauthPKCEVerifierMinBytes  = 43
+	oauthPKCEVerifierMaxBytes  = 128
+)
+
 type oauthClient struct {
 	ID              string    `json:"client_id"`
 	Name            string    `json:"client_name,omitempty"`
@@ -40,6 +50,7 @@ type oauthCode struct {
 
 type oauthAccessToken struct {
 	ID        string          `json:"id"`
+	ClientID  string          `json:"client_id,omitempty"`
 	Resource  string          `json:"resource"`
 	Scope     string          `json:"scope"`
 	Principal model.Principal `json:"principal"`
@@ -119,13 +130,25 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "invalid registration request")
 		return
 	}
+	input.ClientName = strings.TrimSpace(input.ClientName)
+	input.ClientURI = strings.TrimSpace(input.ClientURI)
+	input.SoftwareID = strings.TrimSpace(input.SoftwareID)
+	input.SoftwareVersion = strings.TrimSpace(input.SoftwareVersion)
+	if len(input.ClientName) > oauthClientNameMaxBytes || len(input.SoftwareID) > oauthSoftwareFieldMaxBytes || len(input.SoftwareVersion) > oauthSoftwareFieldMaxBytes {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "client metadata exceeds the supported length")
+		return
+	}
+	if input.ClientURI != "" && !validOAuthClientURI(input.ClientURI) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "client_uri must use HTTPS or loopback HTTP")
+		return
+	}
 	if len(input.RedirectURIs) == 0 || len(input.RedirectURIs) > 20 {
-		writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "at least one redirect URI is required")
+		writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "between one and 20 redirect URIs are required")
 		return
 	}
 	for _, raw := range input.RedirectURIs {
 		if !validOAuthRedirect(raw) {
-			writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "redirect URI must use HTTPS or loopback HTTP")
+			writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", "redirect URI must use HTTPS or loopback HTTP and fit within the supported length")
 			return
 		}
 	}
@@ -146,9 +169,14 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not generate client ID")
 		return
 	}
-	client := oauthClient{ID: "mcp_" + clientID, Name: strings.TrimSpace(input.ClientName), RedirectURIs: uniqueStrings(input.RedirectURIs), CreatedAt: time.Now().UTC(), ClientURI: strings.TrimSpace(input.ClientURI), SoftwareID: strings.TrimSpace(input.SoftwareID), SoftwareVersion: strings.TrimSpace(input.SoftwareVersion)}
-	if err := s.store.PutObject(r.Context(), model.DefaultTenantID, "oauth_client", client.ID, client); err != nil {
+	client := oauthClient{ID: "mcp_" + clientID, Name: input.ClientName, RedirectURIs: uniqueStrings(input.RedirectURIs), CreatedAt: time.Now().UTC(), ClientURI: input.ClientURI, SoftwareID: input.SoftwareID, SoftwareVersion: input.SoftwareVersion}
+	created, err := s.store.PutObjectIfKindBelowLimit(r.Context(), model.DefaultTenantID, "oauth_client", client.ID, client, oauthDynamicClientLimit)
+	if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not register client")
+		return
+	}
+	if !created {
+		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "dynamic client registration capacity has been reached")
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"client_id": client.ID, "client_id_issued_at": client.CreatedAt.Unix(), "client_name": client.Name, "redirect_uris": client.RedirectURIs, "grant_types": []string{"authorization_code"}, "response_types": []string{"code"}, "token_endpoint_auth_method": "none"})
@@ -179,8 +207,8 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	challenge := strings.TrimSpace(query.Get("code_challenge"))
-	if query.Get("code_challenge_method") != "S256" || challenge == "" {
-		s.redirectOAuthError(w, r, redirectURI, state, "invalid_request", "PKCE S256 is required")
+	if query.Get("code_challenge_method") != "S256" || !validPKCEChallenge(challenge) {
+		s.redirectOAuthError(w, r, redirectURI, state, "invalid_request", "a valid PKCE S256 challenge is required")
 		return
 	}
 	p, authenticated := s.authenticate(r)
@@ -282,9 +310,17 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verifier := r.Form.Get("code_verifier")
-	digest := sha256.Sum256([]byte(verifier))
-	if verifier == "" || !constantString(code.CodeChallenge, base64.RawURLEncoding.EncodeToString(digest[:])) {
+	if !validPKCEVerifier(verifier) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		return
+	}
+	digest := sha256.Sum256([]byte(verifier))
+	if !constantString(code.CodeChallenge, base64.RawURLEncoding.EncodeToString(digest[:])) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		return
+	}
+	if _, ok := s.oauthClient(r.Context(), code.ClientID); !ok {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "OAuth client is no longer registered")
 		return
 	}
 	now := time.Now().UTC()
@@ -293,7 +329,7 @@ func (s *Server) oauthToken(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not generate access token")
 		return
 	}
-	access := oauthAccessToken{ID: accessID, Resource: code.Resource, Scope: code.Scope, Principal: code.Principal, IssuedAt: now, ExpiresAt: now.Add(time.Hour)}
+	access := oauthAccessToken{ID: accessID, ClientID: code.ClientID, Resource: code.Resource, Scope: code.Scope, Principal: code.Principal, IssuedAt: now, ExpiresAt: now.Add(time.Hour)}
 	access.Principal.Root = false
 	token, err := sealOAuthValue(s.dashboardSecret(), "access", access)
 	if err != nil {
@@ -320,7 +356,7 @@ func (s *Server) oauthRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	var token oauthAccessToken
 	if openOAuthValue(s.dashboardSecret(), "access", r.Form.Get("token"), &token) == nil && token.ID != "" {
-		if err := s.store.PutObject(r.Context(), token.Principal.TenantID, "oauth_revocation", token.ID, map[string]any{"revoked_at": time.Now().UTC()}); err != nil {
+		if err := s.store.PutObject(r.Context(), token.Principal.TenantID, "oauth_revocation", token.ID, map[string]any{"revoked_at": time.Now().UTC(), "expires_at": token.ExpiresAt}); err != nil {
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", "could not revoke access token")
 			return
 		}
@@ -335,6 +371,11 @@ func (s *Server) authenticateOAuthToken(ctx context.Context, raw string) (model.
 	}
 	if ok, err := s.store.GetObject(ctx, token.Principal.TenantID, "oauth_revocation", token.ID, nil); err != nil || ok {
 		return model.Principal{}, false
+	}
+	if token.ClientID != "" {
+		if _, ok := s.oauthClient(ctx, token.ClientID); !ok {
+			return model.Principal{}, false
+		}
 	}
 	tenant, err := s.store.GetTenant(ctx, token.Principal.TenantID)
 	if err != nil || tenant == nil || !tenant.Enabled {
@@ -402,8 +443,22 @@ func openOAuthValue(secret, purpose, value string, out any) error {
 }
 
 func validOAuthRedirect(raw string) bool {
+	if len(raw) == 0 || len(raw) > oauthRedirectURIMaxBytes {
+		return false
+	}
+	return validOAuthHTTPSOrLoopbackURL(raw, true)
+}
+
+func validOAuthClientURI(raw string) bool {
+	if len(raw) == 0 || len(raw) > oauthClientURIMaxBytes {
+		return false
+	}
+	return validOAuthHTTPSOrLoopbackURL(raw, false)
+}
+
+func validOAuthHTTPSOrLoopbackURL(raw string, rejectFragment bool) bool {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Fragment != "" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" {
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || (rejectFragment && parsed.Fragment != "") {
 		return false
 	}
 	if strings.EqualFold(parsed.Scheme, "https") {
@@ -411,6 +466,28 @@ func validOAuthRedirect(raw string) bool {
 	}
 	host := strings.ToLower(parsed.Hostname())
 	return strings.EqualFold(parsed.Scheme, "http") && (host == "127.0.0.1" || host == "localhost" || host == "::1")
+}
+
+func validPKCEChallenge(challenge string) bool {
+	if len(challenge) != 43 {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(challenge)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func validPKCEVerifier(verifier string) bool {
+	if len(verifier) < oauthPKCEVerifierMinBytes || len(verifier) > oauthPKCEVerifierMaxBytes {
+		return false
+	}
+	for i := 0; i < len(verifier); i++ {
+		c := verifier[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func normalizeOAuthScope(raw string, role model.Role) string {
@@ -504,4 +581,39 @@ func (s *Server) redirectOAuthError(w http.ResponseWriter, r *http.Request, redi
 	}
 	destination.RawQuery = values.Encode()
 	http.Redirect(w, r, destination.String(), http.StatusFound)
+}
+
+func (s *Server) oauthClients(w http.ResponseWriter, r *http.Request) {
+	objects, err := s.store.ListObjects(r.Context(), model.DefaultTenantID, "oauth_client", oauthDynamicClientLimit+1)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	clients := make([]oauthClient, 0, len(objects))
+	for _, object := range objects {
+		var client oauthClient
+		if err := json.Unmarshal(object.Value, &client); err != nil || client.ID == "" {
+			continue
+		}
+		clients = append(clients, client)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"clients": clients, "limit": oauthDynamicClientLimit})
+}
+
+func (s *Server) deleteOAuthClient(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" || len(id) > 256 {
+		writeError(w, http.StatusBadRequest, "client id is required")
+		return
+	}
+	if _, ok := s.oauthClient(r.Context(), id); !ok {
+		writeError(w, http.StatusNotFound, "OAuth client not found")
+		return
+	}
+	if err := s.store.DeleteObject(r.Context(), model.DefaultTenantID, "oauth_client", id); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	s.audit(r, "oauth.client_delete", "oauth_client", id, nil)
+	w.WriteHeader(http.StatusNoContent)
 }

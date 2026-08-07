@@ -47,7 +47,7 @@ func (s *Server) getAnalysisGitHubIssue(w http.ResponseWriter, r *http.Request) 
 	analysisID := strings.TrimSpace(r.PathValue("id"))
 	link, found, err := s.loadGitHubIssueLink(r, analysisID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !found {
@@ -66,7 +66,7 @@ func (s *Server) getAnalysisGitHubIssue(w http.ResponseWriter, r *http.Request) 
 	}
 	link = githubIssueLinkFromRemote(link, issue)
 	if err := s.store.PutObject(r.Context(), principal(r).TenantID, "github_issue", analysisID, link); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"link": link, "issue": issue})
@@ -81,7 +81,7 @@ func (s *Server) createAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 	analysisID := strings.TrimSpace(r.PathValue("id"))
 	analysis, err := s.store.GetAnalysisForTenant(r.Context(), p.TenantID, analysisID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if analysis == nil {
@@ -89,7 +89,7 @@ func (s *Server) createAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if _, found, err := s.loadGitHubIssueLink(r, analysisID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	} else if found {
 		writeError(w, http.StatusConflict, "analysis already has a linked GitHub issue")
@@ -103,7 +103,7 @@ func (s *Server) createAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 	var source model.RepairSource
 	foundSource, err := s.store.GetObject(r.Context(), p.TenantID, "analysis_source", analysisID, &source)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	repository := strings.TrimSpace(body.Repository)
@@ -147,7 +147,7 @@ func (s *Server) createAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 	now := time.Now().UTC()
 	link := model.ExternalIssueLink{TenantID: p.TenantID, AnalysisID: analysisID, Provider: "github", Repository: repository, InstallationID: installationID, Number: issue.Number, URL: issue.HTMLURL, State: issue.State, StateReason: issue.StateReason, Title: issue.Title, Locked: issue.Locked, CreatedAt: now, UpdatedAt: now, LastSyncedAt: now}
 	if err := s.store.PutObject(r.Context(), p.TenantID, "github_issue", analysisID, link); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	s.audit(r, "github.issue_created", "analysis", analysisID, map[string]string{"repository": repository, "issue_number": fmt.Sprint(issue.Number)})
@@ -162,7 +162,7 @@ func (s *Server) updateAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 	analysisID := strings.TrimSpace(r.PathValue("id"))
 	link, found, err := s.loadGitHubIssueLink(r, analysisID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !found {
@@ -228,7 +228,7 @@ func (s *Server) updateAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 	}
 	link = githubIssueLinkFromRemote(link, issue)
 	if err := s.store.PutObject(r.Context(), principal(r).TenantID, "github_issue", analysisID, link); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	s.audit(r, "github.issue_updated", "analysis", analysisID, map[string]string{"repository": link.Repository, "issue_number": fmt.Sprint(link.Number), "state": link.State})
@@ -243,7 +243,7 @@ func (s *Server) commentAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reque
 	analysisID := strings.TrimSpace(r.PathValue("id"))
 	link, found, err := s.loadGitHubIssueLink(r, analysisID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if !found {

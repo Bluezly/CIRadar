@@ -73,6 +73,17 @@ func (s *Server) slackChatOps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "missing action")
 		return
 	}
+	deliveryHash := sha256.Sum256(append([]byte(ts+":"), body...))
+	deliveryID := "chatops:slack:" + hex.EncodeToString(deliveryHash[:16])
+	fresh, e := s.store.RecordDelivery(r.Context(), deliveryID, "chatops.slack")
+	if e != nil {
+		writeError(w, http.StatusInternalServerError, "could not record Slack request")
+		return
+	}
+	if !fresh {
+		writeJSON(w, http.StatusOK, map[string]any{"response_type": "ephemeral", "text": "CI Radar: duplicate request ignored"})
+		return
+	}
 	msg, e := s.performChatAction(r, payload.Actions[0].Value, firstNonEmpty(payload.User.Username, payload.User.ID))
 	if e != nil {
 		writeJSON(w, 200, map[string]any{"response_type": "ephemeral", "text": "CI Radar: " + e.Error()})
@@ -103,8 +114,10 @@ func (s *Server) teamsChatOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload struct {
-		Text string `json:"text"`
-		From struct {
+		ID        string    `json:"id"`
+		Timestamp time.Time `json:"timestamp"`
+		Text      string    `json:"text"`
+		From      struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"from"`
@@ -116,8 +129,21 @@ func (s *Server) teamsChatOps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "invalid Teams payload")
 		return
 	}
+	if payload.ID == "" || payload.Timestamp.IsZero() || time.Since(payload.Timestamp) > 5*time.Minute || time.Until(payload.Timestamp) > time.Minute {
+		writeError(w, http.StatusUnauthorized, "stale or unidentified Teams request")
+		return
+	}
 	if !allowed(payload.From.ID, s.cfg.ChatOps.TeamsAllowedUsers) {
 		writeError(w, 403, "Teams user is not allowed")
+		return
+	}
+	fresh, e := s.store.RecordDelivery(r.Context(), "chatops:teams:"+payload.ID, "chatops.teams")
+	if e != nil {
+		writeError(w, http.StatusInternalServerError, "could not record Teams request")
+		return
+	}
+	if !fresh {
+		writeJSON(w, http.StatusOK, map[string]any{"type": "message", "text": "CI Radar: duplicate request ignored"})
 		return
 	}
 	value, e := teamsCommand(payload.Text, s.cfg.ChatOps.DefaultTenant)

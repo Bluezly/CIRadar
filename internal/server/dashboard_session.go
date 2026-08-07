@@ -21,8 +21,9 @@ import (
 const dashboardSessionCookie = "ciradar_dashboard_session"
 
 type dashboardSession struct {
-	Principal model.Principal `json:"principal"`
-	Expires   int64           `json:"expires"`
+	Principal     model.Principal `json:"principal"`
+	Expires       int64           `json:"expires"`
+	CredentialTag string          `json:"credential_tag,omitempty"`
 }
 
 func (s *Server) dashboardSecret() string {
@@ -97,12 +98,21 @@ func (s *Server) authToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
-	principal, ok := s.authenticateToken(r.Context(), strings.TrimSpace(body.Token), strings.TrimSpace(body.Tenant))
+	body.Token = strings.TrimSpace(body.Token)
+	if strings.HasPrefix(body.Token, "cir_oauth_") {
+		writeError(w, http.StatusBadRequest, "OAuth access tokens cannot create dashboard sessions")
+		return
+	}
+	principal, ok := s.authenticateToken(r.Context(), body.Token, strings.TrimSpace(body.Tenant))
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
-	value, err := sealDashboardSession(s.dashboardSecret(), dashboardSession{Principal: principal, Expires: time.Now().Add(8 * time.Hour).Unix()})
+	session := dashboardSession{Principal: principal, Expires: time.Now().Add(8 * time.Hour).Unix()}
+	if principal.Root {
+		session.CredentialTag = dashboardCredentialTag(body.Token)
+	}
+	value, err := sealDashboardSession(s.dashboardSecret(), session)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -127,6 +137,24 @@ func (s *Server) authenticateDashboardSession(r *http.Request) (model.Principal,
 	}
 	if tenant == nil || !tenant.Enabled {
 		return model.Principal{}, false
+	}
+	if session.Principal.Root {
+		expected := dashboardCredentialTag(strings.TrimSpace(s.cfg.AdminToken))
+		if session.CredentialTag == "" || !secureEqual(session.CredentialTag, expected) {
+			return model.Principal{}, false
+		}
+	}
+	if session.Principal.APIKeyID != "" {
+		key, err := s.store.GetAPIKey(r.Context(), session.Principal.TenantID, session.Principal.APIKeyID)
+		if err != nil {
+			s.log.Error("dashboard session API key lookup failed", "tenant_id", session.Principal.TenantID, "api_key_id", session.Principal.APIKeyID, "error", err)
+			return model.Principal{}, false
+		}
+		if key == nil || !key.RevokedAt.IsZero() {
+			return model.Principal{}, false
+		}
+		session.Principal.Name = key.Name
+		session.Principal.Role = key.Role
 	}
 	return session.Principal, true
 }
@@ -158,6 +186,11 @@ func (s *Server) authenticateToken(ctx context.Context, token, tenant string) (m
 		return *p, true
 	}
 	return model.Principal{}, false
+}
+
+func dashboardCredentialTag(token string) string {
+	sum := sha256.Sum256([]byte("ci-radar-dashboard-credential-v1|" + strings.TrimSpace(token)))
+	return base64.RawURLEncoding.EncodeToString(sum[:16])
 }
 
 func clearDashboardSession(w http.ResponseWriter, secure bool) {

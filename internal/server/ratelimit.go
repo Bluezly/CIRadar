@@ -1,12 +1,18 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"ciradar/internal/db"
 )
 
 const (
@@ -47,7 +53,7 @@ func newClientIPResolver(cidrs []string) *clientIPResolver {
 	return r
 }
 
-func (l *rateLimiter) allow(key string, now time.Time) bool {
+func (l *rateLimiter) take(key string, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	e := l.entries[key]
@@ -66,9 +72,9 @@ func (l *rateLimiter) allow(key string, now time.Time) bool {
 	for len(l.entries) > 20000 {
 		oldestKey := ""
 		oldest := now
-		for key, value := range l.entries {
+		for entryKey, value := range l.entries {
 			if oldestKey == "" || value.window.Before(oldest) {
-				oldestKey = key
+				oldestKey = entryKey
 				oldest = value.window
 			}
 		}
@@ -77,7 +83,19 @@ func (l *rateLimiter) allow(key string, now time.Time) bool {
 		}
 		delete(l.entries, oldestKey)
 	}
-	return e.count <= l.limit
+	if e.count <= l.limit {
+		return true, 0
+	}
+	retry := e.window.Add(l.window).Sub(now)
+	if retry < time.Second {
+		retry = time.Second
+	}
+	return false, retry
+}
+
+func (l *rateLimiter) allow(key string, now time.Time) bool {
+	allowed, _ := l.take(key, now)
+	return allowed
 }
 
 func remoteIP(remote string) net.IP {
@@ -137,20 +155,81 @@ func (r *clientIPResolver) resolve(req *http.Request) string {
 }
 
 func rateLimit(l *rateLimiter, resolver *clientIPResolver, next http.Handler) http.Handler {
+	return rateLimitWithShared(l, nil, "", resolver, nil, next)
+}
+
+type rateLimitWarning struct {
+	mu   sync.Mutex
+	last time.Time
+}
+
+func (w *rateLimitWarning) log(logger *slog.Logger, message string, err error) {
+	if logger == nil || err == nil {
+		return
+	}
+	now := time.Now().UTC()
+	w.mu.Lock()
+	if !w.last.IsZero() && now.Sub(w.last) < time.Minute {
+		w.mu.Unlock()
+		return
+	}
+	w.last = now
+	w.mu.Unlock()
+	logger.Warn(message, "error", err)
+}
+
+func rateLimitKey(secret, key string) string {
+	if strings.TrimSpace(secret) == "" {
+		sum := sha256.Sum256([]byte(key))
+		return hex.EncodeToString(sum[:])
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(key))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func rateLimitWithShared(l *rateLimiter, shared db.DistributedRateLimiter, secret string, resolver *clientIPResolver, logger *slog.Logger, next http.Handler) http.Handler {
 	webhookLimit := l.limit * 10
 	if webhookLimit < 2000 {
 		webhookLimit = 2000
 	}
 	webhooks := newRateLimiter(webhookLimit, l.window)
+	oauthRegister := newRateLimiter(30, 10*time.Minute)
+	oauthToken := newRateLimiter(120, time.Minute)
+	warning := &rateLimitWarning{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limiter := l
-		if strings.HasPrefix(r.URL.Path, "/webhooks/") || strings.HasPrefix(r.URL.Path, "/chatops/") {
+		scope := "http"
+		switch {
+		case r.URL.Path == "/oauth/register":
+			limiter = oauthRegister
+			scope = "oauth_register"
+		case r.URL.Path == "/oauth/token":
+			limiter = oauthToken
+			scope = "oauth_token"
+		case strings.HasPrefix(r.URL.Path, "/webhooks/") || strings.HasPrefix(r.URL.Path, "/chatops/"):
 			limiter = webhooks
+			scope = "webhook"
 		}
-		if !limiter.allow(resolver.resolve(r), time.Now().UTC()) {
-			w.Header().Set("Retry-After", "60")
+		key := resolver.resolve(r)
+		now := time.Now().UTC()
+		allowed, retry := limiter.take(key, now)
+		if !allowed {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retry)))
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
+		}
+		if shared != nil {
+			allowed, retry, err := shared.TakeRateLimit(r.Context(), scope, rateLimitKey(secret, key), limiter.limit, limiter.window, now)
+			if err != nil {
+				warning.log(logger, "shared rate limiter unavailable; rejecting request", err)
+				writeError(w, http.StatusServiceUnavailable, "distributed rate limiter unavailable")
+				return
+			} else if !allowed {
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retry)))
+				writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -250,12 +329,6 @@ func (l *authFailureLimiter) recordFailure(key string, now time.Time) time.Durat
 	return delay
 }
 
-func (l *authFailureLimiter) reset(key string) {
-	l.mu.Lock()
-	delete(l.entries, key)
-	l.mu.Unlock()
-}
-
 func (l *authFailureLimiter) pruneLocked(now time.Time) {
 	if len(l.entries) <= 10000 {
 		return
@@ -329,26 +402,46 @@ func retryAfterSeconds(delay time.Duration) int {
 }
 
 func authFailureRateLimit(l *authFailureLimiter, resolver *clientIPResolver, next http.Handler) http.Handler {
+	return authFailureRateLimitWithShared(l, nil, "", resolver, nil, next)
+}
+
+func authFailureRateLimitWithShared(l *authFailureLimiter, shared db.DistributedRateLimiter, secret string, resolver *clientIPResolver, logger *slog.Logger, next http.Handler) http.Handler {
+	warning := &rateLimitWarning{}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isAuthenticationAttempt(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		key := resolver.resolve(r)
+		keyHash := rateLimitKey(secret, key)
 		now := time.Now().UTC()
 		if delay := l.retryAfter(key, now); delay > 0 {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(delay)))
 			writeError(w, http.StatusTooManyRequests, "too many failed authentication attempts")
 			return
 		}
+		if shared != nil {
+			delay, err := shared.AuthFailureRetryAfter(r.Context(), keyHash, now)
+			if err != nil {
+				warning.log(logger, "shared authentication limiter unavailable; rejecting authentication attempt", err)
+				writeError(w, http.StatusServiceUnavailable, "distributed authentication limiter unavailable")
+				return
+			} else if delay > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(delay)))
+				writeError(w, http.StatusTooManyRequests, "too many failed authentication attempts")
+				return
+			}
+		}
 		wrapped, capture := captureStatus(w)
 		next.ServeHTTP(wrapped, r)
 		if capture.status == http.StatusUnauthorized {
-			l.recordFailure(key, time.Now().UTC())
+			failureTime := time.Now().UTC()
+			l.recordFailure(key, failureTime)
+			if shared != nil {
+				_, err := shared.RecordAuthFailure(r.Context(), keyHash, l.threshold, l.window, l.baseDelay, l.maxDelay, failureTime)
+				warning.log(logger, "failed to update shared authentication limiter", err)
+			}
 			return
-		}
-		if r.Method == http.MethodPost && r.URL.Path == "/auth/token" && capture.status >= 200 && capture.status < 300 {
-			l.reset(key)
 		}
 	})
 }
