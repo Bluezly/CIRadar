@@ -342,15 +342,18 @@ type SuggestedAction struct {
 }
 
 type DiagnosisFeedback struct {
-	ID          string      `json:"id"`
-	TenantID    string      `json:"tenant_id"`
-	AnalysisID  string      `json:"analysis_id"`
-	Verdict     string      `json:"verdict"`
-	ActualCause Attribution `json:"actual_cause,omitempty"`
-	Comment     string      `json:"comment,omitempty"`
-	Actor       string      `json:"actor,omitempty"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	ID                string      `json:"id"`
+	TenantID          string      `json:"tenant_id"`
+	AnalysisID        string      `json:"analysis_id"`
+	Verdict           string      `json:"verdict"`
+	ActualCategory    Category    `json:"actual_category,omitempty"`
+	ActualCause       Attribution `json:"actual_cause,omitempty"`
+	ActualProvider    string      `json:"actual_provider,omitempty"`
+	ActualErrorFamily string      `json:"actual_error_family,omitempty"`
+	Comment           string      `json:"comment,omitempty"`
+	Actor             string      `json:"actor,omitempty"`
+	CreatedAt         time.Time   `json:"created_at"`
+	UpdatedAt         time.Time   `json:"updated_at"`
 }
 
 type FeedbackSummary struct {
@@ -360,12 +363,18 @@ type FeedbackSummary struct {
 }
 
 type FeedbackMetrics struct {
-	Total             int     `json:"total"`
-	Correct           int     `json:"correct"`
-	Partial           int     `json:"partial"`
-	Incorrect         int     `json:"incorrect"`
-	PrecisionPercent  float64 `json:"precision_percent"`
-	ExternalPrecision float64 `json:"external_precision_percent"`
+	Total                      int     `json:"total"`
+	Correct                    int     `json:"correct"`
+	Partial                    int     `json:"partial"`
+	Incorrect                  int     `json:"incorrect"`
+	AgreementPercent           float64 `json:"agreement_percent"`
+	ExternalAgreementPercent   float64 `json:"external_agreement_percent"`
+	LabeledCategoryCases       int     `json:"labeled_category_cases"`
+	CategoryAccuracyPercent    float64 `json:"category_accuracy_percent,omitempty"`
+	LabeledAttributionCases    int     `json:"labeled_attribution_cases"`
+	AttributionAccuracyPercent float64 `json:"attribution_accuracy_percent,omitempty"`
+	PrecisionPercent           float64 `json:"precision_percent"`
+	ExternalPrecision          float64 `json:"external_precision_percent"`
 }
 
 type TestObservation struct {
