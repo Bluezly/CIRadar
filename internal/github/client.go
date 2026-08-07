@@ -162,7 +162,7 @@ func (c *Client) InstallationToken(ctx context.Context, installationID int64) (s
 		return "", errors.New("GitHub returned empty installation token")
 	}
 	c.mu.Lock()
-	c.tokens[installationID] = cachedToken{Token: out.Token, ExpiresAt: out.ExpiresAt}
+	c.tokens[installationID] = cachedToken(out)
 	c.mu.Unlock()
 	return out.Token, nil
 }
