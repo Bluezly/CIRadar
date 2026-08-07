@@ -158,7 +158,7 @@ func (m *Manager) samlCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid SAML response", http.StatusUnauthorized)
 		return
 	}
-	if err := verifySAMLXML(r.Context(), m.cfg.SAMLXMLSecPath, m.cfg.SAMLIdPCertificate, xmlBytes); err != nil {
+	if err := verifySAMLXML(r.Context(), m.cfg.SAMLXMLSecPath, m.cfg.SAMLXMLSecSHA256, m.cfg.SAMLIdPCertificate, xmlBytes); err != nil {
 		http.Error(w, "SAML signature validation failed", http.StatusUnauthorized)
 		return
 	}
@@ -484,10 +484,29 @@ func validSAMLID(value string) bool {
 	return true
 }
 
-func verifySAMLXML(parent context.Context, xmlsecPath, certificate string, data []byte) error {
+func verifyXMLSecDigest(path, expected string) error {
+	expected = strings.ToLower(strings.TrimSpace(expected))
+	if len(expected) != sha256.Size*2 {
+		return errors.New("xmlsec1 SHA-256 pin is missing or invalid")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read xmlsec1 for integrity verification: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != expected {
+		return errors.New("xmlsec1 executable changed after configuration validation")
+	}
+	return nil
+}
+
+func verifySAMLXML(parent context.Context, xmlsecPath, expectedSHA256, certificate string, data []byte) error {
 	executable, err := exec.LookPath(xmlsecPath)
 	if err != nil {
 		return fmt.Errorf("locate xmlsec1: %w", err)
+	}
+	if err := verifyXMLSecDigest(executable, expectedSHA256); err != nil {
+		return err
 	}
 	directory, err := os.MkdirTemp("", "ciradar-saml-")
 	if err != nil {
