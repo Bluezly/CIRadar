@@ -8,10 +8,10 @@ import (
 	"ciradar/internal/model"
 )
 
-func TestRC13BuiltinRuleCountAndUniqueness(t *testing.T) {
+func TestRC14BuiltinRuleCountAndUniqueness(t *testing.T) {
 	rules := BuiltinRules()
-	if len(rules) != 624 {
-		t.Fatalf("builtin rule count=%d want=624", len(rules))
+	if len(rules) != 630 {
+		t.Fatalf("builtin rule count=%d want=630", len(rules))
 	}
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
@@ -22,7 +22,7 @@ func TestRC13BuiltinRuleCountAndUniqueness(t *testing.T) {
 	}
 }
 
-func TestRC13RecoveredRepresentativeDiagnoses(t *testing.T) {
+func TestRC14RecoveredRepresentativeDiagnoses(t *testing.T) {
 	tests := []struct {
 		name        string
 		log         string
@@ -39,6 +39,35 @@ func TestRC13RecoveredRepresentativeDiagnoses(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := a.Analyze(model.AnalysisInput{TenantID: "alpha", Log: tt.log}, Context{})
+			if r.Category != tt.category || r.Provider != tt.provider || r.ErrorFamily != tt.errorFamily {
+				t.Fatalf("got category=%s provider=%q family=%q rules=%v", r.Category, r.Provider, r.ErrorFamily, r.MatchedRules)
+			}
+		})
+	}
+}
+
+func TestRC14CrossProjectRegressionCases(t *testing.T) {
+	tests := []struct {
+		name        string
+		repository  string
+		log         string
+		category    model.Category
+		provider    string
+		errorFamily string
+	}{
+		{name: "actions setup-node missing node headers", repository: "actions/setup-node", log: "gyp ERR! build error\n../src/addon.cc:1:10: fatal error: node.h: No such file or directory\ncompilation terminated.", category: model.CategoryToolchainFailure, provider: "node-gyp", errorFamily: "node-headers-missing"},
+		{name: "node-gyp missing Visual Studio", repository: "nodejs/node-gyp", log: "gyp ERR! find VS could not use PowerShell to find Visual Studio 2017 or newer\ngyp ERR! find VS Could not find any Visual Studio installation to use", category: model.CategoryToolchainFailure, provider: "node-gyp", errorFamily: "native-toolchain-unavailable"},
+		{name: "supabase postgres scram", repository: "supabase/cli", log: "database connection failed: SASL authentication failed: invalid SCRAM server-final-message", category: model.CategoryCodeFailure, provider: "PostgreSQL", errorFamily: "scram-authentication-failure"},
+		{name: "postgres password authentication", repository: "postgres/postgres", log: `FATAL: password authentication failed for user "ci_runner"`, category: model.CategoryCodeFailure, provider: "PostgreSQL", errorFamily: "scram-authentication-failure"},
+		{name: "gradle invalid heap", repository: "gradle/gradle-build-action", log: "Invalid maximum heap size: -Xmx999999g\nError: Could not create the Java Virtual Machine.\nError: A fatal exception has occurred. Program will exit.", category: model.CategoryToolchainFailure, provider: "JVM", errorFamily: "invalid-jvm-option"},
+		{name: "gradle unsupported vm option", repository: "gradle/gradle", log: "Unrecognized VM option 'UseConcMarkSweepGC'\nError: Could not create the Java Virtual Machine.", category: model.CategoryToolchainFailure, provider: "JVM", errorFamily: "invalid-jvm-option"},
+		{name: "audio whisper cache bad request", repository: "bnosac/audio.whisper", log: "Failed to restore cache: Cache service responded with 400 Bad Request", category: model.CategoryCacheFailure, provider: "GitHub Actions Cache", errorFamily: "cache-service-request-rejected"},
+		{name: "github cache service unavailable", repository: "actions/cache", log: "Failed to save cache: Cache service responded with 503 Service Unavailable", category: model.CategoryProviderIncident, provider: "GitHub Actions Cache", errorFamily: "cache-service-unavailable"},
+	}
+	a := New("test")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := a.Analyze(model.AnalysisInput{TenantID: "alpha", Repository: tt.repository, Log: tt.log}, Context{})
 			if r.Category != tt.category || r.Provider != tt.provider || r.ErrorFamily != tt.errorFamily {
 				t.Fatalf("got category=%s provider=%q family=%q rules=%v", r.Category, r.Provider, r.ErrorFamily, r.MatchedRules)
 			}
