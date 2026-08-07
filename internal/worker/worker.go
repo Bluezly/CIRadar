@@ -460,22 +460,26 @@ func (w *Worker) createDraftRepair(ctx context.Context, analysis model.AnalysisR
 	if !explicit && !automaticRepairEligible(w.cfg.Repair, analysis) {
 		return model.RepairResult{}, fmt.Errorf("code evidence score %d is below automatic repair minimum %d", model.CodeEvidenceScoreOf(analysis), w.cfg.Repair.MinimumScore)
 	}
-	var existing model.RepairResult
-	found, err := w.store.GetObject(ctx, analysis.TenantID, "repair_result", analysis.ID, &existing)
-	if err != nil {
-		return model.RepairResult{}, err
-	}
-	if found && existing.Status == "draft_pr_created" {
-		return existing, nil
-	}
 	var source model.RepairSource
-	found, err = w.store.GetObject(ctx, analysis.TenantID, "analysis_source", analysis.ID, &source)
+	found, err := w.store.GetObject(ctx, analysis.TenantID, "analysis_source", analysis.ID, &source)
 	if err != nil {
 		return model.RepairResult{}, err
 	}
 	if !found || source.Provider != "github" {
 		return model.RepairResult{}, errors.New("draft repair PR is available only for GitHub analyses with source metadata")
 	}
+	var existing model.RepairResult
+	found, err = w.store.GetObject(ctx, analysis.TenantID, "repair_result", analysis.ID, &existing)
+	if err != nil {
+		return model.RepairResult{}, err
+	}
+	if found && existing.Status == "draft_pr_created" {
+		if err := w.enqueueRepairPRNotification(ctx, analysis, source, existing); err != nil {
+			return existing, fmt.Errorf("enqueue repair PR notification: %w", err)
+		}
+		return existing, nil
+	}
+	found = true
 	result, createErr := repair.CreateGitHubDraftPR(ctx, w.github, source, analysis, enhancement.Patch, w.cfg.Repair.BranchPrefix, w.cfg.Repair.MaximumFiles, w.cfg.Repair.MaximumLines)
 	if createErr != nil {
 		result = model.RepairResult{TenantID: analysis.TenantID, AnalysisID: analysis.ID, Provider: source.Provider, Status: "failed", Error: createErr.Error(), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
@@ -483,15 +487,34 @@ func (w *Worker) createDraftRepair(ctx context.Context, analysis model.AnalysisR
 	}
 	if err := w.store.PutObject(ctx, analysis.TenantID, "repair_result", analysis.ID, result); err != nil {
 		w.log.Error("store draft repair result failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error", err)
+		createErr = errors.Join(createErr, fmt.Errorf("store draft repair result: %w", err))
 	}
 	action := "repair.draft_pr_failed"
 	if result.Status == "draft_pr_created" {
 		action = "repair.draft_pr_created"
 	}
-	if err := w.store.RecordAudit(ctx, model.AuditEvent{TenantID: analysis.TenantID, Actor: "system", Role: model.RoleOperator, Action: action, Resource: "analysis", ResourceID: analysis.ID, Metadata: map[string]string{"pull_request_url": result.PullRequestURL, "error": result.Error}}); err != nil {
+	auditID := "audit_" + strings.ReplaceAll(action, ".", "_") + "_" + analysis.ID
+	if err := w.store.RecordAudit(ctx, model.AuditEvent{ID: auditID, TenantID: analysis.TenantID, Actor: "system", Role: model.RoleOperator, Action: action, Resource: "analysis", ResourceID: analysis.ID, Metadata: map[string]string{"pull_request_url": result.PullRequestURL, "error": result.Error}}); err != nil {
 		w.log.Error("record draft repair audit failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error", err)
 	}
+	if result.Status == "draft_pr_created" {
+		if err := w.enqueueRepairPRNotification(ctx, analysis, source, result); err != nil {
+			createErr = errors.Join(createErr, fmt.Errorf("enqueue repair PR notification: %w", err))
+		}
+	}
 	return result, createErr
+}
+
+func (w *Worker) enqueueRepairPRNotification(ctx context.Context, analysis model.AnalysisResult, source model.RepairSource, result model.RepairResult) error {
+	if w.notifier == nil || !w.notifier.Enabled() {
+		return nil
+	}
+	event := notifications.RepairPRCreatedEvent(analysis, source, result)
+	if err := w.store.EnqueueForTenant(ctx, analysis.TenantID, "notify.event", event, time.Now().UTC()); err != nil {
+		w.log.Error("enqueue repair PR notification failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "pull_request", result.PullRequestNumber, "error", err)
+		return err
+	}
+	return nil
 }
 
 func (w *Worker) costRate(provider, runnerClass string, labels []string) float64 {
