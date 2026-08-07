@@ -44,6 +44,11 @@ func testSAMLPrerequisites(t *testing.T, cfg *Config) {
 		t.Fatal(err)
 	}
 	cfg.SSO.SAMLXMLSecPath = xmlsecPath
+	hash, err := fileSHA256Hex(xmlsecPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SSO.SAMLXMLSecSHA256 = hash
 }
 
 func TestDefaultIsPrivateAndChannelsUnique(t *testing.T) {
@@ -57,6 +62,15 @@ func TestDefaultIsPrivateAndChannelsUnique(t *testing.T) {
 			t.Fatalf("duplicate channel %q", ch.Name)
 		}
 		seen[ch.Name] = true
+		hasFlaky := false
+		hasQuarantined := false
+		for _, event := range ch.Events {
+			hasFlaky = hasFlaky || event == "test_flaky"
+			hasQuarantined = hasQuarantined || event == "test_quarantined"
+		}
+		if hasFlaky && !hasQuarantined {
+			t.Fatalf("channel %q notifies test_flaky but not test_quarantined", ch.Name)
+		}
 	}
 }
 
@@ -308,10 +322,42 @@ func TestChatOpsRequiresExplicitAllowlists(t *testing.T) {
 	cfg.ChatOps.Enabled = true
 	cfg.ChatOps.SlackSigningSecret = "slack-secret"
 	cfg.ChatOps.SlackAllowedTeams = []string{"T123"}
+	cfg.ChatOps.SlackTeamTenants = map[string]string{"T123": "default"}
 	cfg.ChatOps.TeamsSigningSecret = "teams-secret"
 	cfg.ChatOps.TeamsAllowedUsers = []string{"29:user"}
 	if err := cfg.normalize(); err != nil {
 		t.Fatalf("ChatOps with explicit allowlists was rejected: %v", err)
+	}
+}
+
+func TestChatOpsSlackRequiresWorkspaceTenantBinding(t *testing.T) {
+	cfg := testConfig()
+	cfg.ChatOps.Enabled = true
+	cfg.ChatOps.SlackSigningSecret = "slack-secret"
+	cfg.ChatOps.SlackAllowedTeams = []string{"T-ALPHA"}
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "slack_team_tenants") {
+		t.Fatalf("Slack ChatOps without a tenant binding was accepted: %v", err)
+	}
+
+	cfg = testConfig()
+	cfg.ChatOps.Enabled = true
+	cfg.ChatOps.SlackSigningSecret = "slack-secret"
+	cfg.ChatOps.SlackAllowedTeams = []string{"T-ALPHA", "T-BETA"}
+	cfg.ChatOps.SlackTeamTenants = map[string]string{"T-ALPHA": "alpha"}
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "T-BETA") {
+		t.Fatalf("unbound allowed Slack team was accepted: %v", err)
+	}
+
+	cfg = testConfig()
+	cfg.ChatOps.Enabled = true
+	cfg.ChatOps.SlackSigningSecret = "slack-secret"
+	cfg.ChatOps.SlackAllowedTeams = []string{"T-ALPHA", "T-BETA"}
+	cfg.ChatOps.SlackTeamTenants = map[string]string{" T-ALPHA ": " Alpha ", "t-beta": "beta"}
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("valid Slack workspace bindings were rejected: %v", err)
+	}
+	if cfg.ChatOps.SlackTeamTenants["t-alpha"] != "alpha" || cfg.ChatOps.SlackTeamTenants["t-beta"] != "beta" {
+		t.Fatalf("Slack workspace bindings were not normalized: %#v", cfg.ChatOps.SlackTeamTenants)
 	}
 }
 
@@ -371,6 +417,36 @@ func TestSAMLDefaultsToStrictSecurityProfile(t *testing.T) {
 	}
 	if cfg.SSO.SAMLSecurityProfile != "strict" {
 		t.Fatalf("profile=%q", cfg.SSO.SAMLSecurityProfile)
+	}
+}
+
+func TestSAMLRequiresPinnedXMLSecDigest(t *testing.T) {
+	cfg := testConfig()
+	cfg.SSO.Enabled = true
+	cfg.SSO.Mode = "saml"
+	cfg.SSO.SessionSecret = "abcdef0123456789abcdef0123456789"
+	cfg.SSO.SAMLEntityID = "https://ciradar.example/saml"
+	cfg.SSO.SAMLIdPSSOURL = "https://idp.example/sso"
+	cfg.SSO.SAMLIdPEntityID = "https://idp.example/metadata"
+	cfg.SSO.SAMLACSURL = "https://ciradar.example/auth/callback"
+	testSAMLPrerequisites(t, &cfg)
+	cfg.SSO.SAMLXMLSecSHA256 = strings.Repeat("0", 64)
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched xmlsec1 digest was accepted: %v", err)
+	}
+
+	cfg = testConfig()
+	cfg.SSO.Enabled = true
+	cfg.SSO.Mode = "saml"
+	cfg.SSO.SessionSecret = "abcdef0123456789abcdef0123456789"
+	cfg.SSO.SAMLEntityID = "https://ciradar.example/saml"
+	cfg.SSO.SAMLIdPSSOURL = "https://idp.example/sso"
+	cfg.SSO.SAMLIdPEntityID = "https://idp.example/metadata"
+	cfg.SSO.SAMLACSURL = "https://ciradar.example/auth/callback"
+	testSAMLPrerequisites(t, &cfg)
+	cfg.SSO.SAMLXMLSecSHA256 = ""
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "saml_xmlsec_sha256") {
+		t.Fatalf("missing xmlsec1 digest was accepted: %v", err)
 	}
 }
 
