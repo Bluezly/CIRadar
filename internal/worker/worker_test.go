@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -378,15 +379,33 @@ func TestPRCommentIsStickyAndIncludesActions(t *testing.T) {
 
 func TestApprovalGatedRepairCreatesDraftPR(t *testing.T) {
 	var pullCreated bool
+	var branchCreated bool
+	var fileUpdated bool
 	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/77/access_tokens":
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "install-token", "expires_at": time.Now().Add(time.Hour)})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/pulls":
+			_ = json.NewEncoder(w).Encode([]any{})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/api/git/ref/heads/"):
+			if !branchCreated {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": map[string]any{"sha": "branch-sha"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/api/contents/src/app.js":
-			_ = json.NewEncoder(w).Encode(map[string]any{"path": "src/app.js", "sha": "sha-file", "encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("const retries = 1;\n"))})
+			content := "const retries = 1;\n"
+			sha := "sha-file"
+			if r.URL.Query().Get("ref") != "abc" && fileUpdated {
+				content = "const retries = 2;\n"
+				sha = "updated-sha"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"path": "src/app.js", "sha": sha, "encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(content))})
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/git/refs":
+			branchCreated = true
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/api/contents/src/app.js":
+			fileUpdated = true
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/pulls":
 			pullCreated = true
@@ -414,7 +433,10 @@ func TestApprovalGatedRepairCreatesDraftPR(t *testing.T) {
 	cfg.Repair.Enabled = true
 	cfg.Repair.AutoDraftPR = true
 	cfg.Repair.MinimumScore = 70
-	wkr := New(cfg, store, analyzer.New("test-key"), client, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg.Notifications.Enabled = true
+	cfg.Notifications.Channels = []config.NotificationChannel{{Name: "slack", Type: "slack", Enabled: true, Events: []string{"repair_pr_created"}, URL: "https://hooks.example.invalid/slack"}}
+	notifier := notifications.New(cfg.Notifications, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	wkr := New(cfg, store, analyzer.New("test-key"), client, notifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	patch := "--- a/src/app.js\n+++ b/src/app.js\n@@ -1 +1 @@\n-const retries = 1;\n+const retries = 2;\n"
 	wkr.maybeCreateDraftRepair(context.Background(), analysis, model.LLMEnhancement{AnalysisID: analysis.ID, TenantID: "alpha", Patch: patch})
 	if !pullCreated {
@@ -424,6 +446,20 @@ func TestApprovalGatedRepairCreatesDraftPR(t *testing.T) {
 	found, err := store.GetObject(context.Background(), "alpha", "repair_result", analysis.ID, &result)
 	if err != nil || !found || result.Status != "draft_pr_created" || result.PullRequestNumber != 13 {
 		t.Fatalf("result=%#v found=%v err=%v", result, found, err)
+	}
+	job, err := store.ClaimJob(context.Background(), "test-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil || job.Type != "notify.event" || job.TenantID != "alpha" {
+		t.Fatalf("repair notification job=%#v", job)
+	}
+	var notification model.NotificationEvent
+	if err := json.Unmarshal(job.Payload, &notification); err != nil {
+		t.Fatal(err)
+	}
+	if notification.Type != "repair_pr_created" || notification.DetailsURL != "https://github.example/pr/13" || notification.Repository != "acme/api" {
+		t.Fatalf("repair notification=%#v", notification)
 	}
 }
 
@@ -447,5 +483,99 @@ func TestExternalityThresholdStillProtectsAutomaticRetry(t *testing.T) {
 	r := model.AnalysisResult{Attribution: model.AttributionCode, Score: -100, ExternalityScore: -100, EvidenceStrength: 100, CodeEvidenceScore: 100}
 	if r.Score >= 85 {
 		t.Fatal("code evidence must not satisfy the positive external retry threshold")
+	}
+}
+
+func TestExistingDraftRepairRequeuesIdempotentNotificationWithoutGitHubMutation(t *testing.T) {
+	var apiCalls int
+	client, server := testGitHubClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiCalls++
+		http.Error(w, "unexpected GitHub call", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.CreateTenant(context.Background(), "alpha", "Alpha"); err != nil {
+		t.Fatal(err)
+	}
+	analysis := model.AnalysisResult{ID: "analysis-existing-repair", TenantID: "alpha", Attribution: model.AttributionCode, EvidenceStrength: 90, CodeEvidenceScore: 90, Summary: "fix retry"}
+	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", InstallationID: 77, CommitSHA: "abc", BaseBranch: "main"}
+	result := model.RepairResult{TenantID: "alpha", AnalysisID: analysis.ID, Provider: "github", Status: "draft_pr_created", PullRequestNumber: 42, PullRequestURL: "https://github.example/acme/api/pull/42", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := store.PutObject(context.Background(), "alpha", "analysis_source", analysis.ID, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutObject(context.Background(), "alpha", "repair_result", analysis.ID, result); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Repair.Enabled = true
+	cfg.Repair.AutoDraftPR = true
+	cfg.Notifications.Enabled = true
+	cfg.Notifications.Channels = []config.NotificationChannel{{Name: "slack", Type: "slack", Enabled: true, Events: []string{"repair_pr_created"}, URL: "https://hooks.example.invalid/slack"}}
+	notifier := notifications.New(cfg.Notifications, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	wkr := New(cfg, store, analyzer.New("test-key"), client, notifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got, err := wkr.createDraftRepair(context.Background(), analysis, model.LLMEnhancement{AnalysisID: analysis.ID, TenantID: "alpha", Patch: "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PullRequestNumber != 42 || apiCalls != 0 {
+		t.Fatalf("result=%#v apiCalls=%d", got, apiCalls)
+	}
+	job, err := store.ClaimJob(context.Background(), "test-worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil || job.Type != "notify.event" {
+		t.Fatalf("notification job=%#v", job)
+	}
+	var event model.NotificationEvent
+	if err := json.Unmarshal(job.Payload, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.ID != "evt_repair_pr_"+analysis.ID || event.DetailsURL != result.PullRequestURL {
+		t.Fatalf("event=%#v", event)
+	}
+}
+
+type enqueueFailBackend struct {
+	db.Backend
+}
+
+func (b enqueueFailBackend) EnqueueForTenant(context.Context, string, string, any, time.Time) error {
+	return errors.New("queue unavailable")
+}
+
+func TestExistingDraftRepairRetriesWhenNotificationQueueFails(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	analysis := model.AnalysisResult{ID: "analysis-notify-retry", TenantID: model.DefaultTenantID, Attribution: model.AttributionCode, EvidenceStrength: 90, CodeEvidenceScore: 90}
+	source := model.RepairSource{TenantID: model.DefaultTenantID, Provider: "github", Repository: "acme/api", InstallationID: 77, CommitSHA: "abc", BaseBranch: "main"}
+	result := model.RepairResult{TenantID: model.DefaultTenantID, AnalysisID: analysis.ID, Provider: "github", Status: "draft_pr_created", PullRequestNumber: 9, PullRequestURL: "https://github.example/acme/api/pull/9"}
+	if err := store.PutObject(context.Background(), model.DefaultTenantID, "analysis_source", analysis.ID, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutObject(context.Background(), model.DefaultTenantID, "repair_result", analysis.ID, result); err != nil {
+		t.Fatal(err)
+	}
+	backend := enqueueFailBackend{Backend: store}
+	cfg := config.Default()
+	cfg.Repair.Enabled = true
+	cfg.Notifications.Enabled = true
+	cfg.Notifications.Channels = []config.NotificationChannel{{Name: "slack", Type: "slack", Enabled: true, Events: []string{"repair_pr_created"}, URL: "https://hooks.example.invalid/slack"}}
+	notifier := notifications.New(cfg.Notifications, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	client, server := testGitHubClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unexpected GitHub call", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	wkr := New(cfg, backend, analyzer.New("test-key"), client, notifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got, err := wkr.createDraftRepair(context.Background(), analysis, model.LLMEnhancement{Patch: "--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n"}, true)
+	if got.PullRequestNumber != 9 || err == nil || !strings.Contains(err.Error(), "notification") {
+		t.Fatalf("result=%+v err=%v", got, err)
 	}
 }
