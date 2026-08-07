@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,5 +234,23 @@ func TestDoJSONRejectsEmptyResponseWhenOutputIsRequired(t *testing.T) {
 func TestReadLimitedBodyRejectsOversizedResponse(t *testing.T) {
 	if _, err := readLimitedBody(strings.NewReader("12345"), 4); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestGitHubAPIErrorPreservesStatusForProgrammaticHandling(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"not found"}`))
+	}))
+	defer server.Close()
+	client := &Client{baseURL: server.URL, http: server.Client()}
+	var out map[string]any
+	err := client.doJSON(context.Background(), http.MethodGet, "/missing", "", nil, &out)
+	if err == nil || !IsStatus(err, http.StatusNotFound) {
+		t.Fatalf("err=%v", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound || apiErr.Path != "/missing" {
+		t.Fatalf("api error=%#v", apiErr)
 	}
 }
