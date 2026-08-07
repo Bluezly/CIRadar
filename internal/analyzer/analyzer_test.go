@@ -2,6 +2,7 @@ package analyzer
 
 import (
 	"encoding/base64"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -499,5 +500,26 @@ func TestRedactionKeepsBenignWrappedBase64Text(t *testing.T) {
 	got := NewRedactorWithPatterns(nil, false).Redact(wrapped)
 	if got != wrapped {
 		t.Fatalf("benign encoded text was removed: %q", got)
+	}
+}
+
+func TestAnalyzerConfigurationDigestIsStableAndSensitive(t *testing.T) {
+	baseA := NewConfigured("fingerprint-a", nil, true)
+	baseB := NewConfigured("fingerprint-b", nil, true)
+	if baseA.ConfigurationDigest() == "" || baseA.ConfigurationDigest() != baseB.ConfigurationDigest() {
+		t.Fatalf("fingerprint key must not alter analyzer configuration digest: %q / %q", baseA.ConfigurationDigest(), baseB.ConfigurationDigest())
+	}
+	withoutEntropy := NewConfigured("fingerprint-a", nil, false)
+	if withoutEntropy.ConfigurationDigest() == baseA.ConfigurationDigest() {
+		t.Fatal("entropy policy change did not alter analyzer configuration digest")
+	}
+	customRedaction := NewConfigured("fingerprint-a", []string{`INTERNAL_SECRET_[A-Z0-9]+`}, true)
+	if customRedaction.ConfigurationDigest() == baseA.ConfigurationDigest() {
+		t.Fatal("custom redaction change did not alter analyzer configuration digest")
+	}
+	customRule := Rule{ID: "internal-timeout", Category: model.CategoryNetworkFailure, Provider: "internal", Operation: "request", ErrorFamily: "timeout", Weight: 40, Patterns: []*regexp.Regexp{regexp.MustCompile(`(?i)internal timeout`)}}
+	withRule := NewConfigured("fingerprint-a", nil, true, customRule)
+	if withRule.ConfigurationDigest() == baseA.ConfigurationDigest() {
+		t.Fatal("custom rule change did not alter analyzer configuration digest")
 	}
 }
