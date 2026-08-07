@@ -147,10 +147,12 @@ func TestOIDCAuthorizationCodePKCEFlow(t *testing.T) {
 
 func TestNativeSAMLFlow(t *testing.T) {
 	xmlsec := filepath.Join(t.TempDir(), "xmlsec1")
-	if err := os.WriteFile(xmlsec, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+	xmlsecBody := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(xmlsec, xmlsecBody, 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.SSOConfig{Enabled: true, Mode: "saml", SessionSecret: "01234567890123456789012345678901", AllowPrivateNetwork: true, CookieName: "ciradar_session", SAMLEntityID: "https://ciradar.example/saml", SAMLIdPSSOURL: "https://idp.example/sso", SAMLIdPEntityID: "https://idp.example/metadata", SAMLIdPCertificate: "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", SAMLACSURL: "https://ciradar.example/auth/callback", SAMLXMLSecPath: xmlsec, SAMLEmailAttribute: "email", SAMLNameAttribute: "name", SAMLClockSkew: 2 * time.Minute, TenantClaim: "tenant_id", RoleClaim: "role", GroupsClaim: "groups", DefaultTenant: "default", DefaultRole: "viewer"}
+	xmlsecDigest := sha256.Sum256(xmlsecBody)
+	cfg := config.SSOConfig{Enabled: true, Mode: "saml", SessionSecret: "01234567890123456789012345678901", AllowPrivateNetwork: true, CookieName: "ciradar_session", SAMLEntityID: "https://ciradar.example/saml", SAMLIdPSSOURL: "https://idp.example/sso", SAMLIdPEntityID: "https://idp.example/metadata", SAMLIdPCertificate: "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", SAMLACSURL: "https://ciradar.example/auth/callback", SAMLXMLSecPath: xmlsec, SAMLXMLSecSHA256: fmt.Sprintf("%x", xmlsecDigest[:]), SAMLEmailAttribute: "email", SAMLNameAttribute: "name", SAMLClockSkew: 2 * time.Minute, TenantClaim: "tenant_id", RoleClaim: "role", GroupsClaim: "groups", DefaultTenant: "default", DefaultRole: "viewer"}
 	manager, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -471,18 +473,37 @@ func TestSAMLAudienceRestrictionsRequireEveryRestriction(t *testing.T) {
 func TestSAMLXMLVerificationHonorsParentCancellation(t *testing.T) {
 	dir := t.TempDir()
 	xmlsec := filepath.Join(dir, "xmlsec1")
-	if err := os.WriteFile(xmlsec, []byte("#!/bin/sh\nsleep 5\n"), 0o700); err != nil {
+	xmlsecBody := []byte("#!/bin/sh\nsleep 5\n")
+	if err := os.WriteFile(xmlsec, xmlsecBody, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	xmlsecDigest := sha256.Sum256(xmlsecBody)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	err := verifySAMLXML(ctx, xmlsec, "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", []byte("<Response/>"))
+	err := verifySAMLXML(ctx, xmlsec, fmt.Sprintf("%x", xmlsecDigest[:]), "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", []byte("<Response/>"))
 	if err == nil {
 		t.Fatal("cancelled SAML verification unexpectedly succeeded")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("cancelled SAML verification took too long: %s", elapsed)
+	}
+}
+
+func TestSAMLXMLVerificationRejectsChangedExecutable(t *testing.T) {
+	dir := t.TempDir()
+	xmlsec := filepath.Join(dir, "xmlsec1")
+	original := []byte("#!/bin/sh\nexit 0\n")
+	if err := os.WriteFile(xmlsec, original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(original)
+	if err := os.WriteFile(xmlsec, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := verifySAMLXML(context.Background(), xmlsec, fmt.Sprintf("%x", digest[:]), "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----", []byte("<Response/>"))
+	if err == nil || !strings.Contains(err.Error(), "changed after configuration validation") {
+		t.Fatalf("changed xmlsec executable was not rejected: %v", err)
 	}
 }
 
