@@ -38,6 +38,26 @@ type cachedToken struct {
 	ExpiresAt time.Time
 }
 
+type APIError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	if e == nil {
+		return "GitHub API error"
+	}
+	return fmt.Sprintf("GitHub API %s %s: %s: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
+func IsStatus(err error, code int) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == code
+}
+
 type Job struct {
 	ID              int64     `json:"id"`
 	Name            string    `json:"name"`
@@ -295,7 +315,7 @@ func (c *Client) doJSON(ctx context.Context, method, path, token string, body an
 		if len(responseBody) > 2<<20 {
 			responseBody = responseBody[:2<<20]
 		}
-		return fmt.Errorf("GitHub API %s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(responseBody)))
+		return &APIError{Method: method, Path: path, StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(responseBody))}
 	}
 	if out == nil {
 		return nil
@@ -440,6 +460,51 @@ type ContentFile struct {
 type PullRequestResult struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
+}
+
+type branchReference struct {
+	Object struct {
+		SHA string `json:"sha"`
+	} `json:"object"`
+}
+
+func (c *Client) BranchSHA(ctx context.Context, installationID int64, owner, repo, branch string) (string, bool, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return "", false, err
+	}
+	var out branchReference
+	endpoint := fmt.Sprintf("/repos/%s/%s/git/ref/heads/%s", url.PathEscape(owner), url.PathEscape(repo), escapePath(strings.TrimPrefix(branch, "refs/heads/")))
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, token, nil, &out); err != nil {
+		if IsStatus(err, http.StatusNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return strings.TrimSpace(out.Object.SHA), true, nil
+}
+
+func (c *Client) FindPullRequestByHead(ctx context.Context, installationID int64, owner, repo, branch, base string) (PullRequestResult, bool, error) {
+	token, err := c.InstallationToken(ctx, installationID)
+	if err != nil {
+		return PullRequestResult{}, false, err
+	}
+	query := url.Values{}
+	query.Set("state", "all")
+	query.Set("head", owner+":"+strings.TrimPrefix(branch, "refs/heads/"))
+	if strings.TrimSpace(base) != "" {
+		query.Set("base", strings.TrimSpace(base))
+	}
+	query.Set("per_page", "10")
+	var out []PullRequestResult
+	endpoint := fmt.Sprintf("/repos/%s/%s/pulls?%s", url.PathEscape(owner), url.PathEscape(repo), query.Encode())
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, token, nil, &out); err != nil {
+		return PullRequestResult{}, false, err
+	}
+	if len(out) == 0 {
+		return PullRequestResult{}, false, nil
+	}
+	return out[0], true, nil
 }
 
 func (c *Client) Repository(ctx context.Context, installationID int64, owner, repo string) (RepositoryInfo, error) {
