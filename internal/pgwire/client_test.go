@@ -679,6 +679,34 @@ func TestSCRAMFieldsRejectDuplicatesAndMalformedAttributes(t *testing.T) {
 	}
 }
 
+func TestSCRAMFieldsRejectOversizedAndAttributeFlood(t *testing.T) {
+	if _, err := parseSCRAMFields("r=" + strings.Repeat("x", maxSCRAMMessageBytes)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("oversized SCRAM message accepted: %v", err)
+	}
+	parts := make([]string, maxSCRAMAttributes+1)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("%c=x", 'a'+rune(i%26))
+	}
+	if _, err := parseSCRAMFields(strings.Join(parts, ",")); err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Fatalf("SCRAM attribute flood accepted: %v", err)
+	}
+}
+
+func TestSCRAMStateRejectsOutOfOrderMessages(t *testing.T) {
+	state := &scramState{nonce: "clientnonce", password: "secret", clientFirstBare: "n=user,r=clientnonce"}
+	if err := state.verifyFinal("v=c2ln"); err == nil || !strings.Contains(err.Error(), "before server-first") {
+		t.Fatalf("server-final before server-first was accepted: %v", err)
+	}
+	state.continued = true
+	state.verified = true
+	if err := state.verifyFinal("v=c2ln"); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate server-final was accepted: %v", err)
+	}
+	if err := state.continueAuth(&Client{}, "r=clientnonce-server,s=c2FsdA==,i=4096"); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate server-first was accepted: %v", err)
+	}
+}
+
 func TestSASLMechanismOfferMustBeWellFormed(t *testing.T) {
 	if !saslMechanismOffered([]byte("SCRAM-SHA-256\x00SCRAM-SHA-256-PLUS\x00\x00"), "SCRAM-SHA-256") {
 		t.Fatal("SCRAM-SHA-256 offer was not recognized")
@@ -768,6 +796,51 @@ func TestClosedClientIsNotReusable(t *testing.T) {
 	}
 	if !client.Broken() {
 		t.Fatal("closed postgres client remained reusable")
+	}
+}
+
+func TestConnectRejectsReadyBeforeAuthentication(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	done := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- err
+			return
+		}
+		defer conn.Close()
+		var length [4]byte
+		if _, err := io.ReadFull(conn, length[:]); err != nil {
+			done <- err
+			return
+		}
+		n := int(binary.BigEndian.Uint32(length[:])) - 4
+		if n < 0 {
+			done <- errors.New("invalid startup length")
+			return
+		}
+		if _, err := io.CopyN(io.Discard, conn, int64(n)); err != nil {
+			done <- err
+			return
+		}
+		writePG(conn, 'Z', []byte{'I'})
+		done <- nil
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	client, err := Connect(ctx, "postgres://user:pass@"+ln.Addr().String()+"/db?sslmode=disable")
+	if client != nil {
+		_ = client.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "before authentication completed") {
+		t.Fatalf("ReadyForQuery before authentication was accepted: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
