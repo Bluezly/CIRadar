@@ -1,4 +1,4 @@
-# CI Radar architecture — 1.3.2 OSS RC.13
+# CI Radar architecture — 1.3.2 OSS RC.14
 
 CI Radar is a self-hosted Go service with a deterministic diagnosis core and optional local or BYOK intelligence layers.
 
@@ -26,7 +26,7 @@ CI providers and uploaded reports
 - `internal/testselection` stores coverage maps and static import impact graphs for test selection.
 - `internal/testintel` tracks test observations, flake state, likely causes, quarantine, and CI gates.
 - `internal/similarity` separates lexical hashing from Ollama, local vector-file, and remote embedding engines.
-- `internal/sso` implements OIDC, native strict-profile SAML with `xmlsec1`, and trusted proxy identity.
+- `internal/sso` implements OIDC, native strict-profile SAML with a SHA-256-pinned `xmlsec1` executable, and trusted proxy identity.
 - `internal/mcp` provides stdio and HTTP MCP, OAuth metadata, PKCE, sessions, SSE notifications, and confirmed Operator actions.
 - `internal/repair` creates bounded patch plans and optional GitHub draft repair pull requests. It never auto-merges.
 - `internal/db` provides the embedded backend and relational PostgreSQL object, queue, delivery, migration, and indexing layers.

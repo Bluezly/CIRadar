@@ -4,11 +4,11 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC13.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC14.md`.
 
-## What RC.13 includes
+## What RC.14 includes
 
-- 624 built-in deterministic diagnosis rules spanning CI providers, language/toolchain failures, registries, cloud/infrastructure, data systems, and enterprise/mainframe signatures
+- 630 built-in deterministic diagnosis rules spanning CI providers, language/toolchain failures, registries, cloud/infrastructure, data systems, and enterprise/mainframe signatures
 - Tenant-isolated 24-hour diagnostic memory for repeated fingerprints in server/worker flows; benchmark analysis remains stateless
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
@@ -16,6 +16,8 @@ Current release notes: `RELEASE-NOTES-OSS-RC13.md`.
 - tenant isolation, RBAC, API keys, encrypted secrets, retention, audit events, trusted proxies, CSP, OIDC, and native SAML SP flow
 - Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie, and signed generic webhooks
 - ChatOps for acknowledge, resolve, quarantine, and restore
+- Slack ChatOps workspace-to-tenant binding so a signed action cannot cross tenant boundaries through an embedded button value
+- dedicated `test_quarantined` notifications emitted when automatic quarantine actually succeeds
 - JUnit, Playwright, Jest, pytest, Cypress, and Mocha result ingestion
 - triage-first test history with variants, grouped failures, unique PR impact, critical-test policy, quarantine, CI gates, source impact indexing, and per-test coverage maps
 - a plain table-first dashboard prioritized by unresolved work, affected Pull Requests, and conservative engineering-time loss
@@ -53,7 +55,7 @@ The build scripts strip release binaries by default. Set `STRIP=0` when building
 
 ## Dependency and protocol ownership
 
-The Go module intentionally has no third-party Go module dependencies. That reduces supply-chain surface but makes this project responsible for maintaining its custom PostgreSQL wire client and strict SAML parsing/orchestration. PostgreSQL values are sent through the Extended Query Protocol as separate bound parameters rather than interpolated into SQL text, but the wire implementation itself remains project-maintained. SAML XML-signature verification is delegated to the operator-configured `xmlsec1` executable; optional integrations such as PostgreSQL, Ollama, and external CI providers remain runtime dependencies when enabled. The custom protocol surfaces should receive independent security review before high-risk production deployment, and a mature PostgreSQL driver remains the preferred long-term replacement if the dependency policy changes.
+The Go module intentionally has no third-party Go module dependencies. That reduces supply-chain surface but makes this project responsible for maintaining its custom PostgreSQL wire client and strict SAML parsing/orchestration. PostgreSQL values are sent through the Extended Query Protocol as separate bound parameters rather than interpolated into SQL text, but the wire implementation itself remains project-maintained. SAML XML-signature verification is delegated to the operator-configured `xmlsec1` executable, whose resolved executable is SHA-256 pinned and rechecked before verification; optional integrations such as PostgreSQL, Ollama, and external CI providers remain runtime dependencies when enabled. The custom protocol surfaces should receive independent security review before high-risk production deployment, and a mature PostgreSQL driver remains the preferred long-term replacement if the dependency policy changes.
 
 ## PostgreSQL
 

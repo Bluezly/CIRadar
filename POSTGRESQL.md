@@ -35,7 +35,7 @@ Supported modes:
 - `insecure-require`: encryption without certificate verification; intended only for controlled local testing
 - `disable`: plaintext; intended only for isolated local testing
 
-Authentication supports password, MD5, and SCRAM-SHA-256.
+Authentication supports password, MD5, and SCRAM-SHA-256. SCRAM authentication messages are bounded, duplicate/out-of-order server-first and server-final messages are rejected, and AuthenticationOk is not accepted until the server signature has been verified.
 
 ## Query parameterization
 
@@ -62,7 +62,7 @@ Writes acquire advisory locks for the affected tenant and entity kind. A write f
 
 The backend automatically imports the legacy `ciradar_state` row when the relational tables are empty. The legacy table is retained for rollback and should be removed only after backup and verification.
 
-This is a scalable self-hosted entity store, not a claim of hyperscale distributed analytics. Some dashboard and business operations still hydrate a bounded tenant-scoped set of rows in the Go process. Very large installations should monitor query latency, retention, and row counts and may evolve high-volume analyses into partitioned tables.
+This is a scalable self-hosted entity store, not a claim of hyperscale distributed analytics. Some dashboard and business operations still hydrate a bounded tenant-scoped set of rows in the Go process. `pgStateWith` paths load only the entity kinds requested by the operation, but those rows are still materialized in memory before shared Store logic is applied. Quarantine set/remove is narrower in RC.14: it hydrates only the target test-statistics object and target quarantine object, not every test/quarantine row for the tenant. Very large installations should monitor query latency, retention, and row counts and may evolve high-volume analyses into partitioned tables.
 
 ## Indexes and maintenance
 

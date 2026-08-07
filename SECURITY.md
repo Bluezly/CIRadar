@@ -42,6 +42,10 @@ A denylist cannot guarantee discovery of every proprietary secret. Keep raw logs
 
 Webhook bodies are size-limited, signatures or configured secrets are verified, duplicate deliveries are suppressed, and connector HTTP requests stay inside provider-configured trust boundaries. Outbound requests re-check redirect targets and DNS answers, pin the connection to a validated address, reject cross-origin redirects by default, and do not inherit environment proxy settings. Read-only CI log downloads can follow a cross-origin signed URL only after all caller headers are removed and the destination is revalidated. Slack includes timestamp replay protection. GitHub Marketplace state is metadata only and never gates OSS features.
 
+## Slack ChatOps tenant binding
+
+Slack request authenticity and tenant authorization are separate checks. A valid Slack signature proves which workspace sent the request; it does not authorize a tenant ID carried inside an interactive button value. When Slack ChatOps is enabled, every allowed Team ID must have an explicit `slack_team_tenants` mapping. The verified Team ID selects the tenant, and CI Radar rejects any action value that names a different tenant. This prevents a signed action from one allowed workspace from crossing into another tenant.
+
 ## MCP and automation
 
 MCP OAuth authorization codes and access tokens are purpose-separated AES-GCM values; plaintext or unsigned token payloads are rejected. Authorization requires an explicit same-origin consent POST, so merely opening an authorization URL cannot issue a code. OAuth tokens and API keys remain tenant-scoped, and revocation checks fail closed on storage errors. Stateful mutations require a prepared confirmation token bound to the actor, action, target, tenant, and expiry. Safe rerun is allowlisted and idempotent. Repair cannot execute arbitrary commands and cannot auto-merge.
@@ -52,7 +56,7 @@ The general per-IP request limit is supplemented by a failure-aware authenticati
 
 ## Protocol implementation responsibility
 
-CI Radar deliberately avoids third-party Go modules. Custom protocol code is therefore part of the trusted computing base, especially `internal/pgwire` and the SAML response parser in `internal/sso`. PostgreSQL application values use separate Extended Query Protocol parameters, removing project-level manual value escaping, but the protocol implementation remains custom. SAML XML signatures are verified by the configured `xmlsec1` executable rather than a Go dependency. Maintainers should fuzz, regression-test, and independently audit these parsers and state machines. A zero-module-dependency policy is not a substitute for protocol review.
+CI Radar deliberately avoids third-party Go modules. Custom protocol code is therefore part of the trusted computing base, especially `internal/pgwire` and the SAML response parser in `internal/sso`. PostgreSQL application values use separate Extended Query Protocol parameters, removing project-level manual value escaping; SCRAM messages are size/attribute bounded and their state order is enforced, but the protocol implementation remains custom. SAML XML signatures are verified by the configured `xmlsec1` executable rather than a Go dependency; the resolved executable is SHA-256 pinned and rechecked immediately before use. Maintainers should fuzz, regression-test, and independently audit these parsers and state machines. A zero-module-dependency policy is not a substitute for protocol review.
 
 ## Release integrity
 

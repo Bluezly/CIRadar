@@ -19,7 +19,7 @@ load balancer or reverse proxy
 - generate `CIRADAR_MASTER_KEY` with `ciradar secret key`; do not use a human passphrase
 - set a dedicated persistent `CIRADAR_DASHBOARD_SESSION_SECRET` on every replica
 - enable OIDC or native SAML and secure cookies
-- install `xmlsec1` on every replica when native SAML is enabled
+- install `xmlsec1` on every replica when native SAML is enabled and pin the SHA-256 of the resolved executable with `saml_xmlsec_sha256`
 - keep raw logs off unless retention and access policy are explicit
 - configure analysis, audit, job, test, and delivery retention
 - back up PostgreSQL and the exact source revision
@@ -48,7 +48,13 @@ Release builds include Windows, Linux, and macOS for amd64 and arm64. macOS bina
 
 ## Native SAML dependencies
 
-The service account needs execute access to `xmlsec1`, read access to the pinned IdP certificate, and write access to the operating system temporary directory. Do not point `saml_xmlsec_path` at a wrapper controlled by untrusted users.
+The service account needs execute access to `xmlsec1`, read access to the pinned IdP certificate, and write access to the operating system temporary directory. Do not point `saml_xmlsec_path` at a wrapper controlled by untrusted users. Native SAML now requires `saml_xmlsec_sha256`; configuration resolves symlinks, validates the executable, and hashes it, and the SAML verification path checks the digest again immediately before execution.
+
+```bash
+sha256sum /usr/bin/xmlsec1
+```
+
+Copy only the 64-character digest into `saml_xmlsec_sha256`. Recompute and deliberately update the pin when `xmlsec1` is upgraded.
 
 ## Similarity deployment choices
 
