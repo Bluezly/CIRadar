@@ -110,6 +110,37 @@ func TestSpecWhereTargetsSingleObject(t *testing.T) {
 	}
 }
 
+func TestQuarantineStateSpecsHydrateOnlyTargetTest(t *testing.T) {
+	store, err := newMemoryStore(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, key := range []string{"test-a", "test-b"} {
+		store.state.TestCaseStats[testStatsKey("alpha", key)] = model.TestCaseStats{TenantID: "alpha", TestKey: key, Repository: "acme/api", LastSeenAt: now}
+		store.state.TestQuarantines[quarantineKey("alpha", key)] = model.TestQuarantine{TenantID: "alpha", TestKey: key, Owner: "platform", Reason: "test", Active: true, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	}
+	objects, err := stateObjects(store.state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := []pgSpec{pgOne("alpha", pgKindTestStats, "test-a"), pgOne("alpha", pgKindQuarantine, "test-a")}
+	selected := make([]pgObject, 0, 2)
+	for _, object := range objects {
+		if matchesSpec(specs, object) {
+			selected = append(selected, object)
+		}
+	}
+	if len(selected) != 2 {
+		t.Fatalf("selected %d objects, want 2: %+v", len(selected), selected)
+	}
+	for _, object := range selected {
+		if object.ID != "test-a" {
+			t.Fatalf("unrelated test hydrated: %+v", object)
+		}
+	}
+}
+
 func TestParsePostgresIntRejectsMalformedValues(t *testing.T) {
 	valid := "42"
 	if got, err := parsePostgresInt(&valid, "count"); err != nil || got != 42 {
