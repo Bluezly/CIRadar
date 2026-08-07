@@ -611,6 +611,38 @@ func FlakyTestEvent(st model.TestCaseStats, publicBaseURL string) model.Notifica
 	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_flaky_%s_%d", st.TestKey, now.Unix()), TenantID: st.TenantID, Type: "test_flaky", DedupeKey: "test_flaky:" + st.TestKey, OccurredAt: now, Severity: "minor", Title: "Flaky test detected: " + st.Name, Summary: fmt.Sprintf("%s has a %.1f flake score across %d runs. Likely cause: %s.", st.Name, st.FlakeScore, st.TotalRuns, st.PrimaryFlakeCause), Repository: st.Repository, DetailsURL: details, Category: model.CategoryTestFlake, Attribution: model.AttributionCode, Score: -int(st.FlakeScore), ExternalityScore: -int(st.FlakeScore), EvidenceStrength: int(st.FlakeScore), CodeEvidenceScore: int(st.FlakeScore), Provider: st.Framework, Operation: "test", Fingerprint: st.TestKey, Recommendation: "Assign an owner, reproduce the failure, and quarantine only while the root cause is under investigation."}
 }
 
+func TestQuarantinedEvent(st model.TestCaseStats, q model.TestQuarantine, publicBaseURL string) model.NotificationEvent {
+	now := q.CreatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	details := ""
+	if publicBaseURL != "" {
+		details = strings.TrimRight(publicBaseURL, "/") + "/?test=" + st.TestKey
+	}
+	name := strings.TrimSpace(st.Name)
+	if name == "" {
+		name = st.TestKey
+	}
+	summary := fmt.Sprintf("%s was quarantined automatically until %s after a %.1f flake score across %d runs. Owner: %s.", name, q.ExpiresAt.UTC().Format(time.RFC3339), st.FlakeScore, st.TotalRuns, firstNonEmptyText(q.Owner, "ci-radar"))
+	return model.NotificationEvent{
+		ID: fmt.Sprintf("evt_test_quarantined_%s_%d", st.TestKey, q.ExpiresAt.UTC().Unix()), TenantID: st.TenantID, Type: "test_quarantined",
+		DedupeKey: "test_quarantined:" + st.TestKey + ":" + strconv.FormatInt(q.ExpiresAt.UTC().Unix(), 10), OccurredAt: now, Severity: "minor",
+		Title: "Test automatically quarantined: " + name, Summary: summary, Repository: st.Repository, DetailsURL: details, Category: model.CategoryTestFlake,
+		Attribution: model.AttributionCode, Score: -int(st.FlakeScore), ExternalityScore: -int(st.FlakeScore), EvidenceStrength: int(st.FlakeScore), CodeEvidenceScore: int(st.FlakeScore),
+		Provider: st.Framework, Operation: "test-quarantine", Fingerprint: st.TestKey, Recommendation: "Investigate the flaky-test root cause and remove the quarantine as soon as the test is stable.",
+	}
+}
+
+func firstNonEmptyText(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 func RepairPRCreatedEvent(analysis model.AnalysisResult, source model.RepairSource, result model.RepairResult) model.NotificationEvent {
 	now := result.UpdatedAt
 	if now.IsZero() {
