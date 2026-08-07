@@ -1039,11 +1039,11 @@ func (p *PostgresBackend) SetTestCritical(ctx context.Context, tenantID, testKey
 }
 
 func (p *PostgresBackend) SetTestQuarantine(ctx context.Context, quarantine model.TestQuarantine) (model.TestQuarantine, error) {
-	return pgStateWith(ctx, p, true, []pgSpec{pgTenant(quarantine.TenantID, pgKindTestStats), pgTenant(quarantine.TenantID, pgKindQuarantine)}, func(store *Store) (model.TestQuarantine, error) { return store.SetTestQuarantine(ctx, quarantine) })
+	return pgStateWith(ctx, p, true, []pgSpec{pgOne(quarantine.TenantID, pgKindTestStats, quarantine.TestKey), pgOne(quarantine.TenantID, pgKindQuarantine, quarantine.TestKey)}, func(store *Store) (model.TestQuarantine, error) { return store.SetTestQuarantine(ctx, quarantine) })
 }
 
 func (p *PostgresBackend) RemoveTestQuarantine(ctx context.Context, tenantID, testKey string) error {
-	return pgStateErr(ctx, p, true, []pgSpec{pgTenant(tenantID, pgKindTestStats), pgTenant(tenantID, pgKindQuarantine)}, func(store *Store) error { return store.RemoveTestQuarantine(ctx, tenantID, testKey) })
+	return pgStateErr(ctx, p, true, []pgSpec{pgOne(tenantID, pgKindTestStats, testKey), pgOne(tenantID, pgKindQuarantine, testKey)}, func(store *Store) error { return store.RemoveTestQuarantine(ctx, tenantID, testKey) })
 }
 
 func (p *PostgresBackend) ListTestQuarantines(ctx context.Context, tenantID string) ([]model.TestQuarantine, error) {
