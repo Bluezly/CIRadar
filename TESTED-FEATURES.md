@@ -1,4 +1,4 @@
-# Tested features — 1.3.2 OSS RC.12
+# Tested features — 1.3.2 OSS RC.13
 
 The automated suite verifies implementation behavior. It does not establish production scale or real-world diagnosis accuracy.
 

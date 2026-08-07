@@ -4,10 +4,12 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC12.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC13.md`.
 
-## What RC.12 includes
+## What RC.13 includes
 
+- 624 built-in deterministic diagnosis rules spanning CI providers, language/toolchain failures, registries, cloud/infrastructure, data systems, and enterprise/mainframe signatures
+- Tenant-isolated 24-hour diagnostic memory for repeated fingerprints in server/worker flows; benchmark analysis remains stateless
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
 - relational tenant-scoped PostgreSQL storage or portable embedded storage
