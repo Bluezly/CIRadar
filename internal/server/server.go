@@ -388,7 +388,7 @@ func (s *Server) dashboardData(w http.ResponseWriter, r *http.Request) {
 func (s *Server) recordDeployment(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	var ev model.DeploymentEvent
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&ev); err != nil {
+	if err := decodeJSONBody(w, r, 1<<20, &ev, false); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
@@ -603,7 +603,7 @@ func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 		FetchSource   *bool    `json:"fetch_source,omitempty"`
 		RequireSource bool     `json:"require_source,omitempty"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil && err != io.EOF {
+	if err := decodeJSONBody(w, r, 256<<10, &body, true); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -654,11 +654,14 @@ func (s *Server) createLLMEnhancement(w http.ResponseWriter, r *http.Request) {
 func (s *Server) analysisFeedback(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	var body struct {
-		Verdict     string            `json:"verdict"`
-		ActualCause model.Attribution `json:"actual_cause"`
-		Comment     string            `json:"comment"`
+		Verdict           string            `json:"verdict"`
+		ActualCategory    model.Category    `json:"actual_category"`
+		ActualCause       model.Attribution `json:"actual_cause"`
+		ActualProvider    string            `json:"actual_provider"`
+		ActualErrorFamily string            `json:"actual_error_family"`
+		Comment           string            `json:"comment"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 16<<10, &body, false); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
@@ -669,12 +672,12 @@ func (s *Server) analysisFeedback(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = "root"
 	}
-	f, err := s.store.UpsertDiagnosisFeedback(r.Context(), model.DiagnosisFeedback{TenantID: p.TenantID, AnalysisID: r.PathValue("id"), Verdict: body.Verdict, ActualCause: body.ActualCause, Comment: body.Comment, Actor: actor})
+	f, err := s.store.UpsertDiagnosisFeedback(r.Context(), model.DiagnosisFeedback{TenantID: p.TenantID, AnalysisID: r.PathValue("id"), Verdict: body.Verdict, ActualCategory: body.ActualCategory, ActualCause: body.ActualCause, ActualProvider: body.ActualProvider, ActualErrorFamily: body.ActualErrorFamily, Comment: body.Comment, Actor: actor})
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
 	}
-	s.audit(r, "analysis.feedback", "analysis", r.PathValue("id"), map[string]string{"verdict": f.Verdict, "actual_cause": string(f.ActualCause)})
+	s.audit(r, "analysis.feedback", "analysis", r.PathValue("id"), map[string]string{"verdict": f.Verdict, "actual_category": string(f.ActualCategory), "actual_cause": string(f.ActualCause), "actual_provider": f.ActualProvider, "actual_error_family": f.ActualErrorFamily})
 	writeJSON(w, 200, f)
 }
 func (s *Server) feedbackList(w http.ResponseWriter, r *http.Request) {
@@ -805,7 +808,7 @@ func (s *Server) setTestCritical(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Critical bool `json:"critical"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 8<<10, &body, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -860,7 +863,7 @@ func (s *Server) quarantineTest(w http.ResponseWriter, r *http.Request) {
 		Owner     string    `json:"owner"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&b); err != nil {
+	if err := decodeJSONBody(w, r, 16<<10, &b, false); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
 		return
 	}
@@ -915,7 +918,7 @@ func (s *Server) similarAnalyses(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) selectTests(w http.ResponseWriter, r *http.Request) {
 	var req model.TestSelectionRequest
-	if e := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&req); e != nil {
+	if e := decodeJSONBody(w, r, 2<<20, &req, false); e != nil {
 		writeError(w, 400, "invalid JSON: "+e.Error())
 		return
 	}
@@ -951,7 +954,7 @@ func (s *Server) getTestImpact(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putTestImpact(w http.ResponseWriter, r *http.Request) {
 	var graph model.ImpactGraph
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20)).Decode(&graph); err != nil {
+	if err := decodeJSONBody(w, r, 64<<20, &graph, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -965,7 +968,7 @@ func (s *Server) putTestImpact(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) putTestCoverage(w http.ResponseWriter, r *http.Request) {
 	var input model.TestCoverageInput
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<20)).Decode(&input); err != nil {
+	if err := decodeJSONBody(w, r, 64<<20, &input, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -1006,11 +1009,13 @@ func (s *Server) repositoryProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
-	body := http.MaxBytesReader(w, r.Body, s.cfg.MaxLogBytes+1<<20)
-	defer body.Close()
 	var in model.AnalysisInput
-	if err := json.NewDecoder(body).Decode(&in); err != nil {
+	if err := decodeJSONBody(w, r, s.cfg.MaxLogBytes+(1<<20), &in, false); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if int64(len(in.Log)) > s.cfg.MaxLogBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "log exceeds max_log_bytes")
 		return
 	}
 	if strings.TrimSpace(in.Log) == "" {
@@ -1070,11 +1075,13 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) baseline(w http.ResponseWriter, r *http.Request) {
-	body := http.MaxBytesReader(w, r.Body, s.cfg.MaxLogBytes+1<<20)
-	defer body.Close()
 	var in model.AnalysisInput
-	if err := json.NewDecoder(body).Decode(&in); err != nil {
+	if err := decodeJSONBody(w, r, s.cfg.MaxLogBytes+(1<<20), &in, false); err != nil {
 		writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if int64(len(in.Log)) > s.cfg.MaxLogBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "log exceeds max_log_bytes")
 		return
 	}
 	if strings.TrimSpace(in.Repository) == "" || strings.TrimSpace(in.Workflow) == "" || strings.TrimSpace(in.Job) == "" || strings.TrimSpace(in.Log) == "" {
@@ -1108,7 +1115,7 @@ func (s *Server) changeIncidentState(w http.ResponseWriter, r *http.Request, sta
 	var body struct {
 		Note string `json:"note"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil && err != io.EOF {
+	if err := decodeJSONBody(w, r, 64<<10, &body, true); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -1311,7 +1318,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintf(w, "ciradar_analyses_total %d\nciradar_incidents_open %d\nciradar_jobs_queued %d\nciradar_jobs_running %d\nciradar_jobs_failed %d\nciradar_repositories %d\nciradar_notification_failures_total %d\nciradar_feedback_total %d\nciradar_feedback_precision_percent %.2f\nciradar_tests_tracked %d\nciradar_tests_flaky %d\nciradar_tests_quarantined %d\n", st.Analyses, st.OpenIncidents, st.QueuedJobs, st.RunningJobs, st.FailedJobs, st.Repositories, st.NotificationFailures, feedback.Total, feedback.PrecisionPercent, len(tests), flaky, quarantined)
+	fmt.Fprintf(w, "ciradar_analyses_total %d\nciradar_incidents_open %d\nciradar_jobs_queued %d\nciradar_jobs_running %d\nciradar_jobs_failed %d\nciradar_repositories %d\nciradar_notification_failures_total %d\nciradar_feedback_total %d\nciradar_feedback_agreement_percent %.2f\nciradar_feedback_category_accuracy_percent %.2f\nciradar_feedback_attribution_accuracy_percent %.2f\nciradar_feedback_precision_percent %.2f\nciradar_tests_tracked %d\nciradar_tests_flaky %d\nciradar_tests_quarantined %d\n", st.Analyses, st.OpenIncidents, st.QueuedJobs, st.RunningJobs, st.FailedJobs, st.Repositories, st.NotificationFailures, feedback.Total, feedback.AgreementPercent, feedback.CategoryAccuracyPercent, feedback.AttributionAccuracyPercent, feedback.PrecisionPercent, len(tests), flaky, quarantined)
 }
 
 func refreshStreamWriteDeadline(w http.ResponseWriter) error {
@@ -1428,6 +1435,11 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	dec.UseNumber()
 	if err := dec.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, mcpserver.Response{JSONRPC: "2.0", Error: &mcpserver.RPCError{Code: -32700, Message: "parse error"}})
+		return
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, mcpserver.Response{JSONRPC: "2.0", Error: &mcpserver.RPCError{Code: -32700, Message: "parse error"}})
 		return
 	}

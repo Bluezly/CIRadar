@@ -126,7 +126,7 @@ func (s *Server) oauthRegister(w http.ResponseWriter, r *http.Request) {
 		ResponseTypes   []string `json:"response_types"`
 		TokenAuthMethod string   `json:"token_endpoint_auth_method"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&input); err != nil {
+	if err := decodeJSONBody(w, r, 128<<10, &input, false); err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "invalid registration request")
 		return
 	}

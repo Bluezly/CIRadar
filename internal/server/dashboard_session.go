@@ -94,7 +94,7 @@ func (s *Server) authToken(w http.ResponseWriter, r *http.Request) {
 		Token  string `json:"token"`
 		Tenant string `json:"tenant"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 64<<10, &body, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}

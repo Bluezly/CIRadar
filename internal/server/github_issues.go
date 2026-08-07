@@ -3,7 +3,6 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -96,7 +95,7 @@ func (s *Server) createAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var body githubIssueCreateBody
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil && err != io.EOF {
+	if err := decodeJSONBody(w, r, 256<<10, &body, true); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -170,7 +169,7 @@ func (s *Server) updateAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var body githubIssueUpdateBody
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 256<<10, &body, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -253,7 +252,7 @@ func (s *Server) commentAnalysisGitHubIssue(w http.ResponseWriter, r *http.Reque
 	var body struct {
 		Body string `json:"body"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, 128<<10, &body, false); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
