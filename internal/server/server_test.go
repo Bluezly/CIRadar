@@ -465,6 +465,32 @@ func TestJUnitAutoQuarantineAndManifest(t *testing.T) {
 	if err != nil || len(items) != 1 || !items[0].Active {
 		t.Fatalf("quarantines=%+v err=%v", items, err)
 	}
+	foundQuarantineEvent := false
+	for {
+		job, err := store.ClaimJob(context.Background(), "quarantine-notification-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if job == nil {
+			break
+		}
+		if job.Type != "notify.event" {
+			continue
+		}
+		var ev model.NotificationEvent
+		if err := json.Unmarshal(job.Payload, &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Type == "test_quarantined" && ev.Fingerprint == items[0].TestKey {
+			foundQuarantineEvent = true
+			if ev.TenantID != model.DefaultTenantID || ev.Repository != "acme/api" || !strings.Contains(ev.Title, "automatically quarantined") {
+				t.Fatalf("quarantine notification=%#v", ev)
+			}
+		}
+	}
+	if !foundQuarantineEvent {
+		t.Fatal("automatic quarantine did not enqueue a dedicated notification event")
+	}
 }
 
 func TestMCPStreamableHTTPGuards(t *testing.T) {
