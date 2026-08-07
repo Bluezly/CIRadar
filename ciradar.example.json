@@ -400,6 +400,7 @@
     "saml_idp_certificate": "/run/secrets/idp-signing-cert.pem",
     "saml_acs_url": "https://ci-radar.example.com/auth/callback",
     "saml_xmlsec_path": "/usr/bin/xmlsec1",
+    "saml_security_profile": "strict",
     "saml_name_attribute": "name",
     "saml_email_attribute": "email",
     "saml_clock_skew": "2m",
@@ -420,6 +421,10 @@
     "timeout": "45s",
     "send_redacted_excerpt": true,
     "send_changed_files": true,
+    "send_source_code": false,
+    "data_policy": "redacted_remote",
+    "block_on_residual_secret": true,
+    "allow_remote_source_code": false,
     "allow_private_network": false
   },
   "chatops": {
