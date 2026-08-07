@@ -35,7 +35,7 @@ func CreateGitHubDraftPR(ctx context.Context, client *gh.Client, source model.Re
 	for _, path := range paths {
 		file, err := client.GetContent(ctx, source.InstallationID, owner, repo, path, source.CommitSHA)
 		if err != nil {
-			if strings.Contains(err.Error(), "404") {
+			if gh.IsStatus(err, 404) {
 				continue
 			}
 			return result, err
@@ -62,28 +62,72 @@ func CreateGitHubDraftPR(ctx context.Context, client *gh.Client, source model.Re
 	if base == "" {
 		return result, errors.New("repair base branch is unknown")
 	}
-	branch := sanitizeBranch(firstText(branchPrefix, "ciradar/repair-") + shortID(analysis.ID) + "-" + time.Now().UTC().Format("150405"))
-	if err := client.CreateBranch(ctx, source.InstallationID, owner, repo, branch, source.CommitSHA); err != nil {
-		return result, err
-	}
+	branch := sanitizeBranch(firstText(branchPrefix, "ciradar/repair-") + shortID(analysis.ID) + "-" + shortID(plan.ID))
 	result.Branch = branch
-	for _, file := range plan.Files {
-		message := "CI Radar repair for " + shortID(analysis.ID) + ": " + file.Path
-		if err := client.PutContent(ctx, source.InstallationID, owner, repo, file.Path, branch, message, file.NewContent, shas[file.Path]); err != nil {
-			return result, err
+	if pull, found, err := client.FindPullRequestByHead(ctx, source.InstallationID, owner, repo, branch, base); err != nil {
+		return result, err
+	} else if found {
+		return completedDraftResult(result, pull), nil
+	}
+	if _, found, err := client.BranchSHA(ctx, source.InstallationID, owner, repo, branch); err != nil {
+		return result, err
+	} else if !found {
+		if err := client.CreateBranch(ctx, source.InstallationID, owner, repo, branch, source.CommitSHA); err != nil {
+			if _, exists, checkErr := client.BranchSHA(ctx, source.InstallationID, owner, repo, branch); checkErr != nil || !exists {
+				return result, err
+			}
 		}
+	}
+	for _, file := range plan.Files {
+		sha := shas[file.Path]
+		current, currentErr := client.GetContent(ctx, source.InstallationID, owner, repo, file.Path, branch)
+		if currentErr == nil {
+			if current.Content == file.NewContent {
+				continue
+			}
+			if !file.NewFile && current.Content != file.OldContent {
+				return result, fmt.Errorf("repair branch %s diverged at %s", branch, file.Path)
+			}
+			if file.NewFile {
+				return result, fmt.Errorf("repair branch %s already contains conflicting new file %s", branch, file.Path)
+			}
+			sha = current.SHA
+		} else if !gh.IsStatus(currentErr, 404) {
+			return result, currentErr
+		} else if !file.NewFile {
+			return result, fmt.Errorf("repair branch %s is missing existing file %s", branch, file.Path)
+		}
+		message := "CI Radar repair for " + shortID(analysis.ID) + ": " + file.Path
+		if err := client.PutContent(ctx, source.InstallationID, owner, repo, file.Path, branch, message, file.NewContent, sha); err != nil {
+			latest, readErr := client.GetContent(ctx, source.InstallationID, owner, repo, file.Path, branch)
+			if readErr != nil || latest.Content != file.NewContent {
+				return result, err
+			}
+		}
+	}
+	if pull, found, err := client.FindPullRequestByHead(ctx, source.InstallationID, owner, repo, branch, base); err != nil {
+		return result, err
+	} else if found {
+		return completedDraftResult(result, pull), nil
 	}
 	title := "CI Radar repair: " + truncateText(analysis.Summary, 72)
 	body := renderDraftPRBody(analysis, plan, source)
 	pull, err := client.CreateDraftPullRequest(ctx, source.InstallationID, owner, repo, title, body, branch, base)
 	if err != nil {
+		if existing, found, lookupErr := client.FindPullRequestByHead(ctx, source.InstallationID, owner, repo, branch, base); lookupErr == nil && found {
+			return completedDraftResult(result, existing), nil
+		}
 		return result, err
 	}
+	return completedDraftResult(result, pull), nil
+}
+
+func completedDraftResult(result model.RepairResult, pull gh.PullRequestResult) model.RepairResult {
 	result.PullRequestNumber = pull.Number
 	result.PullRequestURL = pull.HTMLURL
 	result.Status = "draft_pr_created"
 	result.UpdatedAt = time.Now().UTC()
-	return result, nil
+	return result
 }
 
 func renderDraftPRBody(analysis model.AnalysisResult, plan Plan, source model.RepairSource) string {
