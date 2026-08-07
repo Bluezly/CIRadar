@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"ciradar/internal/config"
 	"ciradar/internal/httpguard"
@@ -47,6 +48,39 @@ type flowState struct {
 	Expires   time.Time `json:"expires"`
 }
 
+type ReplayGuard interface {
+	ClaimSSOReplay(context.Context, string, time.Time) (bool, error)
+}
+
+type localReplayGuard struct {
+	mu      sync.Mutex
+	entries map[string]time.Time
+}
+
+func (g *localReplayGuard) ClaimSSOReplay(ctx context.Context, key string, expiresAt time.Time) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	key = strings.TrimSpace(key)
+	expiresAt = expiresAt.UTC()
+	if key == "" || len(key) > 128 || !expiresAt.After(now) || expiresAt.Sub(now) > 24*time.Hour {
+		return false, errors.New("invalid SSO replay claim")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for candidate, expiry := range g.entries {
+		if !expiry.After(now) {
+			delete(g.entries, candidate)
+		}
+	}
+	if expiry, exists := g.entries[key]; exists && expiry.After(now) {
+		return false, nil
+	}
+	g.entries[key] = expiresAt.UTC()
+	return true, nil
+}
+
 type Manager struct {
 	cfg       config.SSOConfig
 	http      *http.Client
@@ -56,10 +90,24 @@ type Manager struct {
 	jwks      map[string]crypto.PublicKey
 	jwksAt    time.Time
 	proxies   []*net.IPNet
+	replay    ReplayGuard
 }
 
-func New(cfg config.SSOConfig) (*Manager, error) {
-	m := &Manager{cfg: cfg, http: httpguard.NewClient(20*time.Second, cfg.AllowPrivateNetwork), jwks: map[string]crypto.PublicKey{}}
+func New(cfg config.SSOConfig, replayGuards ...ReplayGuard) (*Manager, error) {
+	cfg.SAMLSecurityProfile = strings.ToLower(strings.TrimSpace(cfg.SAMLSecurityProfile))
+	if cfg.Mode == "saml" {
+		if cfg.SAMLSecurityProfile == "" {
+			cfg.SAMLSecurityProfile = "strict"
+		}
+		if cfg.SAMLSecurityProfile != "strict" && cfg.SAMLSecurityProfile != "compatibility" {
+			return nil, fmt.Errorf("unsupported SAML security profile %q", cfg.SAMLSecurityProfile)
+		}
+	}
+	var replay ReplayGuard = &localReplayGuard{entries: map[string]time.Time{}}
+	if len(replayGuards) > 0 && replayGuards[0] != nil {
+		replay = replayGuards[0]
+	}
+	m := &Manager{cfg: cfg, http: httpguard.NewClient(20*time.Second, cfg.AllowPrivateNetwork), jwks: map[string]crypto.PublicKey{}, replay: replay}
 	for _, raw := range cfg.TrustedProxyCIDRs {
 		_, n, err := net.ParseCIDR(raw)
 		if err != nil {
@@ -360,8 +408,8 @@ func (m *Manager) getDiscovery(ctx context.Context) (discovery, error) {
 	if d.Issuer == "" || d.AuthorizationEndpoint == "" || d.TokenEndpoint == "" || d.JWKSURI == "" {
 		return discovery{}, errors.New("incomplete OIDC discovery document")
 	}
-	if strings.TrimRight(d.Issuer, "/") != strings.TrimRight(m.cfg.IssuerURL, "/") {
-		return discovery{}, errors.New("OIDC discovery issuer does not match configured issuer_url")
+	if d.Issuer != m.cfg.IssuerURL {
+		return discovery{}, errors.New("OIDC discovery issuer does not match configured issuer_url exactly")
 	}
 	for _, raw := range []string{d.AuthorizationEndpoint, d.TokenEndpoint, d.JWKSURI} {
 		if err := httpguard.ValidateURL(raw, m.cfg.AllowPrivateNetwork); err != nil {
@@ -406,11 +454,17 @@ func (m *Manager) getJWKS(ctx context.Context, uri string, force bool) (map[stri
 		return nil, err
 	}
 	keys := map[string]crypto.PublicKey{}
+	seenKids := map[string]struct{}{}
 	for _, j := range raw.Keys {
 		kid, _ := j["kid"].(string)
-		if kid == "" {
+		kid = strings.TrimSpace(kid)
+		if kid == "" || len(kid) > 256 || strings.IndexFunc(kid, unicode.IsControl) >= 0 {
 			continue
 		}
+		if _, exists := seenKids[kid]; exists {
+			return nil, fmt.Errorf("JWKS contains duplicate key id %q", kid)
+		}
+		seenKids[kid] = struct{}{}
 		key, err := parseJWK(j)
 		if err == nil {
 			keys[kid] = key
@@ -485,11 +539,14 @@ func (m *Manager) verifyIDToken(ctx context.Context, raw string, d discovery, no
 	if exp := numberClaim(claims["exp"]); exp == 0 || now >= exp {
 		return nil, errors.New("JWT expired")
 	}
+	if issuedAt := numberClaim(claims["iat"]); issuedAt <= 0 || issuedAt > now+60 {
+		return nil, errors.New("JWT issued-at claim is missing or invalid")
+	}
 	if nbf := numberClaim(claims["nbf"]); nbf > 0 && now+60 < nbf {
 		return nil, errors.New("JWT not active")
 	}
 	issuer, _ := claims["iss"].(string)
-	if issuer != d.Issuer && issuer != strings.TrimRight(m.cfg.IssuerURL, "/") {
+	if issuer != d.Issuer {
 		return nil, errors.New("JWT issuer mismatch")
 	}
 	if !validAudienceClaims(claims["aud"], stringClaim(claims, "azp"), m.cfg.ClientID) {
@@ -574,10 +631,55 @@ func (m *Manager) readSession(raw string) (model.SSOIdentity, error) {
 	return payload.Identity, nil
 }
 
+func validateJWKUsage(j map[string]any, expectedAlgorithm string) error {
+	if use, present := j["use"]; present {
+		value, ok := use.(string)
+		if !ok || value != "sig" {
+			return errors.New("JWK is not designated for signatures")
+		}
+	}
+	if algorithm, present := j["alg"]; present {
+		value, ok := algorithm.(string)
+		if !ok || value != expectedAlgorithm {
+			return fmt.Errorf("JWK algorithm does not match %s", expectedAlgorithm)
+		}
+	}
+	if operations, present := j["key_ops"]; present {
+		verify := false
+		switch values := operations.(type) {
+		case []any:
+			for _, raw := range values {
+				value, ok := raw.(string)
+				if !ok {
+					return errors.New("JWK key_ops is malformed")
+				}
+				if value == "verify" {
+					verify = true
+				}
+			}
+		case []string:
+			for _, value := range values {
+				if value == "verify" {
+					verify = true
+				}
+			}
+		default:
+			return errors.New("JWK key_ops is malformed")
+		}
+		if !verify {
+			return errors.New("JWK is not permitted for verification")
+		}
+	}
+	return nil
+}
+
 func parseJWK(j map[string]any) (crypto.PublicKey, error) {
 	kty, _ := j["kty"].(string)
 	switch kty {
 	case "RSA":
+		if err := validateJWKUsage(j, "RS256"); err != nil {
+			return nil, err
+		}
 		nRaw, _ := j["n"].(string)
 		eRaw, _ := j["e"].(string)
 		nBytes, err := base64.RawURLEncoding.DecodeString(nRaw)
@@ -601,6 +703,9 @@ func parseJWK(j map[string]any) (crypto.PublicKey, error) {
 		}
 		return &rsa.PublicKey{N: n, E: e}, nil
 	case "EC":
+		if err := validateJWKUsage(j, "ES256"); err != nil {
+			return nil, err
+		}
 		if crv, _ := j["crv"].(string); crv != "P-256" {
 			return nil, errors.New("unsupported EC curve")
 		}

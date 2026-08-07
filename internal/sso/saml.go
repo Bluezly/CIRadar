@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -22,54 +24,56 @@ import (
 )
 
 type samlResponse struct {
-	XMLName      xml.Name      `xml:"Response"`
+	XMLName      xml.Name      `xml:"urn:oasis:names:tc:SAML:2.0:protocol Response"`
 	ID           string        `xml:"ID,attr"`
 	InResponseTo string        `xml:"InResponseTo,attr"`
 	Destination  string        `xml:"Destination,attr"`
-	Issuer       string        `xml:"Issuer"`
-	Status       samlStatus    `xml:"Status"`
-	Assertion    samlAssertion `xml:"Assertion"`
+	Issuer       string        `xml:"urn:oasis:names:tc:SAML:2.0:assertion Issuer"`
+	Status       samlStatus    `xml:"urn:oasis:names:tc:SAML:2.0:protocol Status"`
+	Assertion    samlAssertion `xml:"urn:oasis:names:tc:SAML:2.0:assertion Assertion"`
 }
 
 type samlStatus struct {
 	Code struct {
 		Value string `xml:"Value,attr"`
-	} `xml:"StatusCode"`
+	} `xml:"urn:oasis:names:tc:SAML:2.0:protocol StatusCode"`
 }
 
 type samlAssertion struct {
 	ID         string                   `xml:"ID,attr"`
-	Issuer     string                   `xml:"Issuer"`
-	Subject    samlSubject              `xml:"Subject"`
-	Conditions samlConditions           `xml:"Conditions"`
-	Attributes []samlAttributeStatement `xml:"AttributeStatement"`
+	Issuer     string                   `xml:"urn:oasis:names:tc:SAML:2.0:assertion Issuer"`
+	Subject    samlSubject              `xml:"urn:oasis:names:tc:SAML:2.0:assertion Subject"`
+	Conditions samlConditions           `xml:"urn:oasis:names:tc:SAML:2.0:assertion Conditions"`
+	Attributes []samlAttributeStatement `xml:"urn:oasis:names:tc:SAML:2.0:assertion AttributeStatement"`
 }
 
 type samlSubject struct {
-	NameID        string `xml:"NameID"`
+	NameID        string `xml:"urn:oasis:names:tc:SAML:2.0:assertion NameID"`
 	Confirmations []struct {
 		Method string `xml:"Method,attr"`
 		Data   struct {
 			InResponseTo string `xml:"InResponseTo,attr"`
 			Recipient    string `xml:"Recipient,attr"`
 			NotOnOrAfter string `xml:"NotOnOrAfter,attr"`
-		} `xml:"SubjectConfirmationData"`
-	} `xml:"SubjectConfirmation"`
+		} `xml:"urn:oasis:names:tc:SAML:2.0:assertion SubjectConfirmationData"`
+	} `xml:"urn:oasis:names:tc:SAML:2.0:assertion SubjectConfirmation"`
 }
 
 type samlConditions struct {
-	NotBefore    string `xml:"NotBefore,attr"`
-	NotOnOrAfter string `xml:"NotOnOrAfter,attr"`
-	Restrictions []struct {
-		Audiences []string `xml:"Audience"`
-	} `xml:"AudienceRestriction"`
+	NotBefore    string                    `xml:"NotBefore,attr"`
+	NotOnOrAfter string                    `xml:"NotOnOrAfter,attr"`
+	Restrictions []samlAudienceRestriction `xml:"urn:oasis:names:tc:SAML:2.0:assertion AudienceRestriction"`
+}
+
+type samlAudienceRestriction struct {
+	Audiences []string `xml:"urn:oasis:names:tc:SAML:2.0:assertion Audience"`
 }
 
 type samlAttributeStatement struct {
 	Attributes []struct {
 		Name   string   `xml:"Name,attr"`
-		Values []string `xml:"AttributeValue"`
-	} `xml:"Attribute"`
+		Values []string `xml:"urn:oasis:names:tc:SAML:2.0:assertion AttributeValue"`
+	} `xml:"urn:oasis:names:tc:SAML:2.0:assertion Attribute"`
 }
 
 func (m *Manager) SAMLMetadata(w http.ResponseWriter, r *http.Request) {
@@ -146,17 +150,31 @@ func (m *Manager) samlCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid SAML encoding", http.StatusBadRequest)
 		return
 	}
-	if err := validateSAMLShape(xmlBytes, flow.RequestID); err != nil {
+	shape, err := inspectSAMLShape(xmlBytes, flow.RequestID)
+	if err == nil {
+		err = validateSAMLSecurityProfile(shape, m.cfg.SAMLSecurityProfile)
+	}
+	if err != nil {
 		http.Error(w, "invalid SAML response", http.StatusUnauthorized)
 		return
 	}
-	if err := verifySAMLXML(m.cfg.SAMLXMLSecPath, m.cfg.SAMLIdPCertificate, xmlBytes); err != nil {
+	if err := verifySAMLXML(r.Context(), m.cfg.SAMLXMLSecPath, m.cfg.SAMLIdPCertificate, xmlBytes); err != nil {
 		http.Error(w, "SAML signature validation failed", http.StatusUnauthorized)
 		return
 	}
 	identity, err := m.parseSAMLIdentity(xmlBytes, flow.RequestID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	replayKey := samlReplayKey(m.cfg.SAMLIdPEntityID, shape.SignedID)
+	claimed, err := m.replay.ClaimSSOReplay(r.Context(), replayKey, flow.Expires.Add(m.cfg.SAMLClockSkew))
+	if err != nil {
+		http.Error(w, "SAML replay protection unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !claimed {
+		http.Error(w, "SAML response has already been used", http.StatusUnauthorized)
 		return
 	}
 	if err := m.writeSession(w, identity, 8*time.Hour); err != nil {
@@ -166,96 +184,307 @@ func (m *Manager) samlCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, flow.ReturnTo, http.StatusFound)
 }
 
+type samlShape struct {
+	ResponseID          string
+	AssertionID         string
+	SignedID            string
+	CanonicalizationAlg string
+	SignatureAlg        string
+	DigestAlg           string
+	Transforms          []string
+}
+
 func validateSAMLShape(data []byte, requestID string) error {
+	_, err := inspectSAMLShape(data, requestID)
+	return err
+}
+
+func validateSAMLSecurityProfile(shape samlShape, profile string) error {
+	profile = strings.ToLower(strings.TrimSpace(profile))
+	if profile == "" {
+		profile = "strict"
+	}
+	if !allowedSAMLCanonicalization(shape.CanonicalizationAlg) {
+		return fmt.Errorf("unsupported SAML canonicalization algorithm %q", shape.CanonicalizationAlg)
+	}
+	if !allowedSAMLSignatureAlgorithm(shape.SignatureAlg) {
+		return fmt.Errorf("unsupported SAML signature algorithm %q", shape.SignatureAlg)
+	}
+	if !allowedSAMLDigestAlgorithm(shape.DigestAlg) {
+		return fmt.Errorf("unsupported SAML digest algorithm %q", shape.DigestAlg)
+	}
+	hasEnveloped := false
+	for _, transform := range shape.Transforms {
+		if !allowedSAMLTransform(transform) {
+			return fmt.Errorf("unsupported SAML signature transform %q", transform)
+		}
+		if transform == "http://www.w3.org/2000/09/xmldsig#enveloped-signature" {
+			hasEnveloped = true
+		}
+	}
+	if !hasEnveloped {
+		return errors.New("SAML signature must use the enveloped-signature transform")
+	}
+	switch profile {
+	case "strict":
+		if shape.SignedID != shape.ResponseID {
+			return errors.New("strict SAML profile requires the Response to be signed")
+		}
+	case "compatibility":
+		if shape.SignedID != shape.ResponseID && shape.SignedID != shape.AssertionID {
+			return errors.New("SAML signature does not cover the Response or Assertion")
+		}
+	default:
+		return fmt.Errorf("unsupported SAML security profile %q", profile)
+	}
+	return nil
+}
+
+func allowedSAMLCanonicalization(algorithm string) bool {
+	switch strings.TrimSpace(algorithm) {
+	case "http://www.w3.org/2001/10/xml-exc-c14n#",
+		"http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+		"http://www.w3.org/2006/12/xml-c14n11":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedSAMLSignatureAlgorithm(algorithm string) bool {
+	switch strings.TrimSpace(algorithm) {
+	case "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+		"http://www.w3.org/2001/04/xmldsig-more#rsa-sha384",
+		"http://www.w3.org/2001/04/xmldsig-more#rsa-sha512",
+		"http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256",
+		"http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384",
+		"http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedSAMLDigestAlgorithm(algorithm string) bool {
+	switch strings.TrimSpace(algorithm) {
+	case "http://www.w3.org/2001/04/xmlenc#sha256",
+		"http://www.w3.org/2001/04/xmldsig-more#sha384",
+		"http://www.w3.org/2001/04/xmlenc#sha512":
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedSAMLTransform(algorithm string) bool {
+	switch strings.TrimSpace(algorithm) {
+	case "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
+		"http://www.w3.org/2001/10/xml-exc-c14n#",
+		"http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
+		"http://www.w3.org/2006/12/xml-c14n11":
+		return true
+	default:
+		return false
+	}
+}
+
+func inspectSAMLShape(data []byte, requestID string) (samlShape, error) {
 	decoder := xml.NewDecoder(bytes.NewReader(data))
 	ids := map[string]bool{}
 	assertions, signatures, encrypted, responses := 0, 0, 0, 0
+	statuses, subjects, conditions := 0, 0, 0
 	references := []string{}
 	responseID, assertionID := "", ""
+	signatureParentID := ""
+	canonicalizationAlg, signatureAlg, digestAlg := "", "", ""
+	transforms := make([]string, 0, 2)
+	signedInfoCount, digestMethodCount := 0, 0
 	depth := 0
+	type elementFrame struct {
+		name xml.Name
+		id   string
+	}
+	stack := make([]elementFrame, 0, 16)
 	for {
 		token, err := decoder.Token()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return err
+			return samlShape{}, err
 		}
 		switch value := token.(type) {
 		case xml.Directive, xml.ProcInst:
-			return errors.New("SAML directives are not allowed")
+			return samlShape{}, errors.New("SAML directives are not allowed")
 		case xml.StartElement:
 			depth++
 			if depth > 64 {
-				return errors.New("SAML document is too deeply nested")
+				return samlShape{}, errors.New("SAML document is too deeply nested")
 			}
-			switch value.Name.Local {
-			case "Response":
-				if value.Name.Space != "urn:oasis:names:tc:SAML:2.0:protocol" || depth != 1 {
-					return errors.New("invalid SAML Response namespace or placement")
-				}
-				responses++
-			case "Assertion":
-				if value.Name.Space != "urn:oasis:names:tc:SAML:2.0:assertion" {
-					return errors.New("invalid SAML Assertion namespace")
-				}
-				assertions++
-			case "EncryptedAssertion":
-				encrypted++
-			case "Signature":
-				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" {
-					return errors.New("invalid XML Signature namespace")
-				}
-				signatures++
-			case "Reference":
-				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" {
-					return errors.New("invalid XML Signature Reference namespace")
-				}
-				for _, attribute := range value.Attr {
-					if attribute.Name.Local == "URI" {
-						references = append(references, attribute.Value)
-					}
-				}
+			parent := elementFrame{}
+			if len(stack) > 0 {
+				parent = stack[len(stack)-1]
 			}
+			frame := elementFrame{name: value.Name}
 			for _, attribute := range value.Attr {
 				if attribute.Name.Local != "ID" {
 					continue
 				}
-				if attribute.Value == "" || ids[attribute.Value] {
-					return errors.New("duplicate SAML ID")
+				if attribute.Name.Space != "" {
+					return samlShape{}, errors.New("SAML ID attributes must be unqualified")
 				}
-				ids[attribute.Value] = true
-				if value.Name.Local == "Response" {
-					responseID = attribute.Value
+				id := strings.TrimSpace(attribute.Value)
+				if !validSAMLID(id) || ids[id] {
+					return samlShape{}, errors.New("invalid or duplicate SAML ID")
 				}
-				if value.Name.Local == "Assertion" {
-					assertionID = attribute.Value
-				}
+				ids[id] = true
+				frame.id = id
 			}
+			switch value.Name.Local {
+			case "Response":
+				if value.Name.Space != "urn:oasis:names:tc:SAML:2.0:protocol" || depth != 1 {
+					return samlShape{}, errors.New("invalid SAML Response namespace or placement")
+				}
+				responses++
+				responseID = frame.id
+			case "Assertion":
+				if value.Name.Space != "urn:oasis:names:tc:SAML:2.0:assertion" || depth != 2 || parent.name.Local != "Response" || parent.name.Space != "urn:oasis:names:tc:SAML:2.0:protocol" {
+					return samlShape{}, errors.New("invalid SAML Assertion namespace or placement")
+				}
+				assertions++
+				assertionID = frame.id
+			case "EncryptedAssertion":
+				encrypted++
+			case "Status":
+				if value.Name.Space == "urn:oasis:names:tc:SAML:2.0:protocol" && parent.name.Local == "Response" {
+					statuses++
+				}
+			case "Subject":
+				if value.Name.Space == "urn:oasis:names:tc:SAML:2.0:assertion" && parent.name.Local == "Assertion" {
+					subjects++
+				}
+			case "Conditions":
+				if value.Name.Space == "urn:oasis:names:tc:SAML:2.0:assertion" && parent.name.Local == "Assertion" {
+					conditions++
+				}
+			case "Signature":
+				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" {
+					return samlShape{}, errors.New("invalid XML Signature namespace")
+				}
+				if parent.name.Local != "Response" && parent.name.Local != "Assertion" {
+					return samlShape{}, errors.New("XML Signature must be a direct child of the signed SAML element")
+				}
+				if parent.id == "" {
+					return samlShape{}, errors.New("signed SAML element is missing an ID")
+				}
+				signatures++
+				signatureParentID = parent.id
+			case "SignedInfo":
+				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" || parent.name.Local != "Signature" || parent.name.Space != "http://www.w3.org/2000/09/xmldsig#" {
+					return samlShape{}, errors.New("invalid XML SignedInfo placement")
+				}
+				signedInfoCount++
+			case "CanonicalizationMethod":
+				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" || parent.name.Local != "SignedInfo" || parent.name.Space != "http://www.w3.org/2000/09/xmldsig#" || canonicalizationAlg != "" {
+					return samlShape{}, errors.New("invalid XML canonicalization method")
+				}
+				canonicalizationAlg = unqualifiedXMLAttribute(value.Attr, "Algorithm")
+			case "SignatureMethod":
+				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" || parent.name.Local != "SignedInfo" || parent.name.Space != "http://www.w3.org/2000/09/xmldsig#" || signatureAlg != "" {
+					return samlShape{}, errors.New("invalid XML signature method")
+				}
+				signatureAlg = unqualifiedXMLAttribute(value.Attr, "Algorithm")
+			case "DigestMethod":
+				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" || parent.name.Local != "Reference" || parent.name.Space != "http://www.w3.org/2000/09/xmldsig#" {
+					return samlShape{}, errors.New("invalid XML digest method placement")
+				}
+				digestMethodCount++
+				if digestMethodCount > 1 {
+					return samlShape{}, errors.New("multiple XML digest methods are not supported")
+				}
+				digestAlg = unqualifiedXMLAttribute(value.Attr, "Algorithm")
+			case "Transform":
+				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" || parent.name.Local != "Transforms" || parent.name.Space != "http://www.w3.org/2000/09/xmldsig#" {
+					return samlShape{}, errors.New("invalid XML signature transform placement")
+				}
+				if len(transforms) >= 4 {
+					return samlShape{}, errors.New("too many XML signature transforms")
+				}
+				transforms = append(transforms, unqualifiedXMLAttribute(value.Attr, "Algorithm"))
+			case "Reference":
+				if value.Name.Space != "http://www.w3.org/2000/09/xmldsig#" || parent.name.Local != "SignedInfo" || parent.name.Space != "http://www.w3.org/2000/09/xmldsig#" {
+					return samlShape{}, errors.New("invalid XML Signature Reference namespace or placement")
+				}
+				uri := ""
+				for _, attribute := range value.Attr {
+					if attribute.Name.Local == "URI" {
+						if attribute.Name.Space != "" {
+							return samlShape{}, errors.New("XML Signature Reference URI must be unqualified")
+						}
+						uri = attribute.Value
+					}
+				}
+				references = append(references, uri)
+			}
+			stack = append(stack, frame)
 		case xml.EndElement:
+			if len(stack) == 0 || stack[len(stack)-1].name != value.Name {
+				return samlShape{}, errors.New("invalid SAML nesting")
+			}
+			stack = stack[:len(stack)-1]
 			depth--
 			if depth < 0 {
-				return errors.New("invalid SAML nesting")
+				return samlShape{}, errors.New("invalid SAML nesting")
 			}
 		}
 	}
-	if responses != 1 || assertions != 1 || signatures != 1 || encrypted != 0 || depth != 0 {
-		return errors.New("unsupported SAML document shape")
+	if responses != 1 || assertions != 1 || signatures != 1 || signedInfoCount != 1 || digestMethodCount != 1 || encrypted != 0 || statuses != 1 || subjects != 1 || conditions != 1 || depth != 0 || len(stack) != 0 {
+		return samlShape{}, errors.New("unsupported SAML document shape")
 	}
 	if requestID == "" || responseID == "" || assertionID == "" {
-		return errors.New("missing SAML request or document ID")
+		return samlShape{}, errors.New("missing SAML request or document ID")
 	}
-	if len(references) != 1 || !strings.HasPrefix(references[0], "#") {
-		return errors.New("invalid SAML signature reference")
+	if len(references) != 1 || !strings.HasPrefix(references[0], "#") || len(references[0]) < 2 {
+		return samlShape{}, errors.New("invalid SAML signature reference")
 	}
 	target := strings.TrimPrefix(references[0], "#")
 	if target != responseID && target != assertionID {
-		return errors.New("SAML signature must cover the Response or Assertion")
+		return samlShape{}, errors.New("SAML signature must cover the Response or Assertion")
 	}
-	return nil
+	if signatureParentID != target {
+		return samlShape{}, errors.New("XML Signature reference must match its parent SAML element")
+	}
+	if canonicalizationAlg == "" || signatureAlg == "" || digestAlg == "" || len(transforms) == 0 {
+		return samlShape{}, errors.New("SAML signature is missing required algorithms or transforms")
+	}
+	return samlShape{ResponseID: responseID, AssertionID: assertionID, SignedID: target, CanonicalizationAlg: canonicalizationAlg, SignatureAlg: signatureAlg, DigestAlg: digestAlg, Transforms: transforms}, nil
 }
 
-func verifySAMLXML(xmlsecPath, certificate string, data []byte) error {
+func unqualifiedXMLAttribute(attributes []xml.Attr, local string) string {
+	for _, attribute := range attributes {
+		if attribute.Name.Local == local {
+			if attribute.Name.Space != "" {
+				return ""
+			}
+			return strings.TrimSpace(attribute.Value)
+		}
+	}
+	return ""
+}
+
+func validSAMLID(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, r := range value {
+		if r <= 0x20 || r == 0x7f || r == '<' || r == '>' || r == '"' || r == '\'' {
+			return false
+		}
+	}
+	return true
+}
+
+func verifySAMLXML(parent context.Context, xmlsecPath, certificate string, data []byte) error {
 	executable, err := exec.LookPath(xmlsecPath)
 	if err != nil {
 		return fmt.Errorf("locate xmlsec1: %w", err)
@@ -283,7 +512,10 @@ func verifySAMLXML(xmlsecPath, certificate string, data []byte) error {
 			return err
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, executable, "--verify", "--pubkey-cert-pem", certificatePath, "--enabled-reference-uris", "same-doc", "--id-attr:ID", "urn:oasis:names:tc:SAML:2.0:protocol:Response", "--id-attr:ID", "urn:oasis:names:tc:SAML:2.0:assertion:Assertion", responsePath)
 	output, err := command.CombinedOutput()
@@ -294,6 +526,26 @@ func verifySAMLXML(xmlsecPath, certificate string, data []byte) error {
 		return fmt.Errorf("xmlsec verification failed: %s", truncateMessage(string(output), 512))
 	}
 	return nil
+}
+
+func samlAudienceRestrictionsAllow(restrictions []samlAudienceRestriction, entityID string) bool {
+	entityID = strings.TrimSpace(entityID)
+	if entityID == "" || len(restrictions) == 0 {
+		return false
+	}
+	for _, restriction := range restrictions {
+		allowed := false
+		for _, audience := range restriction.Audiences {
+			if strings.TrimSpace(audience) == entityID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Manager) parseSAMLIdentity(data []byte, requestID string) (model.SSOIdentity, error) {
@@ -314,15 +566,7 @@ func (m *Manager) parseSAMLIdentity(data []byte, requestID string) (model.SSOIde
 	if !withinSAMLWindow(response.Assertion.Conditions.NotBefore, response.Assertion.Conditions.NotOnOrAfter, now, m.cfg.SAMLClockSkew) {
 		return model.SSOIdentity{}, errors.New("SAML assertion expired")
 	}
-	audienceOK := false
-	for _, restriction := range response.Assertion.Conditions.Restrictions {
-		for _, audience := range restriction.Audiences {
-			if strings.TrimSpace(audience) == m.cfg.SAMLEntityID {
-				audienceOK = true
-			}
-		}
-	}
-	if !audienceOK {
+	if !samlAudienceRestrictionsAllow(response.Assertion.Conditions.Restrictions, m.cfg.SAMLEntityID) {
 		return model.SSOIdentity{}, errors.New("SAML audience mismatch")
 	}
 	confirmationOK := false
@@ -356,6 +600,11 @@ func (m *Manager) parseSAMLIdentity(data []byte, requestID string) (model.SSOIde
 	claims["email_verified"] = true
 	claims["name"] = firstNonEmpty(stringClaim(claims, m.cfg.SAMLNameAttribute), stringClaim(claims, "name"), email)
 	return m.identityFromClaims(claims)
+}
+
+func samlReplayKey(entityID, signedID string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(entityID) + "\x00" + strings.TrimSpace(signedID)))
+	return hex.EncodeToString(sum[:])
 }
 
 func withinSAMLWindow(notBefore, notAfter string, now time.Time, skew time.Duration) bool {
