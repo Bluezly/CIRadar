@@ -1269,3 +1269,29 @@ func TestAnalyzeRejectsTrailingJSONValue(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestFeedbackSeedsTenantDiagnosticMemory(t *testing.T) {
+	s, store, cfg := testServer(t)
+	input := model.AnalysisInput{TenantID: model.DefaultTenantID, Repository: "acme/private", Log: "opaque tenant-only failure ZXQ-9917"}
+	seed := s.analyzer.Analyze(input, analyzer.Context{})
+	if seed.Category != model.CategoryUnknown {
+		t.Fatalf("seed category=%s", seed.Category)
+	}
+	if err := store.RecordAnalysisForTenant(context.Background(), model.DefaultTenantID, input, seed, true, false); err != nil {
+		t.Fatal(err)
+	}
+	rr := doReq(t, s, http.MethodPost, "/api/v1/analyses/"+seed.ID+"/feedback", cfg.AdminToken, model.DefaultTenantID, map[string]any{
+		"verdict":             "incorrect",
+		"actual_category":     model.CategoryCodeFailure,
+		"actual_cause":        model.AttributionCode,
+		"actual_provider":     "private-build",
+		"actual_error_family": "tenant-confirmed",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("feedback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	recalled := s.analyzer.AnalyzeWithMemory(input, analyzer.Context{})
+	if recalled.Category != model.CategoryCodeFailure || recalled.Provider != "private-build" || recalled.ErrorFamily != "tenant-confirmed" {
+		t.Fatalf("recalled=%+v", recalled)
+	}
+}
