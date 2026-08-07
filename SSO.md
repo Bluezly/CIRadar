@@ -4,7 +4,7 @@ CI Radar supports native OIDC, native SAML 2.0 SP mode, and a trusted identity-p
 
 ## Native OIDC
 
-OIDC uses Authorization Code with PKCE, discovery, rotating JWKS, issuer and audience checks, nonce validation, domain allowlists, and group-to-role mapping.
+OIDC uses Authorization Code with PKCE, discovery, rotating JWKS, exact issuer matching, audience and authorized-party checks, required issued-at/expiration validation, nonce validation, domain allowlists, and group-to-role mapping. JWK signing metadata (`use`, `key_ops`, and `alg`) is honored when present, and duplicate key IDs fail closed.
 
 Discovery, token, and JWKS requests reject non-public network destinations by default. Set `allow_private_network: true` in the SSO block only when the IdP is intentionally hosted on a trusted internal network. Discovery must return the configured issuer, and login return paths remain local to CI Radar even when encoded more than once.
 
@@ -47,6 +47,7 @@ Install `xmlsec1` on every CI Radar replica and restrict `saml_xmlsec_path` to t
     "saml_idp_certificate": "/run/secrets/idp-signing-cert.pem",
     "saml_acs_url": "https://ci-radar.example.com/auth/callback",
     "saml_xmlsec_path": "/usr/bin/xmlsec1",
+    "saml_security_profile": "strict",
     "saml_email_attribute": "email",
     "saml_name_attribute": "name",
     "saml_clock_skew": "2m",
@@ -62,12 +63,12 @@ SP metadata is available at:
 GET /auth/saml/metadata
 ```
 
-The accepted profile is intentionally strict:
+The default `saml_security_profile` is `strict`. A `compatibility` profile exists for IdPs that sign the Assertion instead of the whole Response, but `strict` should be preferred whenever the IdP supports it. The strict profile is intentionally constrained:
 
 - one SAML Response and one Assertion
 - one XML Signature covering the Response or Assertion by same-document ID
 - signed XML verified against the configured IdP certificate
-- matching `InResponseTo`, ACS destination, recipient, issuer, audience, and bearer confirmation
+- matching `InResponseTo`, ACS destination, recipient, issuer, audience, and bearer confirmation; every `AudienceRestriction` must independently allow this SP
 - bounded clock skew and replay prevention
 - no encrypted assertions
 - no external XML entities or processing instructions

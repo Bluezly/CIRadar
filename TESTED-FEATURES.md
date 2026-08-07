@@ -1,4 +1,4 @@
-# Tested features — 1.3.2 OSS RC.6
+# Tested features — 1.3.2 OSS RC.11
 
 Automated tests cover:
 

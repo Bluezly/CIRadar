@@ -1,6 +1,6 @@
 # PostgreSQL deployment
 
-CI Radar includes a pure-Go PostgreSQL wire client and requires no CGO or external driver file.
+CI Radar includes a project-maintained pure-Go PostgreSQL wire client and requires no CGO or external driver file. Application values are sent as Extended Query Protocol bind parameters (`$1`, `$2`, ...), not escaped into SQL strings. The client remains a custom protocol implementation and should receive independent security review before high-risk production use.
 
 ## Configuration
 
@@ -35,7 +35,17 @@ Supported modes:
 - `insecure-require`: encryption without certificate verification; intended only for controlled local testing
 - `disable`: plaintext; intended only for isolated local testing
 
-Authentication supports password, MD5, and SCRAM-SHA-256.
+Authentication requires SCRAM-SHA-256. Legacy PostgreSQL cleartext and MD5 password authentication are intentionally rejected by the built-in client.
+
+## Query parameterization
+
+Runtime values are sent separately from SQL text through Parse/Bind/Describe/Execute/Sync messages. Project-level helpers that converted arbitrary values into SQL literals are not used by the PostgreSQL storage path. Dynamic SQL is limited to monthly partition DDL. Partition identifiers are accepted only when they match `ciradar_test_observations_YYYYMM`, and partition-boundary timestamps are generated internally from UTC month boundaries using a fixed RFC 3339 representation. No request, webhook, tenant, repository, test, or other externally supplied value is interpolated into that DDL.
+
+The separation of query text and values addresses the manual-escaping concern. It does not make the custom wire protocol equivalent in maturity to a widely deployed PostgreSQL driver. Operators with a high-risk threat model should independently audit `internal/pgwire`; replacing it with a mature driver remains a long-term architectural option.
+
+## Multi-instance throttling
+
+With PostgreSQL storage, request limits and authentication-failure backoff are shared across CI Radar instances. The database server clock defines shared windows and block expiry, avoiding enforcement drift between hosts. General rate-limit counters use an unlogged table because loss of those counters during database crash recovery is acceptable; authentication-failure state is logged. The local in-process limiter is retained as an additional first layer.
 
 ## Current relational storage model
 
@@ -49,6 +59,8 @@ It uses:
 - `ciradar_schema_migrations`: schema history
 
 Writes acquire advisory locks for the affected tenant and entity kind. A write for one tenant does not lock every other tenant. Cross-tenant correlation uses indexed SQL aggregation instead of loading all analyses into a global state blob.
+
+Schema migration uses a dedicated session advisory lock so multiple replicas cannot migrate concurrently. Acquisition is bounded to one minute. CI Radar verifies `pg_advisory_unlock` before returning the connection to the pool; an unlock failure retires the session to avoid leaking a migration lock into ordinary traffic.
 
 The backend automatically imports the legacy `ciradar_state` row when the relational tables are empty. The legacy table is retained for rollback and should be removed only after backup and verification.
 
@@ -94,3 +106,7 @@ Before calling a deployment production-ready, operators should complete and reco
 6. retention sizing and deletion/partition-drop verification
 
 The repository does not claim that these operator-specific exercises have been completed for an arbitrary installation. Passing unit and integration tests is not a substitute for them.
+
+## Operation timeout
+
+Database operations have a 30-second socket deadline by default even when the caller does not provide a context deadline. Add `query_timeout=N` to the PostgreSQL DSN to choose a value from 1 through 600 seconds. If the request context has an earlier deadline, the earlier deadline wins. A connection that times out during an operation is treated as unusable rather than returned to the pool.

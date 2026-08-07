@@ -4,9 +4,9 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC9.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC11.md`.
 
-## What RC.8 includes
+## What RC.11 includes
 
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
@@ -51,7 +51,7 @@ The build scripts strip release binaries by default. Set `STRIP=0` when building
 
 ## Dependency and protocol ownership
 
-The Go module intentionally has no third-party Go module dependencies. That reduces supply-chain surface but makes this project responsible for maintaining its custom PostgreSQL wire client and strict SAML parsing/orchestration. SAML XML-signature verification is delegated to the operator-configured `xmlsec1` executable; optional integrations such as PostgreSQL, Ollama, and external CI providers remain runtime dependencies when enabled. The custom protocol surfaces should receive independent security review before high-risk production deployment.
+The Go module intentionally has no third-party Go module dependencies. That reduces supply-chain surface but makes this project responsible for maintaining its custom PostgreSQL wire client and strict SAML parsing/orchestration. PostgreSQL values are sent through the Extended Query Protocol as separate bound parameters rather than interpolated into SQL text, but the wire implementation itself remains project-maintained. SAML XML-signature verification is delegated to the operator-configured `xmlsec1` executable; optional integrations such as PostgreSQL, Ollama, and external CI providers remain runtime dependencies when enabled. The custom protocol surfaces should receive independent security review before high-risk production deployment, and a mature PostgreSQL driver remains the preferred long-term replacement if the dependency policy changes.
 
 ## PostgreSQL
 
@@ -117,7 +117,7 @@ Every result includes the engine used.
 
 ## SSO
 
-OIDC is native. SAML is also handled directly by CI Radar as an SP. SAML XML signatures are verified with a pinned IdP certificate through `xmlsec1`; no SAML auth proxy is required. Metadata is available at `/auth/saml/metadata`.
+OIDC is native. SAML is also handled directly by CI Radar as an SP. SAML XML signatures are verified with a pinned IdP certificate through `xmlsec1`; strict response-shape, binding, algorithm, and replay checks are enabled by default. The parser/orchestration code remains project-maintained and should receive independent review before high-risk deployment. Metadata is available at `/auth/saml/metadata`.
 
 See `SSO.md`.
 
