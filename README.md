@@ -4,9 +4,9 @@ CI Radar is a free, self-hosted, open-source CI intelligence platform. It classi
 
 License: AGPL-3.0-or-later.
 
-Current release notes: `RELEASE-NOTES-OSS-RC11.md`.
+Current release notes: `RELEASE-NOTES-OSS-RC12.md`.
 
-## What RC.11 includes
+## What RC.12 includes
 
 - 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
 - GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
@@ -21,7 +21,7 @@ Current release notes: `RELEASE-NOTES-OSS-RC11.md`.
 - lexical similarity fallback, local static vectors, local neural embeddings through Ollama, or BYOK remote embeddings
 - MCP over stdio and Streamable HTTP with OAuth discovery, PKCE, sessions, SSE, server notifications, and confirmation-gated write tools
 - safe automatic rerun for external failures, disabled by default
-- source-grounded LLM repair suggestions with exact patch validation, confirmation-gated local patch application, and optional GitHub draft repair Pull Requests
+- source-grounded LLM repair suggestions with exact patch validation, confirmation-gated local patch application, optional idempotent GitHub draft repair Pull Requests, and repair-PR notifications
 - Windows, Linux, and macOS builds for amd64 and arm64
 
 ## Quick start
@@ -66,6 +66,18 @@ The Go module intentionally has no third-party Go module dependencies. That redu
 ciradar database check
 ciradar serve
 ```
+
+## Accuracy measurement
+
+Unit tests prove implementation behavior; they do not prove real-world diagnosis accuracy. `ciradar benchmark` evaluates the deterministic analyzer on an external labeled corpus and reports category accuracy, macro precision/recall/F1, UNKNOWN coverage, Wilson confidence intervals, confusion matrices, per-category errors, rule utilization, a dataset SHA-256, and an analyzer-configuration SHA-256. The configuration digest changes when rules or redaction behavior changes, while the private fingerprint key is deliberately excluded because it does not affect classification.
+
+```bash
+ciradar benchmark --dataset /path/to/dataset.json --split test --output benchmark-report.json
+```
+
+`benchmarks/example` is synthetic smoke-test data and must not be published as a product-accuracy score. `BENCHMARKING.md` defines the held-out labeling and publication policy. CI now runs the synthetic benchmark only as a regression test of the measurement harness.
+
+User feedback metrics are kept separate from benchmark precision. `agreement_percent` summarizes correct/partial/incorrect reviewer feedback. Optional `actual_category`, `actual_cause`, `actual_provider`, and `actual_error_family` labels produce labeled accuracy metrics. The older `precision_percent` and `external_precision_percent` response fields remain compatibility aliases for agreement in this release and should not be interpreted as statistical precision.
 
 ## Test impact selection
 

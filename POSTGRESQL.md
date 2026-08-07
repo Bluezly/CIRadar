@@ -35,7 +35,7 @@ Supported modes:
 - `insecure-require`: encryption without certificate verification; intended only for controlled local testing
 - `disable`: plaintext; intended only for isolated local testing
 
-Authentication requires SCRAM-SHA-256. Legacy PostgreSQL cleartext and MD5 password authentication are intentionally rejected by the built-in client.
+Authentication supports password, MD5, and SCRAM-SHA-256.
 
 ## Query parameterization
 
@@ -59,8 +59,6 @@ It uses:
 - `ciradar_schema_migrations`: schema history
 
 Writes acquire advisory locks for the affected tenant and entity kind. A write for one tenant does not lock every other tenant. Cross-tenant correlation uses indexed SQL aggregation instead of loading all analyses into a global state blob.
-
-Schema migration uses a dedicated session advisory lock so multiple replicas cannot migrate concurrently. Acquisition is bounded to one minute. CI Radar verifies `pg_advisory_unlock` before returning the connection to the pool; an unlock failure retires the session to avoid leaking a migration lock into ordinary traffic.
 
 The backend automatically imports the legacy `ciradar_state` row when the relational tables are empty. The legacy table is retained for rollback and should be removed only after backup and verification.
 
@@ -106,7 +104,3 @@ Before calling a deployment production-ready, operators should complete and reco
 6. retention sizing and deletion/partition-drop verification
 
 The repository does not claim that these operator-specific exercises have been completed for an arbitrary installation. Passing unit and integration tests is not a substitute for them.
-
-## Operation timeout
-
-Database operations have a 30-second socket deadline by default even when the caller does not provide a context deadline. Add `query_timeout=N` to the PostgreSQL DSN to choose a value from 1 through 600 seconds. If the request context has an earlier deadline, the earlier deadline wins. A connection that times out during an operation is treated as unusable rather than returned to the pool.

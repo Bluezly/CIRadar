@@ -61,7 +61,3 @@ The client first calls:
 The returned confirmation token is short-lived and bound to the tenant, actor, action, and target. The client then passes it to the selected write tool. CI Radar records an audit event for every accepted mutation.
 
 MCP cannot run arbitrary commands, alter CI Radar configuration, apply a patch locally, or merge a repair pull request.
-
-## Long-lived HTTP streams
-
-Streamable HTTP SSE responses refresh a bounded write deadline before endpoint messages, server events, and heartbeats. This prevents the general HTTP `WriteTimeout` from terminating a healthy long-lived MCP stream while still bounding writes to a stalled client.

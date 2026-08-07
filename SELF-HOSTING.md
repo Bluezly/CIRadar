@@ -62,7 +62,3 @@ Keep the selected endpoint on a trusted network and treat repository and log tex
 ## Restricted outbound networks
 
 Provider-status polling is independent of GitHub App configuration. In an environment that intentionally blocks public status endpoints, set `provider_polling` to `false` or `CIRADAR_PROVIDER_POLLING=false`. Persistent failures are summarized once and repeated identical failures are logged only at debug level; recovery is logged when connectivity returns.
-
-## Public listener origin
-
-A non-loopback `listen_address` requires an explicit `public_base_url`. This is intentional: OAuth discovery, MCP protected-resource metadata, and browser origin validation must not derive the service authority from an arbitrary public Host header. For Docker Compose set `CIRADAR_PUBLIC_BASE_URL` to the externally reachable HTTPS origin; the supplied Compose file binds the container to `0.0.0.0:8787` explicitly.
