@@ -152,13 +152,13 @@ func (d *Dispatcher) dispatchChannel(ctx context.Context, ch config.Notification
 				Description string `json:"description"`
 			}
 			if len(limited) > 0 && json.Unmarshal(limited, &result) == nil && !result.OK {
-				return d.recordFailure(ctx, ch, ev, attempt, resp.StatusCode, fmt.Errorf("Telegram rejected message: %s", sanitizeText(result.Description, ch, endpoint)), true)
+				return d.recordFailure(ctx, ch, ev, attempt, resp.StatusCode, fmt.Errorf("telegram rejected message: %s", sanitizeText(result.Description, ch, endpoint)), true)
 			}
 		}
 		now := time.Now().UTC()
 		return d.store.RecordNotificationDelivery(ctx, model.NotificationDelivery{ID: delivery.ID, TenantID: tenantID, EventID: ev.ID, DedupeKey: ev.DedupeKey, Channel: ch.Name, ChannelType: ch.Type, Status: "sent", Attempts: attempt, HTTPStatus: resp.StatusCode, CreatedAt: delivery.CreatedAt, UpdatedAt: now, SentAt: now})
 	}
-	msg := fmt.Errorf("HTTP %d: %s", resp.StatusCode, sanitizeText(strings.TrimSpace(string(limited)), ch, endpoint))
+	msg := fmt.Errorf("http %d: %s", resp.StatusCode, sanitizeText(strings.TrimSpace(string(limited)), ch, endpoint))
 	permanent := resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 408 && resp.StatusCode != 409 && resp.StatusCode != 425 && resp.StatusCode != 429
 	if resp.StatusCode == 429 {
 		if wait := retryDelay(resp, limited); wait > 0 {
