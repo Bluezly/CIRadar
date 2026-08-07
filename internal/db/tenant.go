@@ -36,7 +36,11 @@ func (s *Store) CreateTenant(ctx context.Context, id, name string) (model.Tenant
 	now := time.Now().UTC()
 	t := model.Tenant{ID: id, Name: name, Enabled: true, CreatedAt: now, UpdatedAt: now}
 	s.state.Tenants[id] = t
-	return t, s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		delete(s.state.Tenants, id)
+		return model.Tenant{}, err
+	}
+	return t, nil
 }
 
 func (s *Store) ListTenants(ctx context.Context) ([]model.Tenant, error) {
@@ -84,10 +88,15 @@ func (s *Store) SetTenantEnabled(ctx context.Context, id string, enabled bool) e
 			return fmt.Errorf("cannot disable the last enabled tenant")
 		}
 	}
+	old := t
 	t.Enabled = enabled
 	t.UpdatedAt = time.Now().UTC()
 	s.state.Tenants[id] = t
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.state.Tenants[id] = old
+		return err
+	}
+	return nil
 }
 
 func (s *Store) CreateAPIKey(ctx context.Context, tenantID, name string, role model.Role) (model.APIKey, string, error) {
@@ -123,6 +132,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, tenantID, name string, role mo
 	key := model.APIKey{ID: id, TenantID: tenantID, Name: name, Prefix: prefix, Role: role, CreatedAt: now}
 	s.state.APIKeys[id] = apiKeyRecord{Key: key, Hash: hashToken(token)}
 	if err := s.persistLocked(); err != nil {
+		delete(s.state.APIKeys, id)
 		return model.APIKey{}, "", err
 	}
 	return key, token, nil
@@ -162,9 +172,12 @@ func (s *Store) AuthenticateAPIKey(ctx context.Context, token string) (*model.Pr
 		return nil, nil
 	}
 	if matched.Key.LastUsedAt.IsZero() || now.Sub(matched.Key.LastUsedAt) >= 5*time.Minute {
+		old := matched
 		matched.Key.LastUsedAt = now
 		s.state.APIKeys[matchedID] = matched
-		_ = s.persistLocked()
+		if err := s.persistLocked(); err != nil {
+			s.state.APIKeys[matchedID] = old
+		}
 	}
 	return &model.Principal{TenantID: matched.Key.TenantID, Name: matched.Key.Name, Role: matched.Key.Role, APIKeyID: matchedID}, nil
 }
@@ -209,11 +222,16 @@ func (s *Store) RevokeAPIKey(ctx context.Context, tenantID, id string) error {
 	if !ok || rec.Key.TenantID != tenantID {
 		return fmt.Errorf("api key not found")
 	}
+	old := rec
 	if rec.Key.RevokedAt.IsZero() {
 		rec.Key.RevokedAt = time.Now().UTC()
 		s.state.APIKeys[id] = rec
 	}
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.state.APIKeys[id] = old
+		return err
+	}
+	return nil
 }
 
 func (s *Store) BindInstallation(ctx context.Context, tenantID string, installationID int64) error {
@@ -224,8 +242,18 @@ func (s *Store) BindInstallation(ctx context.Context, tenantID string, installat
 	if tenant, ok := s.state.Tenants[tenantID]; !ok || !tenant.Enabled {
 		return fmt.Errorf("tenant %q not found or disabled", tenantID)
 	}
-	s.state.InstallationTenants[strconv.FormatInt(installationID, 10)] = tenantID
-	return s.persistLocked()
+	key := strconv.FormatInt(installationID, 10)
+	old, existed := s.state.InstallationTenants[key]
+	s.state.InstallationTenants[key] = tenantID
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.InstallationTenants[key] = old
+		} else {
+			delete(s.state.InstallationTenants, key)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) UnbindInstallation(ctx context.Context, installationID int64) error {
@@ -233,11 +261,16 @@ func (s *Store) UnbindInstallation(ctx context.Context, installationID int64) er
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := strconv.FormatInt(installationID, 10)
-	if _, ok := s.state.InstallationTenants[key]; !ok {
+	old, ok := s.state.InstallationTenants[key]
+	if !ok {
 		return fmt.Errorf("GitHub installation %d is not bound", installationID)
 	}
 	delete(s.state.InstallationTenants, key)
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		s.state.InstallationTenants[key] = old
+		return err
+	}
+	return nil
 }
 
 func (s *Store) ResolveInstallationTenant(ctx context.Context, installationID int64) (string, bool) {
@@ -278,13 +311,25 @@ func (s *Store) RecordAudit(ctx context.Context, event model.AuditEvent) error {
 		}
 		event.ID = "audit_" + r
 	}
+	event = cloneAuditEvent(event)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.state.AuditEvents[event.ID]; !ok {
+	old, existed := s.state.AuditEvents[event.ID]
+	oldOrderLen := len(s.state.AuditOrder)
+	if !existed {
 		s.state.AuditOrder = append(s.state.AuditOrder, event.ID)
 	}
 	s.state.AuditEvents[event.ID] = event
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.AuditEvents[event.ID] = old
+		} else {
+			delete(s.state.AuditEvents, event.ID)
+		}
+		s.state.AuditOrder = s.state.AuditOrder[:oldOrderLen]
+		return err
+	}
+	return nil
 }
 
 func (s *Store) ListAudit(ctx context.Context, tenantID string, limit int) ([]model.AuditEvent, error) {
@@ -298,7 +343,7 @@ func (s *Store) ListAudit(ctx context.Context, tenantID string, limit int) ([]mo
 	out := make([]model.AuditEvent, 0, limit)
 	for i := len(s.state.AuditOrder) - 1; i >= 0 && len(out) < limit; i-- {
 		if e, ok := s.state.AuditEvents[s.state.AuditOrder[i]]; ok && e.TenantID == tenantID {
-			out = append(out, e)
+			out = append(out, cloneAuditEvent(e))
 		}
 	}
 	return out, nil
@@ -328,15 +373,24 @@ func (s *Store) UpsertRepositoryProfile(ctx context.Context, p model.RepositoryP
 		return model.RepositoryProfile{}, fmt.Errorf("tenant %q not found or disabled", p.TenantID)
 	}
 	key := profileKey(p.TenantID, p.Repository)
-	if old, ok := s.state.RepositoryProfiles[key]; ok {
+	old, existed := s.state.RepositoryProfiles[key]
+	if existed {
 		p.CreatedAt = old.CreatedAt
 	} else {
 		p.CreatedAt = now
 	}
 	p.UpdatedAt = now
-	p.NotificationChannels = append([]string(nil), p.NotificationChannels...)
+	p = cloneRepositoryProfile(p)
 	s.state.RepositoryProfiles[key] = p
-	return p, s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.RepositoryProfiles[key] = old
+		} else {
+			delete(s.state.RepositoryProfiles, key)
+		}
+		return model.RepositoryProfile{}, err
+	}
+	return cloneRepositoryProfile(p), nil
 }
 
 func (s *Store) GetRepositoryProfile(ctx context.Context, tenantID, repository string) (*model.RepositoryProfile, error) {
@@ -348,7 +402,7 @@ func (s *Store) GetRepositoryProfile(ctx context.Context, tenantID, repository s
 	if !ok {
 		return nil, nil
 	}
-	out := p
+	out := cloneRepositoryProfile(p)
 	return &out, nil
 }
 
@@ -360,7 +414,7 @@ func (s *Store) ListRepositoryProfiles(ctx context.Context, tenantID string) ([]
 	out := []model.RepositoryProfile{}
 	for _, p := range s.state.RepositoryProfiles {
 		if p.TenantID == tenantID {
-			out = append(out, p)
+			out = append(out, cloneRepositoryProfile(p))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Repository < out[j].Repository })
@@ -381,6 +435,7 @@ func (s *Store) UpdateIncidentState(ctx context.Context, tenantID, fingerprint, 
 	if !ok {
 		return nil, nil
 	}
+	old := inc
 	now := time.Now().UTC()
 	inc.State = state
 	switch state {
@@ -398,9 +453,10 @@ func (s *Store) UpdateIncidentState(ctx context.Context, tenantID, fingerprint, 
 	}
 	s.state.Incidents[key] = inc
 	if err := s.persistLocked(); err != nil {
+		s.state.Incidents[key] = old
 		return nil, err
 	}
-	out := inc
+	out := cloneIncident(inc)
 	return &out, nil
 }
 
@@ -458,7 +514,7 @@ func (s *Store) Dashboard(ctx context.Context, tenantID string, since time.Time)
 		if inc.Severity == "critical" && (inc.State == "open" || inc.State == "acknowledged") {
 			d.CriticalIncidents++
 		}
-		d.RecentIncidents = append(d.RecentIncidents, inc)
+		d.RecentIncidents = append(d.RecentIncidents, cloneIncident(inc))
 	}
 	for _, nd := range s.state.NotificationDeliveries {
 		if normalizeTenant(nd.TenantID) == tenantID && nd.Status == "failed" {
@@ -480,7 +536,8 @@ func (s *Store) Dashboard(ctx context.Context, tenantID string, since time.Time)
 		}
 	}
 	if d.DiagnosisFeedback.Total > 0 {
-		d.DiagnosisFeedback.PrecisionPercent = (float64(d.DiagnosisFeedback.Correct) + 0.5*float64(d.DiagnosisFeedback.Partial)) * 100 / float64(d.DiagnosisFeedback.Total)
+		d.DiagnosisFeedback.AgreementPercent = (float64(d.DiagnosisFeedback.Correct) + 0.5*float64(d.DiagnosisFeedback.Partial)) * 100 / float64(d.DiagnosisFeedback.Total)
+		d.DiagnosisFeedback.PrecisionPercent = d.DiagnosisFeedback.AgreementPercent
 	}
 	now := time.Now().UTC()
 	for _, observation := range s.state.TestObservations {
@@ -509,7 +566,7 @@ func (s *Store) Dashboard(ctx context.Context, tenantID string, since time.Time)
 	}
 	for i := len(s.state.AnalysisOrder) - 1; i >= 0 && len(d.RecentAnalyses) < 20; i-- {
 		if rec, ok := s.state.Analyses[s.state.AnalysisOrder[i]]; ok && normalizeTenant(rec.TenantID) == tenantID {
-			d.RecentAnalyses = append(d.RecentAnalyses, rec.Result)
+			d.RecentAnalyses = append(d.RecentAnalyses, cloneAnalysisResult(rec.Result))
 		}
 	}
 	return d, nil

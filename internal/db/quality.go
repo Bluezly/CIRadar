@@ -47,6 +47,17 @@ func (s *Store) UpsertDiagnosisFeedback(ctx context.Context, f model.DiagnosisFe
 	if len(f.Comment) > 2000 {
 		return model.DiagnosisFeedback{}, fmt.Errorf("comment is too long")
 	}
+	f.ActualProvider = strings.TrimSpace(f.ActualProvider)
+	f.ActualErrorFamily = strings.TrimSpace(f.ActualErrorFamily)
+	if f.ActualCategory != "" && !validFeedbackCategory(f.ActualCategory) {
+		return model.DiagnosisFeedback{}, fmt.Errorf("actual_category is invalid")
+	}
+	if f.ActualCause != "" && !validFeedbackAttribution(f.ActualCause) {
+		return model.DiagnosisFeedback{}, fmt.Errorf("actual_cause is invalid")
+	}
+	if len(f.ActualProvider) > 120 || len(f.ActualErrorFamily) > 160 {
+		return model.DiagnosisFeedback{}, fmt.Errorf("actual provider or error family is too long")
+	}
 	now := time.Now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -67,8 +78,14 @@ func (s *Store) UpsertDiagnosisFeedback(ctx context.Context, f model.DiagnosisFe
 		f.CreatedAt = now
 	}
 	f.UpdatedAt = now
+	old, existed := s.state.DiagnosisFeedback[key]
 	s.state.DiagnosisFeedback[key] = f
 	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.DiagnosisFeedback[key] = old
+		} else {
+			delete(s.state.DiagnosisFeedback, key)
+		}
 		return model.DiagnosisFeedback{}, err
 	}
 	return f, nil
@@ -102,6 +119,7 @@ func (s *Store) FeedbackMetrics(ctx context.Context, tenantID string) (model.Fee
 	defer s.mu.Unlock()
 	m := model.FeedbackMetrics{}
 	externalTotal, externalCorrect := 0, 0
+	categoryCorrect, attributionCorrect := 0, 0
 	for _, f := range s.state.DiagnosisFeedback {
 		if f.TenantID != tenantID {
 			continue
@@ -115,20 +133,70 @@ func (s *Store) FeedbackMetrics(ctx context.Context, tenantID string) (model.Fee
 		case "incorrect":
 			m.Incorrect++
 		}
-		if rec, ok := s.state.Analyses[f.AnalysisID]; ok && rec.Result.Attribution == model.AttributionExternal {
+		rec, ok := s.state.Analyses[f.AnalysisID]
+		if !ok {
+			continue
+		}
+		if rec.Result.Attribution == model.AttributionExternal {
 			externalTotal++
 			if f.Verdict == "correct" {
 				externalCorrect++
 			}
 		}
+		actualCategory := f.ActualCategory
+		if actualCategory == "" && f.Verdict == "correct" {
+			actualCategory = rec.Result.Category
+		}
+		if actualCategory != "" {
+			m.LabeledCategoryCases++
+			if actualCategory == rec.Result.Category {
+				categoryCorrect++
+			}
+		}
+		actualAttribution := f.ActualCause
+		if actualAttribution == "" && f.Verdict == "correct" {
+			actualAttribution = rec.Result.Attribution
+		}
+		if actualAttribution != "" {
+			m.LabeledAttributionCases++
+			if actualAttribution == rec.Result.Attribution {
+				attributionCorrect++
+			}
+		}
 	}
 	if m.Total > 0 {
-		m.PrecisionPercent = (float64(m.Correct) + 0.5*float64(m.Partial)) * 100 / float64(m.Total)
+		m.AgreementPercent = (float64(m.Correct) + 0.5*float64(m.Partial)) * 100 / float64(m.Total)
 	}
 	if externalTotal > 0 {
-		m.ExternalPrecision = float64(externalCorrect) * 100 / float64(externalTotal)
+		m.ExternalAgreementPercent = float64(externalCorrect) * 100 / float64(externalTotal)
 	}
+	if m.LabeledCategoryCases > 0 {
+		m.CategoryAccuracyPercent = float64(categoryCorrect) * 100 / float64(m.LabeledCategoryCases)
+	}
+	if m.LabeledAttributionCases > 0 {
+		m.AttributionAccuracyPercent = float64(attributionCorrect) * 100 / float64(m.LabeledAttributionCases)
+	}
+	m.PrecisionPercent = m.AgreementPercent
+	m.ExternalPrecision = m.ExternalAgreementPercent
 	return m, nil
+}
+
+func validFeedbackCategory(value model.Category) bool {
+	switch value {
+	case model.CategoryCodeFailure, model.CategoryTestFlake, model.CategoryDependencyRegistry, model.CategoryNetworkFailure, model.CategoryRunnerFailure, model.CategoryRunnerImageDrift, model.CategoryCacheFailure, model.CategoryResourceExhaustion, model.CategoryProviderIncident, model.CategoryConcurrencyConflict, model.CategoryToolchainFailure, model.CategoryUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validFeedbackAttribution(value model.Attribution) bool {
+	switch value {
+	case model.AttributionExternal, model.AttributionCode, model.AttributionMixed, model.AttributionToolchain, model.AttributionUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, observations []model.TestObservation) ([]model.TestCaseStats, error) {
@@ -144,6 +212,9 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	oldObservations := cloneMap(s.state.TestObservations)
+	oldObservationOrder := append([]string(nil), s.state.TestObservationOrder...)
+	oldStats := cloneTestCaseStatsMap(s.state.TestCaseStats)
 	updated := map[string]model.TestCaseStats{}
 	for _, o := range observations {
 		if _, exists := s.state.TestObservations[o.ID]; exists {
@@ -262,15 +333,19 @@ func (s *Store) RecordTestObservations(ctx context.Context, tenantID string, obs
 		}
 		s.state.TestObservations[o.ID] = o
 		s.state.TestObservationOrder = append(s.state.TestObservationOrder, o.ID)
-		s.state.TestCaseStats[sk] = stats
-		updated[key] = stats
+		stored := cloneTestCaseStats(stats)
+		s.state.TestCaseStats[sk] = stored
+		updated[key] = cloneTestCaseStats(stored)
 	}
 	if err := s.persistLocked(); err != nil {
+		s.state.TestObservations = oldObservations
+		s.state.TestObservationOrder = oldObservationOrder
+		s.state.TestCaseStats = oldStats
 		return nil, err
 	}
 	out := make([]model.TestCaseStats, 0, len(updated))
 	for _, v := range updated {
-		out = append(out, v)
+		out = append(out, cloneTestCaseStats(v))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].EstimatedEngineeringMinutesLost == out[j].EstimatedEngineeringMinutesLost {
@@ -293,7 +368,7 @@ func (s *Store) ListTestCaseStats(ctx context.Context, tenantID, repository, cla
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	out := []model.TestCaseStats{}
-	for key, st := range s.state.TestCaseStats {
+	for _, st := range s.state.TestCaseStats {
 		if st.TenantID != tenantID {
 			continue
 		}
@@ -310,8 +385,7 @@ func (s *Store) ListTestCaseStats(ctx context.Context, tenantID, repository, cla
 		} else {
 			st.Quarantined = false
 		}
-		s.state.TestCaseStats[key] = st
-		out = append(out, st)
+		out = append(out, cloneTestCaseStats(st))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Critical != out[j].Critical {
@@ -352,6 +426,7 @@ func (s *Store) GetTestCaseStats(ctx context.Context, tenantID, testKey string) 
 		stats.Quarantined = false
 		stats.QuarantineUntil = time.Time{}
 	}
+	stats = cloneTestCaseStats(stats)
 	return &stats, nil
 }
 
@@ -370,7 +445,7 @@ func (s *Store) ListTestObservations(ctx context.Context, tenantID, testKey stri
 		if !ok || o.TenantID != tenantID || TestKey(o) != testKey {
 			continue
 		}
-		out = append(out, o)
+		out = append(out, cloneTestObservation(o))
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].OccurredAt.After(out[j].OccurredAt) })
 	return out, nil
@@ -387,12 +462,15 @@ func (s *Store) SetTestCritical(ctx context.Context, tenantID, testKey string, c
 	if !ok {
 		return nil, fmt.Errorf("test case not found")
 	}
+	old := stats
 	stats.Critical = critical
 	s.state.TestCaseStats[sk] = stats
 	if err := s.persistLocked(); err != nil {
+		s.state.TestCaseStats[sk] = old
 		return nil, err
 	}
-	return &stats, nil
+	out := cloneTestCaseStats(stats)
+	return &out, nil
 }
 
 func (s *Store) SetTestQuarantine(ctx context.Context, q model.TestQuarantine) (model.TestQuarantine, error) {
@@ -417,13 +495,22 @@ func (s *Store) SetTestQuarantine(ctx context.Context, q model.TestQuarantine) (
 	if _, ok := s.state.TestCaseStats[sk]; !ok {
 		return model.TestQuarantine{}, fmt.Errorf("test case not found")
 	}
-	s.state.TestQuarantines[quarantineKey(q.TenantID, q.TestKey)] = q
-	st := s.state.TestCaseStats[sk]
+	qk := quarantineKey(q.TenantID, q.TestKey)
+	oldQ, qExisted := s.state.TestQuarantines[qk]
+	oldStats := s.state.TestCaseStats[sk]
+	s.state.TestQuarantines[qk] = q
+	st := oldStats
 	st.Quarantined = true
 	st.QuarantineUntil = q.ExpiresAt
 	st.Owner = q.Owner
 	s.state.TestCaseStats[sk] = st
 	if err := s.persistLocked(); err != nil {
+		if qExisted {
+			s.state.TestQuarantines[qk] = oldQ
+		} else {
+			delete(s.state.TestQuarantines, qk)
+		}
+		s.state.TestCaseStats[sk] = oldStats
 		return model.TestQuarantine{}, err
 	}
 	return q, nil
@@ -433,14 +520,27 @@ func (s *Store) RemoveTestQuarantine(ctx context.Context, tenantID, testKey stri
 	tenantID = normalizeTenant(tenantID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.state.TestQuarantines, quarantineKey(tenantID, testKey))
+	qk := quarantineKey(tenantID, testKey)
+	oldQ, qExisted := s.state.TestQuarantines[qk]
+	delete(s.state.TestQuarantines, qk)
 	sk := testStatsKey(tenantID, testKey)
-	if st, ok := s.state.TestCaseStats[sk]; ok {
+	oldStats, statsExisted := s.state.TestCaseStats[sk]
+	if statsExisted {
+		st := oldStats
 		st.Quarantined = false
 		st.QuarantineUntil = time.Time{}
 		s.state.TestCaseStats[sk] = st
 	}
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if qExisted {
+			s.state.TestQuarantines[qk] = oldQ
+		}
+		if statsExisted {
+			s.state.TestCaseStats[sk] = oldStats
+		}
+		return err
+	}
+	return nil
 }
 func (s *Store) ListTestQuarantines(ctx context.Context, tenantID string) ([]model.TestQuarantine, error) {
 	_ = ctx
@@ -449,13 +549,12 @@ func (s *Store) ListTestQuarantines(ctx context.Context, tenantID string) ([]mod
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
 	out := []model.TestQuarantine{}
-	for k, q := range s.state.TestQuarantines {
+	for _, q := range s.state.TestQuarantines {
 		if q.TenantID != tenantID {
 			continue
 		}
 		if q.Active && q.ExpiresAt.Before(now) {
-			q.Active = false
-			s.state.TestQuarantines[k] = q
+			continue
 		}
 		if q.Active {
 			out = append(out, q)
@@ -532,7 +631,7 @@ func normalizeTestObservations(tenantID string, observations []model.TestObserva
 			continue
 		}
 		seen[observation.ID] = struct{}{}
-		out = append(out, observation)
+		out = append(out, cloneTestObservation(observation))
 	}
 	return out
 }
@@ -564,6 +663,14 @@ func sameTestExecutionContext(previousCommit, currentCommit string, previousRunI
 		return previousCommit == currentCommit
 	}
 	return previousRunID != 0 && currentRunID != 0 && previousRunID == currentRunID
+}
+
+func cloneTestCaseStatsMap(source map[string]model.TestCaseStats) map[string]model.TestCaseStats {
+	cloned := make(map[string]model.TestCaseStats, len(source))
+	for key, stats := range source {
+		cloned[key] = cloneTestCaseStats(stats)
+	}
+	return cloned
 }
 
 func maxInt64(a, b int64) int64 {

@@ -38,14 +38,23 @@ func (s *Store) PutObject(ctx context.Context, tenant, kind, id string, value an
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := extensionKey(tenant, kind, id)
-	obj := s.state.Extensions[key]
-	if obj.ID == "" {
+	old, existed := s.state.Extensions[key]
+	obj := old
+	if !existed {
 		obj = ExtensionObject{TenantID: tenant, Kind: kind, ID: id, CreatedAt: now}
 	}
-	obj.Value = append(obj.Value[:0], b...)
+	obj.Value = append(json.RawMessage(nil), b...)
 	obj.UpdatedAt = now
 	s.state.Extensions[key] = obj
-	return s.persistLocked()
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.Extensions[key] = old
+		} else {
+			delete(s.state.Extensions, key)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) PutObjectIfKindBelowLimit(ctx context.Context, tenant, kind, id string, value any, limit int) (bool, error) {
@@ -82,7 +91,7 @@ func (s *Store) PutObjectIfKindBelowLimit(ctx context.Context, tenant, kind, id 
 	if !existed {
 		object = ExtensionObject{TenantID: tenant, Kind: kind, ID: id, CreatedAt: now}
 	}
-	object.Value = append(object.Value[:0], b...)
+	object.Value = append(json.RawMessage(nil), b...)
 	object.UpdatedAt = now
 	s.state.Extensions[key] = object
 	if err := s.persistLocked(); err != nil {
@@ -138,6 +147,14 @@ func (s *Store) DeleteObject(ctx context.Context, tenant, kind, id string) error
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.state.Extensions, extensionKey(tenant, kind, id))
-	return s.persistLocked()
+	key := extensionKey(tenant, kind, id)
+	old, existed := s.state.Extensions[key]
+	delete(s.state.Extensions, key)
+	if err := s.persistLocked(); err != nil {
+		if existed {
+			s.state.Extensions[key] = old
+		}
+		return err
+	}
+	return nil
 }

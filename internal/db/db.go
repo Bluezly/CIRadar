@@ -883,6 +883,7 @@ func (s *Store) RecordAnalysisForTenant(ctx context.Context, tenantID string, in
 	if !storeExcerpt {
 		r.RedactedExcerpt = ""
 	}
+	r = cloneAnalysisResult(r)
 	if !storeRaw {
 		in.Log = ""
 	}
@@ -893,7 +894,7 @@ func (s *Store) RecordAnalysisForTenant(ctx context.Context, tenantID string, in
 		s.state.AnalysisOrder = append(s.state.AnalysisOrder, r.ID)
 	}
 	s.state.Analyses[r.ID] = analysisRecord{TenantID: tenantID, Input: in, Result: r}
-	s.state.Environments = append(s.state.Environments, environmentRecord{TenantID: tenantID, Repository: in.Repository, Workflow: in.Workflow, Job: in.Job, CommitSHA: in.CommitSHA, Successful: false, Environment: r.Environment, CreatedAt: r.CreatedAt})
+	s.state.Environments = append(s.state.Environments, environmentRecord{TenantID: tenantID, Repository: in.Repository, Workflow: in.Workflow, Job: in.Job, CommitSHA: in.CommitSHA, Successful: false, Environment: cloneEnvironment(r.Environment), CreatedAt: r.CreatedAt})
 	if err := s.persistLocked(); err != nil {
 		if existed {
 			s.state.Analyses[r.ID] = oldRecord
@@ -918,7 +919,7 @@ func (s *Store) RecordSuccessfulEnvironmentForTenant(ctx context.Context, tenant
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	oldLen := len(s.state.Environments)
-	s.state.Environments = append(s.state.Environments, environmentRecord{TenantID: tenantID, Repository: repository, Workflow: workflow, Job: job, CommitSHA: sha, Successful: true, Environment: env, CreatedAt: at.UTC()})
+	s.state.Environments = append(s.state.Environments, environmentRecord{TenantID: tenantID, Repository: repository, Workflow: workflow, Job: job, CommitSHA: sha, Successful: true, Environment: cloneEnvironment(env), CreatedAt: at.UTC()})
 	if err := s.persistLocked(); err != nil {
 		s.state.Environments = s.state.Environments[:oldLen]
 		return err
@@ -937,7 +938,7 @@ func (s *Store) LastSuccessfulEnvironmentForTenant(ctx context.Context, tenantID
 	for i := len(s.state.Environments) - 1; i >= 0; i-- {
 		e := s.state.Environments[i]
 		if e.TenantID == tenantID && e.Successful && e.Repository == repository && (workflow == "" || e.Workflow == workflow) && (job == "" || e.Job == job) {
-			env := e.Environment
+			env := cloneEnvironment(e.Environment)
 			return &env, nil
 		}
 	}
@@ -998,6 +999,7 @@ func (s *Store) UpsertIncidentForTenant(ctx context.Context, tenantID string, i 
 	}
 	tenantID = normalizeTenant(tenantID)
 	i.TenantID = tenantID
+	i = cloneIncident(i)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := incidentKey(tenantID, i.Fingerprint)
@@ -1056,7 +1058,7 @@ func (s *Store) ListIncidentsForTenant(ctx context.Context, tenantID string, lim
 	out := make([]model.Incident, 0)
 	for _, i := range s.state.Incidents {
 		if normalizeTenant(i.TenantID) == tenantID && (stateFilter == "" || i.State == stateFilter) {
-			out = append(out, i)
+			out = append(out, cloneIncident(i))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].LastSeenAt.After(out[j].LastSeenAt) })
@@ -1172,7 +1174,7 @@ func (s *Store) GetAnalysisForTenant(ctx context.Context, tenantID, id string) (
 	if !ok || normalizeTenant(a.TenantID) != tenantID {
 		return nil, nil
 	}
-	r := a.Result
+	r := cloneAnalysisResult(a.Result)
 	return &r, nil
 }
 func (s *Store) ListAnalyses(ctx context.Context, limit int) ([]model.AnalysisResult, error) {
@@ -1190,7 +1192,7 @@ func (s *Store) ListAnalysesForTenant(ctx context.Context, tenantID string, limi
 	out := make([]model.AnalysisResult, 0, limit)
 	for i := len(s.state.AnalysisOrder) - 1; i >= 0 && len(out) < limit; i-- {
 		if a, ok := s.state.Analyses[s.state.AnalysisOrder[i]]; ok && normalizeTenant(a.TenantID) == tenantID {
-			out = append(out, a.Result)
+			out = append(out, cloneAnalysisResult(a.Result))
 		}
 	}
 	return out, nil
@@ -1316,6 +1318,68 @@ func (s *Store) Cleanup(ctx context.Context, retentionDays int) error {
 	return nil
 }
 
+func cloneEnvironment(value model.Environment) model.Environment {
+	if value.ToolVersions != nil {
+		value.ToolVersions = cloneMap(value.ToolVersions)
+	}
+	value.ContainerRefs = append([]string(nil), value.ContainerRefs...)
+	value.ActionVersions = append([]string(nil), value.ActionVersions...)
+	return value
+}
+
+func cloneSuggestedActions(values []model.SuggestedAction) []model.SuggestedAction {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]model.SuggestedAction, len(values))
+	for i, value := range values {
+		value.Commands = append([]string(nil), value.Commands...)
+		value.References = append([]string(nil), value.References...)
+		cloned[i] = value
+	}
+	return cloned
+}
+
+func cloneAnalysisResult(value model.AnalysisResult) model.AnalysisResult {
+	value.Evidence = append([]model.Evidence(nil), value.Evidence...)
+	value.Environment = cloneEnvironment(value.Environment)
+	value.MatchedRules = append([]string(nil), value.MatchedRules...)
+	value.EnvironmentChanges = append([]string(nil), value.EnvironmentChanges...)
+	value.SuggestedActions = cloneSuggestedActions(value.SuggestedActions)
+	return value
+}
+
+func cloneIncident(value model.Incident) model.Incident {
+	value.SuggestedActions = cloneSuggestedActions(value.SuggestedActions)
+	return value
+}
+
+func cloneAuditEvent(value model.AuditEvent) model.AuditEvent {
+	if value.Metadata != nil {
+		value.Metadata = cloneMap(value.Metadata)
+	}
+	return value
+}
+
+func cloneRepositoryProfile(value model.RepositoryProfile) model.RepositoryProfile {
+	value.NotificationChannels = append([]string(nil), value.NotificationChannels...)
+	return value
+}
+
+func cloneTestObservation(value model.TestObservation) model.TestObservation {
+	value.Environment = cloneEnvironment(value.Environment)
+	return value
+}
+
+func cloneTestCaseStats(value model.TestCaseStats) model.TestCaseStats {
+	value.ImpactedPullRequests = append([]int(nil), value.ImpactedPullRequests...)
+	value.Aliases = append([]string(nil), value.Aliases...)
+	if value.CauseCounts != nil {
+		value.CauseCounts = cloneMap(value.CauseCounts)
+	}
+	return value
+}
+
 func cloneMap[K comparable, V any](source map[K]V) map[K]V {
 	cloned := make(map[K]V, len(source))
 	for key, value := range source {
@@ -1353,7 +1417,7 @@ func (s *Store) ResolveStaleIncidentsDetailed(ctx context.Context, cutoff time.T
 			incident.ResolvedBy = "system"
 			incident.ResolutionNote = "Automatically resolved after inactivity"
 			s.state.Incidents[key] = incident
-			out = append(out, incident)
+			out = append(out, cloneIncident(incident))
 		}
 	}
 	if len(out) > 0 {
@@ -1380,7 +1444,7 @@ func (s *Store) GetIncidentForTenant(ctx context.Context, tenantID, fingerprint 
 	if !ok {
 		return nil, nil
 	}
-	out := i
+	out := cloneIncident(i)
 	return &out, nil
 }
 
