@@ -2,12 +2,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +333,168 @@ func TestOAuthRejectsUnsignedPlaintextToken(t *testing.T) {
 	response := doReq(t, s, http.MethodGet, "/api/v1/status", token, "", nil)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unsigned OAuth token status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestOAuthRegistrationRejectsOversizedMetadata(t *testing.T) {
+	s, _, _ := testServer(t)
+	cases := []string{
+		`{"redirect_uris":["https://client.example/callback"],"client_name":"` + strings.Repeat("a", oauthClientNameMaxBytes+1) + `"}`,
+		`{"redirect_uris":["https://client.example/callback"],"software_id":"` + strings.Repeat("b", oauthSoftwareFieldMaxBytes+1) + `"}`,
+		`{"redirect_uris":["https://client.example/callback"],"client_uri":"http://remote.example/client"}`,
+	}
+	for index, body := range cases {
+		req := httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "203.0.113.10:1234"
+		rr := httptest.NewRecorder()
+		s.http.Handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("case %d status=%d body=%s", index, rr.Code, rr.Body.String())
+		}
+	}
+
+	longRedirect := "https://client.example/" + strings.Repeat("x", oauthRedirectURIMaxBytes)
+	body := `{"redirect_uris":[` + strconv.Quote(longRedirect) + `]}`
+	req := httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "203.0.113.11:1234"
+	rr := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("long redirect status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPKCEValidationUsesRFC7636Bounds(t *testing.T) {
+	verifier := strings.Repeat("a", oauthPKCEVerifierMinBytes)
+	if !validPKCEVerifier(verifier) {
+		t.Fatal("valid PKCE verifier was rejected")
+	}
+	for _, raw := range []string{
+		strings.Repeat("a", oauthPKCEVerifierMinBytes-1),
+		strings.Repeat("a", oauthPKCEVerifierMaxBytes+1),
+		strings.Repeat("a", oauthPKCEVerifierMinBytes-1) + "!",
+	} {
+		if validPKCEVerifier(raw) {
+			t.Fatalf("invalid verifier was accepted: len=%d", len(raw))
+		}
+	}
+	digest := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	if !validPKCEChallenge(challenge) {
+		t.Fatal("valid S256 challenge was rejected")
+	}
+	if validPKCEChallenge(challenge+"x") || validPKCEChallenge(strings.Repeat("!", 43)) {
+		t.Fatal("invalid S256 challenge was accepted")
+	}
+}
+
+func TestRootCanListAndDeleteDynamicOAuthClients(t *testing.T) {
+	s, _, cfg := testServer(t)
+	registration := httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/register", strings.NewReader(`{"redirect_uris":["https://client.example/callback"],"client_name":"CLI client"}`))
+	registration.Header.Set("Content-Type", "application/json")
+	registration.RemoteAddr = "203.0.113.30:1234"
+	registered := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(registered, registration)
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("registration status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(registered.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	clientID, _ := payload["client_id"].(string)
+	if clientID == "" {
+		t.Fatal("client id missing")
+	}
+
+	list := doReq(t, s, http.MethodGet, "/api/v1/oauth/clients", cfg.AdminToken, "", nil)
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), clientID) {
+		t.Fatalf("list status=%d body=%s", list.Code, list.Body.String())
+	}
+	deleted := doReq(t, s, http.MethodDelete, "/api/v1/oauth/clients/"+url.PathEscape(clientID), cfg.AdminToken, "", nil)
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	list = doReq(t, s, http.MethodGet, "/api/v1/oauth/clients", cfg.AdminToken, "", nil)
+	if list.Code != http.StatusOK || strings.Contains(list.Body.String(), clientID) {
+		t.Fatalf("client still listed: status=%d body=%s", list.Code, list.Body.String())
+	}
+}
+
+func TestDeletingOAuthClientInvalidatesBoundAccessToken(t *testing.T) {
+	s, store, _ := testServer(t)
+	client := oauthClient{ID: "mcp_revoked_client", Name: "revoked", RedirectURIs: []string{"https://client.example/callback"}, CreatedAt: time.Now().UTC()}
+	if err := store.PutObject(context.Background(), model.DefaultTenantID, "oauth_client", client.ID, client); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	raw, err := sealOAuthValue(s.dashboardSecret(), "access", oauthAccessToken{
+		ID:       "bound-token",
+		ClientID: client.ID,
+		Resource: "http://ciradar.test/mcp",
+		Scope:    "ciradar.read",
+		Principal: model.Principal{
+			TenantID: model.DefaultTenantID,
+			Name:     "oauth-reader",
+			Role:     model.RoleViewer,
+		},
+		IssuedAt:  now,
+		ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := doReq(t, s, http.MethodGet, "/api/v1/status", raw, "", nil); response.Code != http.StatusOK {
+		t.Fatalf("bound token before client deletion status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := store.DeleteObject(context.Background(), model.DefaultTenantID, "oauth_client", client.ID); err != nil {
+		t.Fatal(err)
+	}
+	if response := doReq(t, s, http.MethodGet, "/api/v1/status", raw, "", nil); response.Code != http.StatusUnauthorized {
+		t.Fatalf("bound token after client deletion status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDeletedOAuthClientCannotRedeemPendingCode(t *testing.T) {
+	s, store, _ := testServer(t)
+	client := oauthClient{ID: "mcp_pending_client", Name: "pending", RedirectURIs: []string{"https://client.example/callback"}, CreatedAt: time.Now().UTC()}
+	if err := store.PutObject(context.Background(), model.DefaultTenantID, "oauth_client", client.ID, client); err != nil {
+		t.Fatal(err)
+	}
+	verifier := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+	digest := sha256.Sum256([]byte(verifier))
+	code := oauthCode{
+		ID:            "pending-code",
+		ClientID:      client.ID,
+		RedirectURI:   client.RedirectURIs[0],
+		CodeChallenge: base64.RawURLEncoding.EncodeToString(digest[:]),
+		Resource:      "http://ciradar.test/mcp",
+		Scope:         "ciradar.read",
+		Principal:     model.Principal{TenantID: model.DefaultTenantID, Name: "oauth-reader", Role: model.RoleViewer},
+		ExpiresAt:     time.Now().UTC().Add(5 * time.Minute),
+	}
+	sealed, err := sealOAuthValue(s.dashboardSecret(), "code", code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteObject(context.Background(), model.DefaultTenantID, "oauth_client", client.ID); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {client.ID},
+		"redirect_uri":  {client.RedirectURIs[0]},
+		"code":          {sealed},
+		"code_verifier": {verifier},
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://ciradar.test/oauth/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.RemoteAddr = "203.0.113.12:1234"
+	rr := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "no longer registered") {
+		t.Fatalf("token redemption after client deletion status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }

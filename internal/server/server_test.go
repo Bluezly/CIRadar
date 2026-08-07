@@ -1156,3 +1156,22 @@ func TestMetricEndpointsReturnBadRequestForInvalidRange(t *testing.T) {
 		}
 	}
 }
+
+func TestInternalErrorsDoNotLeakBackendDetails(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := &Server{log: log}
+	req := httptest.NewRequest(http.MethodGet, "http://ciradar.test/api/v1/status", nil)
+	req = req.WithContext(context.WithValue(req.Context(), requestIDKey, "req-safe-123"))
+	rr := httptest.NewRecorder()
+	s.internalError(rr, req, errors.New("postgres password=super-secret host=db.internal"))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d", rr.Code)
+	}
+	body := rr.Body.String()
+	if strings.Contains(body, "super-secret") || strings.Contains(body, "db.internal") || strings.Contains(body, "postgres") {
+		t.Fatalf("internal details leaked: %s", body)
+	}
+	if !strings.Contains(body, "req-safe-123") {
+		t.Fatalf("request id missing: %s", body)
+	}
+}
