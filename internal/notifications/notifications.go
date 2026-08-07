@@ -387,6 +387,8 @@ func slackPayload(ch config.NotificationChannel, ev model.NotificationEvent) map
 		}})
 	} else if ev.Type == "test_flaky" && ev.Fingerprint != "" {
 		blocks = append(blocks, map[string]any{"type": "actions", "elements": []any{map[string]any{"type": "button", "text": map[string]any{"type": "plain_text", "text": "Quarantine 7 days"}, "style": "danger", "action_id": "ciradar_quarantine", "value": prefix + "quarantine|" + ev.Fingerprint}}})
+	} else if ev.Type == "repair_pr_created" && strings.TrimSpace(ev.DetailsURL) != "" {
+		blocks = append(blocks, map[string]any{"type": "actions", "elements": []any{map[string]any{"type": "button", "text": map[string]any{"type": "plain_text", "text": "Review draft PR"}, "url": ev.DetailsURL}}})
 	}
 	return map[string]any{"text": text, "blocks": blocks}
 }
@@ -607,6 +609,46 @@ func FlakyTestEvent(st model.TestCaseStats, publicBaseURL string) model.Notifica
 		details = strings.TrimRight(publicBaseURL, "/") + "/?test=" + st.TestKey
 	}
 	return model.NotificationEvent{ID: fmt.Sprintf("evt_test_flaky_%s_%d", st.TestKey, now.Unix()), TenantID: st.TenantID, Type: "test_flaky", DedupeKey: "test_flaky:" + st.TestKey, OccurredAt: now, Severity: "minor", Title: "Flaky test detected: " + st.Name, Summary: fmt.Sprintf("%s has a %.1f flake score across %d runs. Likely cause: %s.", st.Name, st.FlakeScore, st.TotalRuns, st.PrimaryFlakeCause), Repository: st.Repository, DetailsURL: details, Category: model.CategoryTestFlake, Attribution: model.AttributionCode, Score: -int(st.FlakeScore), ExternalityScore: -int(st.FlakeScore), EvidenceStrength: int(st.FlakeScore), CodeEvidenceScore: int(st.FlakeScore), Provider: st.Framework, Operation: "test", Fingerprint: st.TestKey, Recommendation: "Assign an owner, reproduce the failure, and quarantine only while the root cause is under investigation."}
+}
+
+func RepairPRCreatedEvent(analysis model.AnalysisResult, source model.RepairSource, result model.RepairResult) model.NotificationEvent {
+	now := result.UpdatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	title := "Draft repair PR created"
+	if strings.TrimSpace(source.Repository) != "" {
+		title += ": " + source.Repository
+	}
+	if result.PullRequestNumber > 0 {
+		title += fmt.Sprintf(" #%d", result.PullRequestNumber)
+	}
+	summary := "CI Radar created a draft repair pull request from a source-grounded patch proposal."
+	return model.NotificationEvent{
+		ID:                    "evt_repair_pr_" + analysis.ID,
+		TenantID:              analysis.TenantID,
+		Type:                  "repair_pr_created",
+		DedupeKey:             "repair_pr_created:" + analysis.ID,
+		OccurredAt:            now,
+		Severity:              "info",
+		Title:                 title,
+		Summary:               summary,
+		Repository:            source.Repository,
+		CommitSHA:             source.CommitSHA,
+		DetailsURL:            result.PullRequestURL,
+		Category:              analysis.Category,
+		Confidence:            analysis.Confidence,
+		Attribution:           analysis.Attribution,
+		Score:                 analysis.Score,
+		ExternalityScore:      model.ExternalityScoreOf(analysis),
+		EvidenceStrength:      model.EvidenceStrengthOf(analysis),
+		ExternalEvidenceScore: model.ExternalEvidenceScoreOf(analysis),
+		CodeEvidenceScore:     model.CodeEvidenceScoreOf(analysis),
+		Provider:              "GitHub",
+		Operation:             "draft-repair-pr",
+		Fingerprint:           analysis.Fingerprint,
+		Recommendation:        "Review the draft diff and its CI results before merging.",
+	}
 }
 
 func TestEvent() model.NotificationEvent {
