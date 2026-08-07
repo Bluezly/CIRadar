@@ -1,16 +1,49 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testConfig() Config {
 	cfg := Default()
 	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
 	return cfg
+}
+
+func testSAMLPrerequisites(t *testing.T, cfg *Config) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test-idp"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.SSO.SAMLIdPCertificate = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	xmlsecPath := filepath.Join(t.TempDir(), "xmlsec1")
+	if err := os.WriteFile(xmlsecPath, []byte("test"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.SSO.SAMLXMLSecPath = xmlsecPath
 }
 
 func TestDefaultIsPrivateAndChannelsUnique(t *testing.T) {
@@ -174,7 +207,7 @@ func TestDashboardSessionSecretCannotReuseAnotherCredential(t *testing.T) {
 			cfg.DashboardSessionSecret = cfg.FingerprintHMACKey
 		},
 		"SSO session secret": func(cfg *Config) {
-			cfg.SSO.SessionSecret = "0123456789abcdef0123456789abcdef"
+			cfg.SSO.SessionSecret = "abcdef0123456789abcdef0123456789"
 			cfg.DashboardSessionSecret = cfg.SSO.SessionSecret
 		},
 	} {
@@ -295,5 +328,145 @@ func TestNotificationRepositoryPatternsAreValidated(t *testing.T) {
 	cfg.Notifications.Channels = []NotificationChannel{{Name: "ops", Type: "webhook", Enabled: true, URL: "https://hooks.example.test/notify", ExcludeRepositories: []string{"acme/*"}}}
 	if err := cfg.normalize(); err != nil {
 		t.Fatalf("valid repository pattern rejected: %v", err)
+	}
+}
+
+func TestLLMRejectsAnthropicCompatibilityConfiguration(t *testing.T) {
+	cfg := testConfig()
+	cfg.LLM.Enabled = true
+	cfg.LLM.Provider = "openai-compatible"
+	cfg.LLM.Endpoint = "https://api.anthropic.com/v1/chat/completions"
+	cfg.LLM.DataPolicy = "metadata_only"
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "provider anthropic") {
+		t.Fatalf("expected Anthropic compatibility configuration to fail, got %v", err)
+	}
+}
+
+func TestLLMAcceptsNativeAnthropicProvider(t *testing.T) {
+	cfg := testConfig()
+	cfg.LLM.Enabled = true
+	cfg.LLM.Provider = "Anthropic"
+	cfg.LLM.Endpoint = "https://api.anthropic.com"
+	cfg.LLM.DataPolicy = "metadata_only"
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.Provider != "anthropic" {
+		t.Fatalf("provider=%q", cfg.LLM.Provider)
+	}
+}
+
+func TestSAMLDefaultsToStrictSecurityProfile(t *testing.T) {
+	cfg := testConfig()
+	cfg.SSO.Enabled = true
+	cfg.SSO.Mode = "saml"
+	cfg.SSO.SessionSecret = "abcdef0123456789abcdef0123456789"
+	cfg.SSO.SAMLEntityID = "https://ciradar.example/saml"
+	cfg.SSO.SAMLIdPSSOURL = "https://idp.example/sso"
+	cfg.SSO.SAMLIdPEntityID = "https://idp.example/metadata"
+	cfg.SSO.SAMLACSURL = "https://ciradar.example/auth/callback"
+	testSAMLPrerequisites(t, &cfg)
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SSO.SAMLSecurityProfile != "strict" {
+		t.Fatalf("profile=%q", cfg.SSO.SAMLSecurityProfile)
+	}
+}
+
+func TestSAMLRejectsRelativeXMLSecPath(t *testing.T) {
+	cfg := testConfig()
+	cfg.SSO.Enabled = true
+	cfg.SSO.Mode = "saml"
+	cfg.SSO.SessionSecret = "abcdef0123456789abcdef0123456789"
+	cfg.SSO.SAMLEntityID = "https://ciradar.example/saml"
+	cfg.SSO.SAMLIdPSSOURL = "https://idp.example/sso"
+	cfg.SSO.SAMLIdPEntityID = "https://idp.example/metadata"
+	cfg.SSO.SAMLIdPCertificate = "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----"
+	cfg.SSO.SAMLACSURL = "https://ciradar.example/auth/callback"
+	cfg.SSO.SAMLXMLSecPath = "xmlsec1"
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "absolute saml_xmlsec_path") {
+		t.Fatalf("expected relative xmlsec path rejection, got %v", err)
+	}
+}
+
+func TestRemoteSourceCodeRequiresExplicitAcknowledgement(t *testing.T) {
+	cfg := testConfig()
+	cfg.LLM.Enabled = true
+	cfg.LLM.Provider = "openai-compatible"
+	cfg.LLM.Endpoint = "https://llm.example/v1/chat/completions"
+	cfg.LLM.DataPolicy = "redacted_remote"
+	cfg.LLM.SendSourceCode = true
+	cfg.LLM.AllowRemoteSourceCode = false
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "allow_remote_source_code") {
+		t.Fatalf("expected explicit remote-source acknowledgement requirement, got %v", err)
+	}
+	cfg.LLM.AllowRemoteSourceCode = true
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoteLLMRequiresHTTPS(t *testing.T) {
+	cfg := testConfig()
+	cfg.LLM.Enabled = true
+	cfg.LLM.Endpoint = "http://llm.example/v1/chat/completions"
+	cfg.LLM.DataPolicy = "metadata_only"
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("expected HTTPS rejection, got %v", err)
+	}
+}
+
+func TestMetadataOnlyDisablesPayloadContent(t *testing.T) {
+	cfg := testConfig()
+	cfg.LLM.Enabled = true
+	cfg.LLM.Endpoint = "https://llm.example/v1/chat/completions"
+	cfg.LLM.DataPolicy = "metadata_only"
+	cfg.LLM.SendRedactedExcerpt = true
+	cfg.LLM.SendChangedFiles = true
+	cfg.LLM.SendSourceCode = true
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.SendRedactedExcerpt || cfg.LLM.SendChangedFiles || cfg.LLM.SendSourceCode {
+		t.Fatalf("metadata-only policy retained content flags: %#v", cfg.LLM)
+	}
+}
+
+func TestRedactedRemoteLLMRequiresResidualSecretBlocking(t *testing.T) {
+	cfg := testConfig()
+	cfg.LLM.Enabled = true
+	cfg.LLM.Provider = "openai-compatible"
+	cfg.LLM.Endpoint = "https://llm.example/v1/chat/completions"
+	cfg.LLM.DataPolicy = "redacted_remote"
+	cfg.LLM.SendSourceCode = false
+	cfg.LLM.BlockOnResidualSecret = false
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "block_on_residual_secret") {
+		t.Fatalf("expected residual-secret blocking requirement, got %v", err)
+	}
+	cfg.LLM.BlockOnResidualSecret = true
+	if err := cfg.normalize(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPublicBaseURLRequiredForNonLoopbackListen(t *testing.T) {
+	for _, address := range []string{"0.0.0.0:8787", ":8787", "192.0.2.10:8787", "ciradar.internal:8787"} {
+		if !listenAddressIsPublic(address) {
+			t.Fatalf("address=%q was treated as loopback", address)
+		}
+	}
+	for _, address := range []string{"127.0.0.1:8787", "[::1]:8787", "localhost:8787"} {
+		if listenAddressIsPublic(address) {
+			t.Fatalf("loopback address=%q was treated as public", address)
+		}
+	}
+
+	cfg := Default()
+	cfg.ListenAddress = "0.0.0.0:8787"
+	cfg.PublicBaseURL = ""
+	cfg.DashboardSessionSecret = "0123456789abcdef0123456789abcdef"
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "public_base_url") {
+		t.Fatalf("error=%v", err)
 	}
 }
