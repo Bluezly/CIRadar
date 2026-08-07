@@ -1,10 +1,15 @@
 package config
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -44,6 +49,7 @@ type SSOConfig struct {
 	SAMLIdPCertificate  string        `json:"saml_idp_certificate,omitempty"`
 	SAMLACSURL          string        `json:"saml_acs_url,omitempty"`
 	SAMLXMLSecPath      string        `json:"saml_xmlsec_path,omitempty"`
+	SAMLSecurityProfile string        `json:"saml_security_profile,omitempty"`
 	SAMLNameAttribute   string        `json:"saml_name_attribute,omitempty"`
 	SAMLEmailAttribute  string        `json:"saml_email_attribute,omitempty"`
 	SAMLClockSkewText   string        `json:"saml_clock_skew,omitempty"`
@@ -72,6 +78,7 @@ type LLMConfig struct {
 	MaxSourceFileCharacters int           `json:"max_source_file_characters,omitempty"`
 	DataPolicy              string        `json:"data_policy,omitempty"`
 	BlockOnResidualSecret   bool          `json:"block_on_residual_secret"`
+	AllowRemoteSourceCode   bool          `json:"allow_remote_source_code"`
 	AllowPrivateNetwork     bool          `json:"allow_private_network,omitempty"`
 }
 
@@ -198,8 +205,33 @@ func (c *Config) normalizeEnterprise() error {
 			if c.SSO.SAMLEntityID == "" || c.SSO.SAMLIdPSSOURL == "" || c.SSO.SAMLIdPEntityID == "" || c.SSO.SAMLIdPCertificate == "" || c.SSO.SAMLACSURL == "" {
 				return errors.New("sso saml requires saml_entity_id, saml_idp_sso_url, saml_idp_entity_id, saml_idp_certificate, and saml_acs_url")
 			}
-			if c.SSO.SAMLXMLSecPath == "" {
-				c.SSO.SAMLXMLSecPath = "xmlsec1"
+			for label, raw := range map[string]string{"saml_idp_sso_url": c.SSO.SAMLIdPSSOURL, "saml_acs_url": c.SSO.SAMLACSURL} {
+				parsed, parseErr := url.Parse(raw)
+				if parseErr != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+					return fmt.Errorf("%s must be an absolute HTTPS URL without embedded credentials", label)
+				}
+			}
+			if c.SSO.SAMLXMLSecPath == "" || !filepath.IsAbs(c.SSO.SAMLXMLSecPath) {
+				return errors.New("sso saml requires an absolute saml_xmlsec_path to a pinned xmlsec1 executable")
+			}
+			if info, statErr := os.Stat(c.SSO.SAMLXMLSecPath); statErr != nil || !info.Mode().IsRegular() {
+				return fmt.Errorf("saml_xmlsec_path is not a readable regular file: %w", statErr)
+			}
+			if _, lookupErr := exec.LookPath(c.SSO.SAMLXMLSecPath); lookupErr != nil {
+				return fmt.Errorf("saml_xmlsec_path is not executable: %w", lookupErr)
+			}
+			if !strings.Contains(c.SSO.SAMLIdPCertificate, "BEGIN CERTIFICATE") && !filepath.IsAbs(c.SSO.SAMLIdPCertificate) {
+				return errors.New("saml_idp_certificate must contain PEM data or use an absolute file path")
+			}
+			if err := validateSAMLSigningCertificate(c.SSO.SAMLIdPCertificate, time.Now().UTC()); err != nil {
+				return err
+			}
+			c.SSO.SAMLSecurityProfile = strings.ToLower(strings.TrimSpace(c.SSO.SAMLSecurityProfile))
+			if c.SSO.SAMLSecurityProfile == "" {
+				c.SSO.SAMLSecurityProfile = "strict"
+			}
+			if c.SSO.SAMLSecurityProfile != "strict" && c.SSO.SAMLSecurityProfile != "compatibility" {
+				return fmt.Errorf("unsupported saml_security_profile %q", c.SSO.SAMLSecurityProfile)
 			}
 			if c.SSO.SAMLEmailAttribute == "" {
 				c.SSO.SAMLEmailAttribute = "email"
@@ -228,8 +260,14 @@ func (c *Config) normalizeEnterprise() error {
 	default:
 		return fmt.Errorf("unsupported llm data_policy %q", c.LLM.DataPolicy)
 	}
+	c.LLM.Provider = strings.ToLower(strings.TrimSpace(c.LLM.Provider))
 	if c.LLM.Provider == "" {
 		c.LLM.Provider = "openai-compatible"
+	}
+	switch c.LLM.Provider {
+	case "openai", "openai-compatible", "anthropic":
+	default:
+		return fmt.Errorf("unsupported llm provider %q", c.LLM.Provider)
 	}
 	if c.LLM.Model == "" {
 		c.LLM.Model = "gpt-5-mini"
@@ -263,8 +301,31 @@ func (c *Config) normalizeEnterprise() error {
 	if c.LLM.Enabled && c.LLM.Endpoint == "" {
 		return errors.New("llm requires endpoint")
 	}
+	if c.LLM.Enabled {
+		parsedEndpoint, parseErr := url.Parse(c.LLM.Endpoint)
+		if parseErr != nil || parsedEndpoint.Host == "" || parsedEndpoint.User != nil || (parsedEndpoint.Scheme != "http" && parsedEndpoint.Scheme != "https") {
+			return errors.New("llm endpoint must be an absolute HTTP or HTTPS URL without embedded credentials")
+		}
+		if !isLoopbackEndpoint(c.LLM.Endpoint) && parsedEndpoint.Scheme != "https" {
+			return errors.New("remote llm endpoint must use HTTPS")
+		}
+	}
+	if c.LLM.Enabled && c.LLM.Provider != "anthropic" && strings.Contains(strings.ToLower(c.LLM.Endpoint), "anthropic.com") {
+		return errors.New("Anthropic endpoints require llm provider anthropic; the OpenAI compatibility layer is not accepted for production configuration")
+	}
 	if c.LLM.Enabled && c.LLM.DataPolicy == "local_only" && !isLoopbackEndpoint(c.LLM.Endpoint) {
 		return errors.New("llm data_policy local_only requires a loopback endpoint; use redacted_remote or metadata_only only after an explicit data review")
+	}
+	if c.LLM.DataPolicy == "metadata_only" {
+		c.LLM.SendRedactedExcerpt = false
+		c.LLM.SendChangedFiles = false
+		c.LLM.SendSourceCode = false
+	}
+	if c.LLM.Enabled && c.LLM.DataPolicy == "redacted_remote" && !c.LLM.BlockOnResidualSecret {
+		return errors.New("llm data_policy redacted_remote requires block_on_residual_secret=true")
+	}
+	if c.LLM.Enabled && c.LLM.DataPolicy == "redacted_remote" && c.LLM.SendSourceCode && !c.LLM.AllowRemoteSourceCode {
+		return errors.New("remote source-code transmission requires llm.allow_remote_source_code=true after an explicit data review")
 	}
 	if c.Repair.MinimumScore < 0 || c.Repair.MinimumScore > 100 {
 		c.Repair.MinimumScore = 60
@@ -366,6 +427,39 @@ func (c *Config) normalizeEnterprise() error {
 	}
 	if c.PredictiveTests.MinimumScore <= 0 || c.PredictiveTests.MinimumScore > 100 {
 		c.PredictiveTests.MinimumScore = 20
+	}
+	return nil
+}
+
+func validateSAMLSigningCertificate(raw string, now time.Time) error {
+	content := []byte(raw)
+	if !strings.Contains(raw, "BEGIN CERTIFICATE") {
+		read, err := os.ReadFile(raw)
+		if err != nil {
+			return fmt.Errorf("read saml_idp_certificate: %w", err)
+		}
+		content = read
+	}
+	block, rest := pem.Decode(content)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return errors.New("saml_idp_certificate must contain a valid PEM certificate")
+	}
+	for len(strings.TrimSpace(string(rest))) > 0 {
+		next, remaining := pem.Decode(rest)
+		if next == nil || next.Type != "CERTIFICATE" {
+			return errors.New("saml_idp_certificate contains unsupported trailing data")
+		}
+		rest = remaining
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse saml_idp_certificate: %w", err)
+	}
+	if now.Before(certificate.NotBefore) || !now.Before(certificate.NotAfter) {
+		return errors.New("saml_idp_certificate is not currently valid")
+	}
+	if certificate.KeyUsage != 0 && certificate.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return errors.New("saml_idp_certificate does not permit digital signatures")
 	}
 	return nil
 }

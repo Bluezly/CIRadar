@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/mail"
 	"net/url"
 	"os"
@@ -232,6 +233,22 @@ func Default() Config {
 	}
 }
 
+func listenAddressIsPublic(address string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		return true
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return true
+	}
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !ip.IsLoopback()
+}
+
 func Load(path string) (Config, error) {
 	cfg := Default()
 	if path != "" {
@@ -429,6 +446,9 @@ func (c *Config) normalize() error {
 	}
 	if c.GitHubAPIURL == "" {
 		c.GitHubAPIURL = "https://api.github.com"
+	}
+	if strings.TrimSpace(c.PublicBaseURL) == "" && listenAddressIsPublic(c.ListenAddress) {
+		return fmt.Errorf("public_base_url is required when listen_address is not loopback")
 	}
 	if strings.TrimSpace(c.PublicBaseURL) != "" {
 		publicURL, err := url.Parse(strings.TrimSpace(c.PublicBaseURL))
@@ -823,7 +843,10 @@ func applyEnv(c *Config) {
 	setString(&c.SSO.ClientSecret, "CIRADAR_SSO_CLIENT_SECRET")
 	setString(&c.SSO.RedirectURL, "CIRADAR_SSO_REDIRECT_URL")
 	setString(&c.SSO.SessionSecret, "CIRADAR_SSO_SESSION_SECRET")
+	setString(&c.SSO.SAMLXMLSecPath, "CIRADAR_SAML_XMLSEC_PATH")
+	setString(&c.SSO.SAMLSecurityProfile, "CIRADAR_SAML_SECURITY_PROFILE")
 	setBool(&c.LLM.Enabled, "CIRADAR_LLM_ENABLED")
+	setString(&c.LLM.Provider, "CIRADAR_LLM_PROVIDER")
 	setString(&c.LLM.Endpoint, "CIRADAR_LLM_ENDPOINT")
 	setString(&c.LLM.APIKey, "CIRADAR_LLM_API_KEY")
 	setString(&c.LLM.Model, "CIRADAR_LLM_MODEL")
@@ -832,6 +855,7 @@ func applyEnv(c *Config) {
 	setInt(&c.LLM.MaxSourceFiles, "CIRADAR_LLM_MAX_SOURCE_FILES")
 	setInt(&c.LLM.MaxSourceFileCharacters, "CIRADAR_LLM_MAX_SOURCE_FILE_CHARACTERS")
 	setBool(&c.LLM.BlockOnResidualSecret, "CIRADAR_LLM_BLOCK_ON_REDACTION_RISK")
+	setBool(&c.LLM.AllowRemoteSourceCode, "CIRADAR_LLM_ALLOW_REMOTE_SOURCE_CODE")
 	setBool(&c.LLM.AllowPrivateNetwork, "CIRADAR_LLM_ALLOW_PRIVATE_NETWORK")
 	setBool(&c.ChatOps.Enabled, "CIRADAR_CHATOPS_ENABLED")
 	setString(&c.ChatOps.SlackSigningSecret, "CIRADAR_SLACK_SIGNING_SECRET")
