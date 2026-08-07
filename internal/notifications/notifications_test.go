@@ -318,6 +318,25 @@ func TestNegativeCodeScorePassesEvidenceFilter(t *testing.T) {
 	}
 }
 
+func TestRepairPRCreatedEventRoutesToSlackAndLinksDraft(t *testing.T) {
+	analysis := model.AnalysisResult{ID: "analysis-1", TenantID: "alpha", Category: model.CategoryCodeFailure, Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -88, EvidenceStrength: 88, CodeEvidenceScore: 88, Fingerprint: "fp-1"}
+	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", CommitSHA: "abc123"}
+	result := model.RepairResult{TenantID: "alpha", AnalysisID: "analysis-1", Provider: "github", PullRequestNumber: 42, PullRequestURL: "https://github.com/acme/api/pull/42", Status: "draft_pr_created", UpdatedAt: time.Now().UTC()}
+	ev := RepairPRCreatedEvent(analysis, source, result)
+	if ev.Type != "repair_pr_created" || ev.Repository != "acme/api" || ev.DetailsURL != result.PullRequestURL {
+		t.Fatalf("event=%#v", ev)
+	}
+	payload := slackPayload(config.NotificationChannel{}, ev)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "Review draft PR") || !strings.Contains(text, result.PullRequestURL) {
+		t.Fatalf("Slack repair payload missing draft PR action: %s", text)
+	}
+}
+
 func TestNotificationTruncateKeepsUTF8Valid(t *testing.T) {
 	out := truncate("تنبيه عربي طويل", 7)
 	if !utf8.ValidString(out) {
