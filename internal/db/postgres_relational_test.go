@@ -101,9 +101,12 @@ func TestRelationalExtensionObjectUsesSeparateKind(t *testing.T) {
 }
 
 func TestSpecWhereTargetsSingleObject(t *testing.T) {
-	where := specWhere([]pgSpec{pgGlobalOne(pgKindTenant, "alpha")})
-	if !strings.Contains(where, "object_id='alpha'") || strings.Contains(where, " OR ") {
+	where, args := specWhere([]pgSpec{pgGlobalOne(pgKindTenant, "alpha")})
+	if !strings.Contains(where, "object_id=$3") || strings.Contains(where, " OR ") {
 		t.Fatalf("where=%s", where)
+	}
+	if len(args) != 3 || args[0] != pgSystemTenant || args[1] != pgKindTenant || args[2] != "alpha" {
+		t.Fatalf("args=%#v", args)
 	}
 }
 
@@ -122,7 +125,10 @@ func TestParsePostgresIntRejectsMalformedValues(t *testing.T) {
 }
 
 func TestObservationPartitionStatementsMoveDefaultRowsBeforeAttach(t *testing.T) {
-	statements := observationPartitionStatements(time.Date(2026, time.August, 6, 0, 0, 0, 0, time.UTC))
+	statements, err := observationPartitionStatements(time.Date(2026, time.August, 6, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(statements) != 4 {
 		t.Fatalf("partition statements=%d", len(statements))
 	}

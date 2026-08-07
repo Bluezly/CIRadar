@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -976,5 +979,65 @@ func TestStatsExposeRunningAndFailedJobs(t *testing.T) {
 	}
 	if stats.RunningJobs != 1 || stats.FailedJobs != 1 || stats.QueuedJobs != 0 {
 		t.Fatalf("stats=%#v", stats)
+	}
+}
+
+func TestCleanupRemovesExpiredOAuthRevocations(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.PutObject(ctx, "default", "oauth_revocation", "expired", map[string]any{"revoked_at": time.Now().UTC().Add(-time.Hour), "expires_at": time.Now().UTC().Add(-time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutObject(ctx, "default", "oauth_revocation", "live", map[string]any{"revoked_at": time.Now().UTC(), "expires_at": time.Now().UTC().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Cleanup(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := store.GetObject(ctx, "default", "oauth_revocation", "expired", nil); err != nil || ok {
+		t.Fatalf("expired revocation remains: ok=%v err=%v", ok, err)
+	}
+	if ok, err := store.GetObject(ctx, "default", "oauth_revocation", "live", nil); err != nil || !ok {
+		t.Fatalf("live revocation removed: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestPutObjectIfKindBelowLimitIsAtomicInEmbeddedStore(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	var admitted atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ok, err := store.PutObjectIfKindBelowLimit(ctx, "default", "quota-test", fmt.Sprintf("id-%d", i), map[string]int{"i": i}, 5)
+			if err != nil {
+				t.Errorf("put %d: %v", i, err)
+				return
+			}
+			if ok {
+				admitted.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if admitted.Load() != 5 {
+		t.Fatalf("admitted=%d want=5", admitted.Load())
+	}
+	objects, err := store.ListObjects(ctx, "default", "quota-test", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 5 {
+		t.Fatalf("stored=%d want=5", len(objects))
 	}
 }
