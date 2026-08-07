@@ -335,3 +335,131 @@ func TestPromptBudgetPreservesTruncatedSourceContext(t *testing.T) {
 		t.Fatalf("source context was discarded instead of trimmed: %#v", payload.Sources)
 	}
 }
+
+func TestAnthropicProviderUsesNativeMessagesAPI(t *testing.T) {
+	var requestBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if r.Header.Get("X-API-Key") != "anthropic-secret" || r.Header.Get("Anthropic-Version") != "2023-06-01" {
+			t.Fatalf("anthropic headers=%v", r.Header)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Fatalf("unexpected bearer authorization: %q", r.Header.Get("Authorization"))
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": `{"explanation":"Native Anthropic worked.","suggested_fix":"Review.","patch":"","warnings":[]}`}},
+			"usage":   map[string]int{"input_tokens": 12, "output_tokens": 7},
+		})
+	}))
+	defer srv.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.LLMConfig{Enabled: true, Provider: "anthropic", Endpoint: srv.URL, APIKey: "anthropic-secret", AllowPrivateNetwork: true, Model: "claude-test", Timeout: time.Second, MaxInputCharacters: 4000, MaxOutputTokens: 333, DataPolicy: "local_only"}
+	out, err := New(cfg, store).Enhance(context.Background(), model.AnalysisResult{ID: "anthropic", TenantID: "default", Summary: "failure"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Explanation != "Native Anthropic worked." || out.Usage["input_tokens"] != 12 {
+		t.Fatalf("output=%#v", out)
+	}
+	if requestBody["system"] == nil || requestBody["messages"] == nil || requestBody["max_tokens"] != float64(333) {
+		t.Fatalf("request=%#v", requestBody)
+	}
+	if _, ok := requestBody["response_format"]; ok {
+		t.Fatalf("OpenAI response_format leaked into Anthropic request: %#v", requestBody)
+	}
+}
+
+func TestAnthropicMessagesEndpointNormalization(t *testing.T) {
+	cases := map[string]string{
+		"https://api.anthropic.com":             "https://api.anthropic.com/v1/messages",
+		"https://api.anthropic.com/v1":          "https://api.anthropic.com/v1/messages",
+		"https://proxy.example/v1/messages":     "https://proxy.example/v1/messages",
+		"https://proxy.example/custom/messages": "https://proxy.example/custom/messages",
+	}
+	for input, want := range cases {
+		if got := anthropicMessagesEndpoint(input); got != want {
+			t.Fatalf("endpoint %q = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestRedactedRemoteSanitizesFilePathsBeforePrompt(t *testing.T) {
+	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+	e := &Enhancer{cfg: config.LLMConfig{
+		MaxInputCharacters:      8000,
+		SendChangedFiles:        true,
+		SendSourceCode:          true,
+		MaxSourceFiles:          4,
+		MaxSourceFileCharacters: 4000,
+		DataPolicy:              "redacted_remote",
+		BlockOnResidualSecret:   true,
+	}}
+	prompt, err := e.buildPromptCheckedWithSources(
+		model.AnalysisResult{ID: "paths", TenantID: "default", Summary: "failure"},
+		[]string{"src/token=" + secret + "/main.go"},
+		[]SourceFile{{Path: "src/token=" + secret + "/main.go", Content: "package main\n"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, secret) {
+		t.Fatalf("remote prompt leaked a secret embedded in a file path: %s", prompt)
+	}
+	if !strings.Contains(prompt, "REDACTED") {
+		t.Fatalf("expected redacted path marker in prompt: %s", prompt)
+	}
+}
+
+func TestRedactedRemoteSanitizesModelOutputAndDropsSecretPatch(t *testing.T) {
+	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+	patch := "--- a/main.go\n+++ b/main.go\n@@ -1 +1,2 @@\n package main\n+var token = \"" + secret + "\"\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		content := map[string]any{
+			"explanation":   "provider echoed token " + secret,
+			"suggested_fix": "rotate " + secret,
+			"patch":         patch,
+			"warnings":      []string{},
+		}
+		encoded, _ := json.Marshal(content)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": string(encoded)}}}})
+	}))
+	defer srv.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.LLMConfig{
+		Enabled:               true,
+		Endpoint:              srv.URL,
+		AllowPrivateNetwork:   true,
+		Model:                 "remote-test",
+		Timeout:               time.Second,
+		MaxInputCharacters:    4000,
+		MaxOutputTokens:       300,
+		DataPolicy:            "redacted_remote",
+		BlockOnResidualSecret: true,
+	}
+	out, err := New(cfg, store).Enhance(context.Background(), model.AnalysisResult{ID: "remote-output", TenantID: "default", Summary: "failure"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.Explanation, secret) || strings.Contains(out.SuggestedFix, secret) {
+		t.Fatalf("remote model output retained a secret: %#v", out)
+	}
+	if out.Patch != "" {
+		t.Fatalf("secret-bearing remote patch was retained: %q", out.Patch)
+	}
+	if !strings.Contains(strings.Join(out.Warnings, " "), "secret-like") {
+		t.Fatalf("missing secret-output warning: %#v", out.Warnings)
+	}
+}
