@@ -512,6 +512,15 @@ func TestMCPStreamableHTTPGuards(t *testing.T) {
 		t.Fatalf("protocol=%d %s", w.Code, w.Body.String())
 	}
 
+	req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}} {"jsonrpc":"2.0"}`))
+	req.RemoteAddr = "203.0.113.9:1"
+	req.Header.Set("Authorization", "Bearer "+token)
+	w = httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":-32700`) {
+		t.Fatalf("trailing MCP JSON=%d %s", w.Code, w.Body.String())
+	}
+
 	note := []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(note))
 	req.RemoteAddr = "203.0.113.9:1"
@@ -1173,5 +1182,90 @@ func TestInternalErrorsDoNotLeakBackendDetails(t *testing.T) {
 	}
 	if !strings.Contains(body, "req-safe-123") {
 		t.Fatalf("request id missing: %s", body)
+	}
+}
+
+func TestDiagnosisFeedbackAcceptsGroundTruthAndSeparatesAgreementFromAccuracy(t *testing.T) {
+	s, store, _ := testServer(t)
+	_, viewer, err := store.CreateAPIKey(context.Background(), model.DefaultTenantID, "reviewer", model.RoleViewer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := model.AnalysisResult{ID: "feedback-ground-truth", TenantID: model.DefaultTenantID, Category: model.CategoryNetworkFailure, Attribution: model.AttributionExternal, Provider: "npm", ErrorFamily: "dns-temporary-failure", CreatedAt: time.Now().UTC()}
+	if err := store.RecordAnalysisForTenant(context.Background(), model.DefaultTenantID, model.AnalysisInput{Repository: "acme/api", Log: "redacted"}, analysis, false, false); err != nil {
+		t.Fatal(err)
+	}
+	rr := doReq(t, s, http.MethodPost, "/api/v1/analyses/"+analysis.ID+"/feedback", viewer, "", map[string]any{
+		"verdict":             "incorrect",
+		"actual_category":     model.CategoryCodeFailure,
+		"actual_cause":        model.AttributionCode,
+		"actual_provider":     "go test",
+		"actual_error_family": "assertion-failure",
+		"comment":             "wrong category",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("feedback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var feedback model.DiagnosisFeedback
+	if err := json.Unmarshal(rr.Body.Bytes(), &feedback); err != nil {
+		t.Fatal(err)
+	}
+	if feedback.ActualCategory != model.CategoryCodeFailure || feedback.ActualCause != model.AttributionCode || feedback.ActualProvider != "go test" {
+		t.Fatalf("feedback=%+v", feedback)
+	}
+	rr = doReq(t, s, http.MethodGet, "/api/v1/feedback", viewer, "", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("metrics status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Metrics model.FeedbackMetrics `json:"metrics"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Metrics.AgreementPercent != 0 || response.Metrics.CategoryAccuracyPercent != 0 || response.Metrics.LabeledCategoryCases != 1 {
+		t.Fatalf("metrics=%+v", response.Metrics)
+	}
+	if response.Metrics.PrecisionPercent != response.Metrics.AgreementPercent {
+		t.Fatalf("legacy precision alias=%v agreement=%v", response.Metrics.PrecisionPercent, response.Metrics.AgreementPercent)
+	}
+}
+
+func TestAnalyzeAndBaselineEnforceConfiguredLogLimit(t *testing.T) {
+	cfg := config.Default()
+	cfg.DatabasePath = filepath.Join(t.TempDir(), "state.json")
+	cfg.AdminToken = "root-token"
+	cfg.MaxLogBytes = 1024
+	cfg.ProviderPolling = false
+	cfg.Notifications.Enabled = false
+	store, err := db.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	s := New(cfg, store, analyzer.New("key"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	logText := strings.Repeat("x", int(cfg.MaxLogBytes)+1)
+
+	analyzeResponse := doReq(t, s, http.MethodPost, "/api/v1/analyze", cfg.AdminToken, "", map[string]any{"repository": "acme/api", "log": logText})
+	if analyzeResponse.Code != http.StatusRequestEntityTooLarge || !strings.Contains(analyzeResponse.Body.String(), "max_log_bytes") {
+		t.Fatalf("analyze status=%d body=%s", analyzeResponse.Code, analyzeResponse.Body.String())
+	}
+
+	baselineResponse := doReq(t, s, http.MethodPost, "/api/v1/baselines", cfg.AdminToken, "", map[string]any{"repository": "acme/api", "workflow": "ci", "job": "test", "log": logText})
+	if baselineResponse.Code != http.StatusRequestEntityTooLarge || !strings.Contains(baselineResponse.Body.String(), "max_log_bytes") {
+		t.Fatalf("baseline status=%d body=%s", baselineResponse.Code, baselineResponse.Body.String())
+	}
+}
+
+func TestAnalyzeRejectsTrailingJSONValue(t *testing.T) {
+	s, _, cfg := testServer(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/analyze", strings.NewReader(`{"log":"npm ERR! code ECONNRESET"}{"log":"second"}`))
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("Authorization", "Bearer "+cfg.AdminToken)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.http.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
