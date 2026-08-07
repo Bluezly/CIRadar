@@ -4,14 +4,13 @@ import (
 	"bufio"
 	"context"
 	"crypto/hmac"
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,23 +22,28 @@ import (
 	"time"
 )
 
+const maxProtocolMessageBytes = 256 << 20
+const maxBoundParameterBytes = 64 << 20
+
 type Config struct {
-	Host           string
-	Port           int
-	User           string
-	Password       string
-	Database       string
-	SSLMode        string
-	RootCert       string
-	ConnectTimeout time.Duration
-	PoolMaxConns   int
+	Host             string
+	Port             int
+	User             string
+	Password         string
+	Database         string
+	SSLMode          string
+	RootCert         string
+	ConnectTimeout   time.Duration
+	OperationTimeout time.Duration
+	PoolMaxConns     int
 }
 
 type Client struct {
-	conn   net.Conn
-	r      *bufio.Reader
-	cfg    Config
-	broken bool
+	conn     net.Conn
+	r        *bufio.Reader
+	cfg      Config
+	broken   bool
+	txStatus byte
 }
 
 type Rows struct {
@@ -53,7 +57,7 @@ func ParseDSN(dsn string) (Config, error) {
 	if dsn == "" {
 		return Config{}, errors.New("postgres dsn is empty")
 	}
-	cfg := Config{Port: 5432, SSLMode: "verify-full", ConnectTimeout: 10 * time.Second, PoolMaxConns: 10}
+	cfg := Config{Port: 5432, SSLMode: "verify-full", ConnectTimeout: 10 * time.Second, OperationTimeout: 30 * time.Second, PoolMaxConns: 10}
 	if strings.Contains(dsn, "://") {
 		u, err := url.Parse(dsn)
 		if err != nil {
@@ -83,6 +87,13 @@ func ParseDSN(dsn string) (Config, error) {
 				return cfg, e
 			}
 			cfg.ConnectTimeout = time.Duration(n) * time.Second
+		}
+		if v := q.Get("query_timeout"); v != "" {
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 || n > 600 {
+				return cfg, errors.New("query_timeout must be between 1 and 600 seconds")
+			}
+			cfg.OperationTimeout = time.Duration(n) * time.Second
 		}
 		if v := q.Get("pool_max_conns"); v != "" {
 			n, e := strconv.Atoi(v)
@@ -117,6 +128,13 @@ func ParseDSN(dsn string) (Config, error) {
 				return cfg, e
 			}
 			cfg.ConnectTimeout = time.Duration(n) * time.Second
+		}
+		if v := fields["query_timeout"]; v != "" {
+			n, e := strconv.Atoi(v)
+			if e != nil || n < 1 || n > 600 {
+				return cfg, errors.New("query_timeout must be between 1 and 600 seconds")
+			}
+			cfg.OperationTimeout = time.Duration(n) * time.Second
 		}
 		if v := fields["pool_max_conns"]; v != "" {
 			n, e := strconv.Atoi(v)
@@ -233,7 +251,7 @@ func (c *Client) negotiateTLS() error {
 	var p [8]byte
 	binary.BigEndian.PutUint32(p[0:4], 8)
 	binary.BigEndian.PutUint32(p[4:8], 80877103)
-	if _, err := c.conn.Write(p[:]); err != nil {
+	if err := writeFull(c.conn, p[:]); err != nil {
 		return err
 	}
 	b := []byte{0}
@@ -301,7 +319,7 @@ func (c *Client) startup() error {
 	var packet []byte
 	packet = appendInt32(packet, int32(len(body)+4))
 	packet = append(packet, body...)
-	if _, err := c.conn.Write(packet); err != nil {
+	if err := writeFull(c.conn, packet); err != nil {
 		return err
 	}
 	var scr *scramState
@@ -315,23 +333,18 @@ func (c *Client) startup() error {
 			if len(p) < 4 {
 				return errors.New("short authentication message")
 			}
+			if len(p) > 64<<10 {
+				return errors.New("postgres authentication message is too large")
+			}
 			code := binary.BigEndian.Uint32(p[:4])
 			switch code {
 			case 0:
-			case 3:
-				if err := c.sendPassword(c.cfg.Password + "\x00"); err != nil {
-					return err
-				}
-			case 5:
-				if len(p) < 8 {
-					return errors.New("short md5 auth")
-				}
-				h1 := md5.Sum([]byte(c.cfg.Password + c.cfg.User))
-				h2 := md5.Sum(append([]byte(hex.EncodeToString(h1[:])), p[4:8]...))
-				if err := c.sendPassword("md5" + hex.EncodeToString(h2[:]) + "\x00"); err != nil {
-					return err
-				}
+			case 3, 5:
+				return errors.New("legacy PostgreSQL cleartext/MD5 password authentication is disabled; configure SCRAM-SHA-256")
 			case 10:
+				if !saslMechanismOffered(p[4:], "SCRAM-SHA-256") {
+					return errors.New("postgres server did not offer SCRAM-SHA-256")
+				}
 				scr, err = newSCRAM(c.cfg.User, c.cfg.Password)
 				if err != nil {
 					return err
@@ -359,20 +372,41 @@ func (c *Client) startup() error {
 		case 'E':
 			return parseError(p)
 		case 'Z':
+			if err := c.setReadyStatus(p); err != nil {
+				return err
+			}
 			return nil
 		case 'S', 'K', 'N':
 		default:
+			return fmt.Errorf("unexpected postgres startup message %q", typ)
 		}
 	}
 }
 
 func (c *Client) sendPassword(s string) error { return c.sendMessage('p', []byte(s)) }
 func (c *Client) sendMessage(t byte, p []byte) error {
-	buf := []byte{t}
+	if len(p) > maxProtocolMessageBytes-4 {
+		return errors.New("postgres protocol message is too large")
+	}
+	buf := make([]byte, 0, len(p)+5)
+	buf = append(buf, t)
 	buf = appendInt32(buf, int32(len(p)+4))
 	buf = append(buf, p...)
-	_, err := c.conn.Write(buf)
-	return err
+	return writeFull(c.conn, buf)
+}
+
+func writeFull(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n <= 0 || n > len(p) {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
+	}
+	return nil
 }
 func (c *Client) readMessage() (byte, []byte, error) {
 	t, err := c.r.ReadByte()
@@ -384,7 +418,7 @@ func (c *Client) readMessage() (byte, []byte, error) {
 		return 0, nil, err
 	}
 	n := int(binary.BigEndian.Uint32(lb[:])) - 4
-	if n < 0 || n > 256<<20 {
+	if n < 0 || n > maxProtocolMessageBytes {
 		return 0, nil, fmt.Errorf("invalid postgres message length %d", n)
 	}
 	p := make([]byte, n)
@@ -392,11 +426,36 @@ func (c *Client) readMessage() (byte, []byte, error) {
 	return t, p, err
 }
 
+func validateQueryText(q string) error {
+	if strings.IndexByte(q, 0) >= 0 {
+		return errors.New("postgres query contains NUL")
+	}
+	if len(q) > 64<<20 {
+		return errors.New("postgres query is too large")
+	}
+	return nil
+}
+
+func (c *Client) operationDeadline(ctx context.Context) (time.Time, bool) {
+	deadline, hasDeadline := ctx.Deadline()
+	if c.cfg.OperationTimeout <= 0 {
+		return deadline, hasDeadline
+	}
+	operationDeadline := time.Now().Add(c.cfg.OperationTimeout)
+	if !hasDeadline || operationDeadline.Before(deadline) {
+		return operationDeadline, true
+	}
+	return deadline, true
+}
+
 func (c *Client) Query(ctx context.Context, q string) (Rows, error) {
+	if err := validateQueryText(q); err != nil {
+		return Rows{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Rows{}, err
 	}
-	if deadline, ok := ctx.Deadline(); ok {
+	if deadline, ok := c.operationDeadline(ctx); ok {
 		_ = c.conn.SetDeadline(deadline)
 	}
 	cancelDone := make(chan struct{})
@@ -445,21 +504,270 @@ func (c *Client) Query(ctx context.Context, q string) (Rows, error) {
 		case 'E':
 			queryErr = parseError(p)
 		case 'Z':
+			if err := c.setReadyStatus(p); err != nil {
+				c.broken = true
+				return out, err
+			}
 			return out, queryErr
-		case 'I', 'N', 'S':
+		case 'I', 'N', 'S', 'A':
+		default:
+			c.broken = true
+			return out, fmt.Errorf("unexpected postgres query message %q", t)
 		}
 	}
 }
 func (c *Client) Exec(ctx context.Context, q string) error { _, err := c.Query(ctx, q); return err }
+func (c *Client) QueryParams(ctx context.Context, q string, args ...any) (Rows, error) {
+	if err := validateQueryText(q); err != nil {
+		return Rows{}, err
+	}
+	if len(args) == 0 {
+		return c.Query(ctx, q)
+	}
+	if len(args) > 32767 {
+		return Rows{}, errors.New("too many postgres parameters")
+	}
+	encodedArgs := make([][]byte, len(args))
+	nullArgs := make([]bool, len(args))
+	totalParameterBytes := 0
+	for i, arg := range args {
+		value, isNull, err := encodeTextParameter(arg)
+		if err != nil {
+			return Rows{}, err
+		}
+		if len(value) > maxBoundParameterBytes {
+			return Rows{}, errors.New("postgres parameter is too large")
+		}
+		if !isNull {
+			if totalParameterBytes > maxBoundParameterBytes-len(value) {
+				return Rows{}, errors.New("postgres bound parameters are too large")
+			}
+			totalParameterBytes += len(value)
+		}
+		encodedArgs[i] = value
+		nullArgs[i] = isNull
+	}
+	if err := ctx.Err(); err != nil {
+		return Rows{}, err
+	}
+	if deadline, ok := c.operationDeadline(ctx); ok {
+		_ = c.conn.SetDeadline(deadline)
+	}
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = c.conn.SetDeadline(time.Now())
+		close(cancelDone)
+	})
+	defer func() {
+		if !stopCancel() {
+			<-cancelDone
+		}
+		_ = c.conn.SetDeadline(time.Time{})
+	}()
+
+	parse := []byte{0}
+	parse = append(parse, q...)
+	parse = append(parse, 0)
+	parse = appendInt16(parse, 0)
+	if err := c.sendMessage('P', parse); err != nil {
+		c.broken = true
+		return Rows{}, err
+	}
+
+	bind := []byte{0, 0}
+	bind = appendInt16(bind, 0)
+	bind = appendInt16(bind, int16(len(encodedArgs)))
+	for i, value := range encodedArgs {
+		if nullArgs[i] {
+			bind = appendInt32(bind, -1)
+			continue
+		}
+		bind = appendInt32(bind, int32(len(value)))
+		bind = append(bind, value...)
+	}
+	bind = appendInt16(bind, 0)
+	if err := c.sendMessage('B', bind); err != nil {
+		c.broken = true
+		return Rows{}, err
+	}
+	if err := c.sendMessage('D', []byte{'P', 0}); err != nil {
+		c.broken = true
+		return Rows{}, err
+	}
+	execute := []byte{0}
+	execute = appendInt32(execute, 0)
+	if err := c.sendMessage('E', execute); err != nil {
+		c.broken = true
+		return Rows{}, err
+	}
+	if err := c.sendMessage('S', nil); err != nil {
+		c.broken = true
+		return Rows{}, err
+	}
+
+	var out Rows
+	var queryErr error
+	for {
+		t, payload, err := c.readMessage()
+		if err != nil {
+			c.broken = true
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return out, ctxErr
+			}
+			return out, err
+		}
+		switch t {
+		case 'T':
+			names, err := parseRowDescription(payload)
+			if err != nil {
+				c.broken = true
+				return out, err
+			}
+			out.Columns = names
+		case 'D':
+			values, err := parseDataRow(payload)
+			if err != nil {
+				c.broken = true
+				return out, err
+			}
+			out.Values = append(out.Values, values)
+		case 'C':
+			out.Command = strings.TrimRight(string(payload), "\x00")
+		case 'E':
+			queryErr = parseError(payload)
+		case 'Z':
+			if err := c.setReadyStatus(payload); err != nil {
+				c.broken = true
+				return out, err
+			}
+			return out, queryErr
+		case '1', '2', '3', 'I', 'N', 'S', 'n', 's', 't', 'A':
+		default:
+			c.broken = true
+			return out, fmt.Errorf("unexpected postgres extended-query message %q", t)
+		}
+	}
+}
+
+func (c *Client) ExecParams(ctx context.Context, q string, args ...any) error {
+	_, err := c.QueryParams(ctx, q, args...)
+	return err
+}
+
+func encodeTextParameter(value any) ([]byte, bool, error) {
+	if value == nil {
+		return nil, true, nil
+	}
+	var encoded string
+	switch v := value.(type) {
+	case string:
+		encoded = v
+	case []byte:
+		encoded = string(v)
+	case bool:
+		encoded = strconv.FormatBool(v)
+	case int:
+		encoded = strconv.Itoa(v)
+	case int8:
+		encoded = strconv.FormatInt(int64(v), 10)
+	case int16:
+		encoded = strconv.FormatInt(int64(v), 10)
+	case int32:
+		encoded = strconv.FormatInt(int64(v), 10)
+	case int64:
+		encoded = strconv.FormatInt(v, 10)
+	case uint:
+		encoded = strconv.FormatUint(uint64(v), 10)
+	case uint8:
+		encoded = strconv.FormatUint(uint64(v), 10)
+	case uint16:
+		encoded = strconv.FormatUint(uint64(v), 10)
+	case uint32:
+		encoded = strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		encoded = strconv.FormatUint(v, 10)
+	case float32:
+		encoded = strconv.FormatFloat(float64(v), 'g', -1, 32)
+	case float64:
+		encoded = strconv.FormatFloat(v, 'g', -1, 64)
+	case time.Time:
+		if v.IsZero() {
+			return nil, true, nil
+		}
+		encoded = v.UTC().Format(time.RFC3339Nano)
+	case json.RawMessage:
+		encoded = string(v)
+	default:
+		return nil, false, fmt.Errorf("unsupported postgres parameter type %T", value)
+	}
+	if strings.IndexByte(encoded, 0) >= 0 {
+		return nil, false, errors.New("postgres text parameter contains NUL")
+	}
+	return []byte(encoded), false, nil
+}
+
+func (c *Client) setReadyStatus(payload []byte) error {
+	if len(payload) != 1 {
+		return errors.New("invalid postgres ReadyForQuery payload")
+	}
+	switch payload[0] {
+	case 'I', 'T', 'E':
+		c.txStatus = payload[0]
+		return nil
+	default:
+		return fmt.Errorf("invalid postgres transaction status %q", payload[0])
+	}
+}
+
+func (c *Client) TransactionStatus() byte {
+	if c == nil {
+		return 0
+	}
+	return c.txStatus
+}
+
+func (c *Client) Reset(ctx context.Context) error {
+	if c == nil || c.broken {
+		return errors.New("postgres connection is not reusable")
+	}
+	switch c.txStatus {
+	case 'I':
+		return nil
+	case 'T', 'E':
+		if err := c.Exec(ctx, "ROLLBACK"); err != nil {
+			c.broken = true
+			return err
+		}
+		if c.txStatus != 'I' {
+			c.broken = true
+			return errors.New("postgres connection did not return to idle state")
+		}
+		return nil
+	default:
+		c.broken = true
+		return errors.New("postgres connection has unknown transaction state")
+	}
+}
 
 func (c *Client) Broken() bool { return c == nil || c.broken }
 
 func (c *Client) Close() error {
-	if c == nil || c.conn == nil {
+	if c == nil {
 		return nil
 	}
-	_ = c.sendMessage('X', nil)
-	return c.conn.Close()
+	wasBroken := c.broken
+	c.broken = true
+	if c.conn == nil {
+		return nil
+	}
+	conn := c.conn
+	c.conn = nil
+	if !wasBroken {
+		_ = conn.SetWriteDeadline(time.Now().Add(250 * time.Millisecond))
+		buf := []byte{'X', 0, 0, 0, 4}
+		_ = writeFull(conn, buf)
+	}
+	return conn.Close()
 }
 
 func parseRowDescription(p []byte) ([]string, error) {
@@ -494,17 +802,21 @@ func parseDataRow(p []byte) ([]*string, error) {
 		if len(p) < 4 {
 			return nil, errors.New("short data value")
 		}
-		l := int(int32(binary.BigEndian.Uint32(p)))
+		rawLength := binary.BigEndian.Uint32(p)
 		p = p[4:]
-		if l < 0 {
+		if rawLength == ^uint32(0) {
 			continue
 		}
-		if len(p) < l {
+		if uint64(rawLength) > uint64(len(p)) {
 			return nil, errors.New("short data payload")
 		}
+		l := int(rawLength)
 		v := string(p[:l])
 		out[i] = &v
 		p = p[l:]
+	}
+	if len(p) != 0 {
+		return nil, errors.New("trailing data row payload")
 	}
 	return out, nil
 }
@@ -529,6 +841,11 @@ func bytesIndex(b []byte, x byte) int {
 		}
 	}
 	return -1
+}
+func appendInt16(b []byte, v int16) []byte {
+	var x [2]byte
+	binary.BigEndian.PutUint16(x[:], uint16(v))
+	return append(b, x[:]...)
 }
 func appendInt32(b []byte, v int32) []byte {
 	var x [4]byte
@@ -559,14 +876,26 @@ func (s *scramState) sendInitial(c *Client) error {
 }
 func (s *scramState) continueAuth(c *Client, server string) error {
 	s.serverFirst = server
-	m := parseSCRAMFields(server)
+	m, err := parseSCRAMFields(server)
+	if err != nil {
+		return err
+	}
+	if m["m"] != "" {
+		return errors.New("unsupported mandatory scram extension")
+	}
 	r, sa, it := m["r"], m["s"], m["i"]
-	if !strings.HasPrefix(r, s.nonce) {
+	if r == "" || sa == "" || it == "" {
+		return errors.New("incomplete scram server-first message")
+	}
+	if !strings.HasPrefix(r, s.nonce) || len(r) <= len(s.nonce) {
 		return errors.New("scram server nonce mismatch")
 	}
 	salt, err := base64.StdEncoding.DecodeString(sa)
 	if err != nil {
 		return err
+	}
+	if len(salt) == 0 || len(salt) > 1024 {
+		return errors.New("invalid scram salt size")
 	}
 	iter, err := strconv.Atoi(it)
 	if err != nil || !validSCRAMIterationCount(iter) {
@@ -592,11 +921,21 @@ func validSCRAMIterationCount(iter int) bool {
 }
 
 func (s *scramState) verifyFinal(final string) error {
-	m := parseSCRAMFields(final)
+	m, err := parseSCRAMFields(final)
+	if err != nil {
+		return err
+	}
 	if e := m["e"]; e != "" {
+		if m["v"] != "" {
+			return errors.New("scram final message contains both error and verifier")
+		}
 		return fmt.Errorf("scram: %s", e)
 	}
-	v, err := base64.StdEncoding.DecodeString(m["v"])
+	encodedVerifier := m["v"]
+	if encodedVerifier == "" {
+		return errors.New("scram final message is missing verifier")
+	}
+	v, err := base64.StdEncoding.DecodeString(encodedVerifier)
 	if err != nil {
 		return err
 	}
@@ -605,14 +944,41 @@ func (s *scramState) verifyFinal(final string) error {
 	}
 	return nil
 }
-func parseSCRAMFields(s string) map[string]string {
-	m := map[string]string{}
-	for _, p := range strings.Split(s, ",") {
-		if len(p) > 2 && p[1] == '=' {
-			m[p[:1]] = p[2:]
+
+func parseSCRAMFields(value string) (map[string]string, error) {
+	fields := map[string]string{}
+	for _, part := range strings.Split(value, ",") {
+		if len(part) < 2 || part[1] != '=' {
+			return nil, errors.New("malformed scram attribute")
 		}
+		key := part[:1]
+		if _, exists := fields[key]; exists {
+			return nil, fmt.Errorf("duplicate scram attribute %q", key)
+		}
+		fields[key] = part[2:]
 	}
-	return m
+	return fields, nil
+}
+
+func saslMechanismOffered(payload []byte, wanted string) bool {
+	if wanted == "" || len(payload) == 0 || payload[len(payload)-1] != 0 {
+		return false
+	}
+	found := false
+	for len(payload) > 0 {
+		end := bytesIndex(payload, 0)
+		if end < 0 {
+			return false
+		}
+		if end == 0 {
+			return found && len(payload) == 1
+		}
+		if string(payload[:end]) == wanted {
+			found = true
+		}
+		payload = payload[end+1:]
+	}
+	return false
 }
 func hmacSHA(key, msg []byte) []byte { h := hmac.New(sha256.New, key); h.Write(msg); return h.Sum(nil) }
 func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
