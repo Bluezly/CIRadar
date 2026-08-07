@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -22,10 +23,11 @@ type Context struct {
 }
 
 type Analyzer struct {
-	rules          []Rule
-	redactor       *Redactor
-	fingerprintKey []byte
-	maxExcerpt     int
+	rules               []Rule
+	redactor            *Redactor
+	fingerprintKey      []byte
+	maxExcerpt          int
+	configurationDigest string
 }
 
 func New(fingerprintKey string, extraRules ...Rule) *Analyzer {
@@ -35,7 +37,68 @@ func New(fingerprintKey string, extraRules ...Rule) *Analyzer {
 func NewConfigured(fingerprintKey string, redactionPatterns []string, entropyDetection bool, extraRules ...Rule) *Analyzer {
 	rules := BuiltinRules()
 	rules = append(rules, extraRules...)
-	return &Analyzer{rules: rules, redactor: NewRedactorWithPatterns(redactionPatterns, entropyDetection), fingerprintKey: []byte(strings.TrimSpace(fingerprintKey)), maxExcerpt: 5000}
+	return &Analyzer{rules: rules, redactor: NewRedactorWithPatterns(redactionPatterns, entropyDetection), fingerprintKey: []byte(strings.TrimSpace(fingerprintKey)), maxExcerpt: 5000, configurationDigest: configurationDigest(rules, redactionPatterns, entropyDetection)}
+}
+
+func (a *Analyzer) ConfigurationDigest() string {
+	if a == nil {
+		return ""
+	}
+	return a.configurationDigest
+}
+
+func configurationDigest(rules []Rule, redactionPatterns []string, entropyDetection bool) string {
+	type digestRule struct {
+		ID             string   `json:"id"`
+		Category       string   `json:"category"`
+		Provider       string   `json:"provider"`
+		Operation      string   `json:"operation"`
+		ErrorFamily    string   `json:"error_family"`
+		Summary        string   `json:"summary"`
+		Recommendation string   `json:"recommendation"`
+		Weight         int      `json:"weight"`
+		SignalGroup    string   `json:"signal_group"`
+		Patterns       []string `json:"patterns"`
+		Excludes       []string `json:"excludes"`
+	}
+	payload := struct {
+		Version           int          `json:"version"`
+		EntropyDetection  bool         `json:"entropy_detection"`
+		RedactionPatterns []string     `json:"redaction_patterns"`
+		Rules             []digestRule `json:"rules"`
+	}{Version: 1, EntropyDetection: entropyDetection, RedactionPatterns: append([]string(nil), redactionPatterns...), Rules: make([]digestRule, 0, len(rules))}
+	for _, rule := range rules {
+		d := digestRule{ID: rule.ID, Category: string(rule.Category), Provider: rule.Provider, Operation: rule.Operation, ErrorFamily: rule.ErrorFamily, Summary: rule.Summary, Recommendation: rule.Recommendation, Weight: rule.Weight, SignalGroup: rule.SignalGroup}
+		for _, pattern := range rule.Patterns {
+			if pattern != nil {
+				d.Patterns = append(d.Patterns, pattern.String())
+			}
+		}
+		for _, exclude := range rule.Excludes {
+			if exclude != nil {
+				d.Excludes = append(d.Excludes, exclude.String())
+			}
+		}
+		payload.Rules = append(payload.Rules, d)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func (a *Analyzer) RuleIDs() []string {
+	if a == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(a.rules))
+	for _, rule := range a.rules {
+		ids = append(ids, rule.ID)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisResult {
