@@ -8,11 +8,11 @@ import (
 
 func TestExtendedEcosystemFailureCorpus(t *testing.T) {
 	tests := []struct {
-		name string
-		repository string
-		log string
-		category model.Category
-		provider string
+		name        string
+		repository  string
+		log         string
+		category    model.Category
+		provider    string
 		errorFamily string
 	}{
 		{name: `eco-ruby-bundler-gem-not-found`, repository: `rubygems/rubygems`, log: `Could not find gem 'rack (= 99.0.0)' in any of the gem sources listed in your Gemfile.`, category: model.CategoryCodeFailure, provider: `Bundler`, errorFamily: `gem-not-found`},
@@ -342,9 +342,14 @@ ERROR: app/src/main/res/layout/main.xml:12: AAPT: error: resource color/missing 
 			}
 			matched := false
 			for _, id := range r.MatchedRules {
-				if id == tt.name { matched = true; break }
+				if id == tt.name {
+					matched = true
+					break
+				}
 			}
-			if !matched { t.Fatalf("expected rule %s to match, got %v", tt.name, r.MatchedRules) }
+			if !matched {
+				t.Fatalf("expected rule %s to match, got %v", tt.name, r.MatchedRules)
+			}
 		})
 	}
 }

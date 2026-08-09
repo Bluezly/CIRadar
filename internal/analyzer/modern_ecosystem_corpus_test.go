@@ -8,9 +8,9 @@ import (
 
 func TestModernEcosystemCorpus(t *testing.T) {
 	tests := []struct {
-		id string
+		id         string
 		repository string
-		log string
+		log        string
 	}{
 		{id: `modern-clojure-compiler`, repository: `clojure/clojure`, log: `Syntax error compiling at (src/app/core.clj:12:3). Unable to resolve symbol: foo in this context`},
 		{id: `modern-clojure-unresolved-symbol`, repository: `clojure/clojure`, log: `Syntax error compiling at (src/app.clj:4:1). Unable to resolve symbol: missing in this context`},

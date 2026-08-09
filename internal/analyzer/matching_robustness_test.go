@@ -8,10 +8,10 @@ import (
 
 func TestRealLogVariantMatching(t *testing.T) {
 	tests := []struct {
-		name string
-		log string
+		name     string
+		log      string
 		provider string
-		family string
+		family   string
 	}{
 		{name: "pypi urllib3 timeout", log: "WARNING: Retrying (Retry(total=4)) after connection broken by 'ReadTimeoutError(HTTPSConnectionPool(host='pypi.org', port=443): Read timed out.)': /simple/requests/", provider: "PyPI", family: "registry-connectivity"},
 		{name: "pypi pythonhosted dns", log: "HTTPSConnectionPool(host='files.pythonhosted.org', port=443): Max retries exceeded with url: /packages/pkg.whl (Caused by NameResolutionError: Failed to resolve files.pythonhosted.org)", provider: "PyPI", family: "registry-connectivity"},
