@@ -199,3 +199,9 @@ func TestTestsCriticalCLI(t *testing.T) {
 		t.Fatalf("critical=%v", updated.Critical)
 	}
 }
+
+func TestDemoDoesNotRequireConfig(t *testing.T) {
+	if err := cmdDemo([]string{"--json", "npm-econnreset"}); err != nil {
+		t.Fatal(err)
+	}
+}
