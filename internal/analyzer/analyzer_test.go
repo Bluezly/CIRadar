@@ -524,3 +524,70 @@ func TestAnalyzerConfigurationDigestIsStableAndSensitive(t *testing.T) {
 		t.Fatal("custom rule change did not alter analyzer configuration digest")
 	}
 }
+
+func TestObservedFailurePrefersSpecificGradleArtifactCause(t *testing.T) {
+	log := `FAILURE: Build failed with an exception.
+
+* What went wrong:
+A problem occurred evaluating root project 'PterodactylPowerAction'.
+> Could not resolve all files for configuration ':runtimeClasspath'.
+   > Could not find fr.pickaria:messager:1.2-SNAPSHOT.
+     Searched in the following locations:
+       - https://repo.papermc.io/repository/maven-public/fr/pickaria/messager/1.2-SNAPSHOT/messager-1.2-SNAPSHOT.pom
+
+BUILD FAILED in 15s
+Error: Process completed with exit code 1.`
+	r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
+	const want = "Could not find fr.pickaria:messager:1.2-SNAPSHOT."
+	if !strings.Contains(r.RedactedExcerpt, want) {
+		t.Fatalf("excerpt did not include specific Gradle cause: %q", r.RedactedExcerpt)
+	}
+	found := false
+	for _, evidence := range r.Evidence {
+		if evidence.Kind == "failure" && strings.Contains(evidence.Description, want) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("specific Gradle cause missing from evidence: %+v", r.Evidence)
+	}
+}
+
+func TestUnknownFallbackSurfacesObservedFailure(t *testing.T) {
+	log := "Credentials could not be loaded, please check your action inputs: Could not load credentials from any providers"
+	r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
+	if !strings.Contains(r.Summary, "Credentials could not be loaded") {
+		t.Fatalf("summary lost observed failure: %q", r.Summary)
+	}
+	if !strings.Contains(r.RedactedExcerpt, "Credentials could not be loaded") {
+		t.Fatalf("excerpt lost observed failure: %q", r.RedactedExcerpt)
+	}
+}
+
+func TestUnknownExcerptAnchorsDeepFailureInsteadOfCleanupTail(t *testing.T) {
+	log := strings.Repeat("setup complete\n", 400) +
+		"custom executor rejected build manifest: schema moon-v7 mismatch\n" +
+		strings.Repeat("cleanup complete\n", 800)
+	observed := findObservedFailure(log, nil)
+	if observed.Message != "custom executor rejected build manifest: schema moon-v7 mismatch" {
+		t.Fatalf("observed=%q score=%d", observed.Message, observed.Score)
+	}
+	excerpt := extractExcerptAt(log, nil, observed.Index, 600)
+	if !strings.Contains(excerpt, observed.Message) {
+		t.Fatalf("deep failure was not retained in excerpt: %q", excerpt)
+	}
+}
+
+func TestObservedFailureUsesRedactedLog(t *testing.T) {
+	const secret = "super-secret-token-value"
+	log := "fatal: deployment rejected token=" + secret
+	r := New("test").Analyze(model.AnalysisInput{Log: log}, Context{})
+	combined := r.Summary + "\n" + r.RedactedExcerpt
+	for _, evidence := range r.Evidence {
+		combined += "\n" + evidence.Description
+	}
+	if strings.Contains(combined, secret) {
+		t.Fatalf("observed failure leaked a redacted secret: %q", combined)
+	}
+}

@@ -133,6 +133,12 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 		primary = matched[0]
 	}
 
+	observed := findObservedFailure(redacted, matched)
+	if observed.Message != "" && primary.Category == model.CategoryUnknown {
+		primary.Summary = "Unclassified CI failure — " + observed.Message
+		primary.Recommendation = "Start with the observed failure shown in the diagnosis, then inspect the surrounding redacted excerpt before changing infrastructure or dependencies."
+	}
+
 	norm := normalizeForFingerprint(redacted, primary)
 	fingerprint := fingerprintValue(a.fingerprintKey, []byte(norm))
 	privateMaterial := []byte(tenantID(in.TenantID) + "\x00" + in.Repository + "\x00" + norm)
@@ -160,6 +166,9 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 			negativeScore += rule.Weight
 		}
 		evidence = append(evidence, model.Evidence{Kind: "rule", Description: "Matched rule " + rule.ID + ": " + rule.Summary, Weight: rule.Weight})
+	}
+	if observed.Message != "" {
+		evidence = append(evidence, model.Evidence{Kind: "failure", Description: "Observed failure: " + observed.Message, Weight: 0})
 	}
 	if in.PreviousSuccess {
 		score += 15
@@ -264,7 +273,7 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	for _, m := range matched {
 		matchedIDs = append(matchedIDs, m.ID)
 	}
-	excerpt := extractExcerpt(redacted, matched, a.maxExcerpt)
+	excerpt := extractExcerptAt(redacted, matched, observed.Index, a.maxExcerpt)
 
 	result := model.AnalysisResult{
 		ID:                    newID("analysis", now, fingerprint),
@@ -588,15 +597,163 @@ func normalizeForFingerprint(log string, primary Rule) string {
 	return strings.ToLower(primary.Provider + "|" + primary.Operation + "|" + primary.ErrorFamily + "|" + strings.Join(selected, "\n"))
 }
 
+type observedFailure struct {
+	Message string
+	Index   int
+	Score   int
+}
+
+const maxObservedFailureRunes = 360
+
+func findObservedFailure(log string, matched []Rule) observedFailure {
+	if strings.TrimSpace(log) == "" {
+		return observedFailure{Index: -1}
+	}
+	best := observedFailure{Index: -1, Score: -1}
+	offset := 0
+	for _, rawLine := range strings.SplitAfter(log, "\n") {
+		line := strings.TrimSuffix(rawLine, "\n")
+		cleaned := cleanObservedFailureLine(line)
+		if cleaned == "" {
+			offset += len(rawLine)
+			continue
+		}
+		score := observedFailureScore(line, matched)
+		if score > best.Score || (score == best.Score && score >= 0 && offset > best.Index) {
+			best = observedFailure{Message: cleaned, Index: offset, Score: score}
+		}
+		offset += len(rawLine)
+	}
+	if best.Score < 0 {
+		return observedFailure{Index: -1}
+	}
+	return best
+}
+
+func cleanObservedFailureLine(line string) string {
+	line = timestampRe.ReplaceAllString(line, "")
+	line = strings.TrimSpace(line)
+	for strings.HasPrefix(line, "> ") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, ">"))
+	}
+	for _, prefix := range []string{"##[error]", "::error::", "[error]", "ERROR:", "Error:"} {
+		if strings.HasPrefix(strings.ToLower(line), strings.ToLower(prefix)) {
+			trimmed := strings.TrimSpace(line[len(prefix):])
+			if trimmed != "" {
+				line = trimmed
+			}
+			break
+		}
+	}
+	line = strings.Join(strings.Fields(line), " ")
+	if line == "" {
+		return ""
+	}
+	runes := []rune(line)
+	if len(runes) > maxObservedFailureRunes {
+		line = string(runes[:maxObservedFailureRunes-1]) + "…"
+	}
+	return line
+}
+
+func observedFailureScore(line string, matched []Rule) int {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return -1
+	}
+
+	score := 0
+	for _, rule := range matched {
+		for _, pattern := range rule.Patterns {
+			if pattern != nil && pattern.MatchString(line) {
+				score += 220
+				break
+			}
+		}
+	}
+
+	for _, signal := range []struct {
+		Text  string
+		Score int
+	}{
+		{"caused by:", 190},
+		{"could not find", 180},
+		{"cannot find", 175},
+		{"failed to resolve", 170},
+		{"unable to resolve", 170},
+		{"no such file or directory", 165},
+		{"undefined reference", 160},
+		{"undefined:", 155},
+		{"permission denied", 150},
+		{"connection refused", 150},
+		{"not found", 145},
+		{"timed out", 140},
+		{"timeout", 130},
+		{"panic:", 145},
+		{"fatal:", 140},
+		{"exception", 125},
+		{"failed to", 120},
+		{"could not", 120},
+		{"cannot", 115},
+		{"unable to", 115},
+		{"error:", 115},
+		{"error ", 105},
+		{"rejected", 100},
+		{"mismatch", 95},
+		{"invalid", 90},
+		{"denied", 90},
+	} {
+		if strings.Contains(lower, signal.Text) {
+			score += signal.Score
+			break
+		}
+	}
+
+	switch {
+	case strings.Contains(lower, "process completed with exit code"):
+		score = max(score, 25)
+		score -= 140
+	case strings.Contains(lower, "command failed with exit code"):
+		score = max(score, 30)
+		score -= 110
+	case lower == "build failed" || strings.HasPrefix(lower, "build failed in "):
+		score = max(score, 20)
+		score -= 100
+	case strings.Contains(lower, "failure: build failed with an exception"):
+		score = max(score, 15)
+		score -= 150
+	case lower == "* what went wrong:" || lower == "what went wrong:":
+		score -= 150
+	case strings.HasPrefix(lower, "run with --stacktrace") || strings.HasPrefix(lower, "run with --info") || strings.HasPrefix(lower, "run with --scan"):
+		score -= 140
+	case strings.HasPrefix(lower, "get more help at "):
+		score -= 140
+	}
+
+	if score <= 0 && isDiagnosticLine(line) {
+		score = 20
+	}
+	if score <= 0 {
+		return -1
+	}
+	return score
+}
+
 func extractExcerpt(log string, matched []Rule, max int) string {
+	return extractExcerptAt(log, matched, findObservedFailure(log, matched).Index, max)
+}
+
+func extractExcerptAt(log string, matched []Rule, observedIndex, max int) string {
 	if log == "" {
 		return ""
 	}
-	idx := -1
-	for _, rule := range matched {
-		for _, p := range rule.Patterns {
-			if loc := p.FindStringIndex(log); loc != nil && (idx < 0 || loc[0] < idx) {
-				idx = loc[0]
+	idx := observedIndex
+	if idx < 0 {
+		for _, rule := range matched {
+			for _, p := range rule.Patterns {
+				if loc := p.FindStringIndex(log); loc != nil && (idx < 0 || loc[0] < idx) {
+					idx = loc[0]
+				}
 			}
 		}
 	}
