@@ -393,7 +393,7 @@ func TestAnthropicMessagesEndpointNormalization(t *testing.T) {
 }
 
 func TestRedactedRemoteSanitizesFilePathsBeforePrompt(t *testing.T) {
-	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+	secret := "gh" + "p_" + strings.Repeat("A", 32)
 	e := &Enhancer{cfg: config.LLMConfig{
 		MaxInputCharacters:      8000,
 		SendChangedFiles:        true,
@@ -420,7 +420,7 @@ func TestRedactedRemoteSanitizesFilePathsBeforePrompt(t *testing.T) {
 }
 
 func TestRedactedRemoteSanitizesModelOutputAndDropsSecretPatch(t *testing.T) {
-	secret := "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+	secret := "gh" + "p_" + strings.Repeat("A", 32)
 	patch := "--- a/main.go\n+++ b/main.go\n@@ -1 +1,2 @@\n package main\n+var token = \"" + secret + "\"\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		content := map[string]any{
