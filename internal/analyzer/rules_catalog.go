@@ -3,7 +3,7 @@ package analyzer
 import (
 	"regexp"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 type catalogRuleSpec struct {
