@@ -1,15 +1,15 @@
 package server
 
 import (
-	"ciradar/internal/model"
 	"context"
+	"github.com/Bluezly/CIRadar/internal/model"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"ciradar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/config"
 )
 
 func TestDashboardSecretDoesNotFallBackToOtherCredentials(t *testing.T) {

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func TestMCPOAuthAuthorizationCodePKCE(t *testing.T) {
