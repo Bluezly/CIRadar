@@ -9,9 +9,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	gh "ciradar/internal/github"
-	"ciradar/internal/llm"
-	"ciradar/internal/model"
+	gh "github.com/Bluezly/CIRadar/internal/github"
+	"github.com/Bluezly/CIRadar/internal/llm"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 type Result struct {
