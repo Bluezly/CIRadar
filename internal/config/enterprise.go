@@ -373,7 +373,7 @@ func (c *Config) normalizeEnterprise() error {
 		c.Repair.MinimumScore = 60
 	}
 	if c.Repair.BranchPrefix == "" {
-		c.Repair.BranchPrefix = "ciradar/repair-"
+		c.Repair.BranchPrefix = "github.com/Bluezly/CIRadar/repair-"
 	}
 	if strings.Contains(c.Repair.BranchPrefix, "..") || strings.HasPrefix(c.Repair.BranchPrefix, "/") {
 		return errors.New("repair branch_prefix is invalid")

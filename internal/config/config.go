@@ -17,7 +17,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"ciradar/internal/secrets"
+	"github.com/Bluezly/CIRadar/internal/secrets"
 )
 
 type NotificationChannel struct {
@@ -199,7 +199,7 @@ func Default() Config {
 		TestIntelligence:              TestIntelligenceConfig{Enabled: true, AutoQuarantine: false, AutoQuarantineMinRuns: 5, AutoQuarantineMinScore: 65, AutoQuarantineDurationText: "7d"},
 		SSO:                           SSOConfig{Enabled: false, Mode: "oidc", DefaultTenant: "default", DefaultRole: "viewer", CookieName: "ciradar_session", CookieSecure: true},
 		LLM:                           LLMConfig{Enabled: false, Provider: "openai-compatible", Model: "gpt-5-mini", MinimumScore: 60, MaxInputCharacters: 24000, MaxOutputTokens: 1200, TimeoutText: "45s", SendRedactedExcerpt: true, SendChangedFiles: true, SendSourceCode: true, MaxSourceFiles: 8, MaxSourceFileCharacters: 32000, DataPolicy: "local_only", BlockOnResidualSecret: true},
-		Repair:                        RepairConfig{Enabled: false, AutoDraftPR: false, MinimumScore: 60, BranchPrefix: "ciradar/repair-", MaximumFiles: 10, MaximumLines: 1000},
+		Repair:                        RepairConfig{Enabled: false, AutoDraftPR: false, MinimumScore: 60, BranchPrefix: "github.com/Bluezly/CIRadar/repair-", MaximumFiles: 10, MaximumLines: 1000},
 		ChatOps:                       ChatOpsConfig{Enabled: false, DefaultTenant: "default", AllowAcknowledge: true, AllowResolve: true, AllowQuarantine: true, QuarantineDuration: "7d"},
 		Costs:                         CostConfig{Enabled: true, Currency: "USD", DefaultRates: map[string]float64{}, RunnerRates: map[string]float64{}, BillingRounds: map[string]int{}},
 		Semantic:                      SemanticConfig{Enabled: true, RemoteEmbeddings: false, VectorDimensions: 128, CandidateLimit: 500},
