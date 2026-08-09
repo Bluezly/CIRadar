@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/config"
-	"ciradar/internal/httpguard"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func VerifyWebhook(provider, secret string, h http.Header, body []byte, now time.Time) bool {
