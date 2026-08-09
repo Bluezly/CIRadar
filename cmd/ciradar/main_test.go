@@ -15,6 +15,25 @@ import (
 	"ciradar/internal/model"
 )
 
+func TestRulesWorksBeforeInit(t *testing.T) {
+	dir := t.TempDir()
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldWorkingDirectory); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	if err := cmdRules(nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEvaluateTestGate(t *testing.T) {
 	passed := model.TestObservation{TenantID: "default", Repository: "acme/api", Suite: "unit", ClassName: "Calc", Name: "ok", Status: "passed"}
 	failed := model.TestObservation{TenantID: "default", Repository: "acme/api", Suite: "unit", ClassName: "Calc", Name: "flaky", Status: "failed"}
