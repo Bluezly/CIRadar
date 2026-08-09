@@ -36,12 +36,6 @@ Notification webhooks, SMTP, CI connectors, provider-status polling, GitHub API,
 
 Set `allow_private_network: true` only inside the specific notification channel, connector, or SSO block that must reach a trusted internal service. This opt-in disables address-range blocking for that integration; it does not allow non-HTTP schemes or URL-embedded credentials. Guarded outbound HTTP clients deliberately ignore `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`; route them explicitly at the network layer when an egress proxy is mandatory.
 
-## Secret migration
-
-Generated 32-byte CI Radar master keys continue to decrypt existing `enc:v1:` values. A legacy human passphrase used directly as `CIRADAR_MASTER_KEY` is now rejected. Before upgrading such an installation, use the prior release to decrypt the values, generate a new key with `ciradar secret key`, and encrypt the plaintext values again.
-
-Older configurations that relied on `admin_token`, `fingerprint_hmac_key`, or `master_key` as an implicit dashboard session key no longer do so. The service now refuses to load a configuration without a dedicated `dashboard_session_secret`; set the same persistent value on every replica before upgrading.
-
 ## Multi-platform binaries
 
 Release builds include Windows, Linux, and macOS for amd64 and arm64. macOS binaries are cross-built without CGO; test them on the exact macOS and Apple Silicon versions used by the organization.

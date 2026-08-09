@@ -52,4 +52,4 @@ Automatic rerun is restricted to qualifying external failures and is disabled by
 
 The embedded store is intended for evaluation and small single-process deployments. PostgreSQL provides shared tenant-scoped state, distributed request/auth rate limits, and job coordination for multi-instance deployments.
 
-The custom PostgreSQL wire layer and project-maintained SAML parser/orchestration are explicit security and interoperability review boundaries. See [Security](../SECURITY.md) and [Production acceptance](production-acceptance.md).
+The custom PostgreSQL wire layer and project-maintained SAML parser/orchestration are explicit security and interoperability review boundaries. See [Security](../SECURITY.md) and [Limitations](limitations.md).

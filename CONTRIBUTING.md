@@ -2,7 +2,7 @@
 
 Bug fixes, diagnosis rules, connectors, tests, and documentation improvements are welcome.
 
-For a large feature, schema change, authentication change, or new external integration, open an issue first. It is easier to review the design before a large patch exists.
+For a large feature, schema change, authentication change, or new external integration, open an issue before starting the implementation.
 
 ## Development
 
@@ -13,11 +13,11 @@ make race
 make vet
 ```
 
-Release CI also runs Staticcheck, `govulncheck`, PostgreSQL integration tests, CodeQL, and cross-platform builds.
+CI also runs Staticcheck, `govulncheck`, PostgreSQL integration tests, CodeQL, and cross-platform builds.
 
 ## Diagnosis rules
 
-A new rule should include a positive fixture and at least one nearby negative case. Prefer signatures that belong to the tool or ecosystem instead of repository-specific strings.
+Add a positive fixture and at least one nearby negative case with every new rule. Prefer signatures from the tool or ecosystem itself instead of repository-specific text.
 
 ## Security-sensitive changes
 
@@ -27,6 +27,6 @@ Do not put real credentials, customer logs, private repository names, SAML asser
 
 ## Pull requests
 
-Keep a pull request focused. Explain what changed, why it changed, and how it was tested. Call out configuration, API, database, or migration impact when there is any.
+Keep each pull request focused. Explain the problem, the change, and how it was tested. Call out API, configuration, database, or migration impact when relevant.
 
 Contributions are accepted under AGPL-3.0-or-later.

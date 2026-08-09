@@ -60,9 +60,7 @@ It uses:
 
 Writes acquire advisory locks for the affected tenant and entity kind. A write for one tenant does not lock every other tenant. Cross-tenant correlation uses indexed SQL aggregation instead of loading all analyses into a global state blob.
 
-The backend automatically imports the legacy `ciradar_state` row when the relational tables are empty. The legacy table is retained for rollback and should be removed only after backup and verification.
-
-This is a scalable self-hosted entity store, not a claim of hyperscale distributed analytics. Some dashboard and business operations still hydrate a bounded tenant-scoped set of rows in the Go process. `pgStateWith` paths load only the entity kinds requested by the operation, but those rows are still materialized in memory before shared Store logic is applied. Quarantine set/remove is narrower in RC.17: it hydrates only the target test-statistics object and target quarantine object, not every test/quarantine row for the tenant. Very large installations should monitor query latency, retention, and row counts and may evolve high-volume analyses into partitioned tables.
+This is a scalable self-hosted entity store, not a claim of hyperscale distributed analytics. Some dashboard and business operations still hydrate a bounded tenant-scoped set of rows in the Go process. `pgStateWith` paths load only the entity kinds requested by the operation, but those rows are still materialized in memory before shared Store logic is applied. Quarantine set/remove hydrates only the target test-statistics object and target quarantine object rather than every test/quarantine row for the tenant. Very large installations should monitor query latency, retention, and row counts and may evolve high-volume analyses into partitioned tables.
 
 ## Indexes and maintenance
 
@@ -92,9 +90,9 @@ Back up the database, configuration, GitHub App private key, master encryption k
 
 PostgreSQL remains the transactional system of record, not an unlimited log warehouse. Keep raw build logs in object storage or the CI provider and retain compact CIRadar telemetry. At sustained high ingest or long analytical retention, export observations to a columnar/time-series system such as ClickHouse or TimescaleDB rather than forcing all exploratory log analytics through the primary OLTP database.
 
-## Production readiness checklist
+## Operational checks
 
-Before calling a deployment production-ready, operators should complete and record:
+Before using the service for a production workload, test:
 
 1. a representative load test covering expected test-result and analysis ingest, dashboard reads, cleanup, and concurrent workers
 2. automated `pg_dump`/physical backup plus a restore drill into an isolated database
@@ -103,4 +101,3 @@ Before calling a deployment production-ready, operators should complete and reco
 5. autovacuum, WAL, connection, disk-I/O, partition growth, default-partition growth, and query-latency alerts
 6. retention sizing and deletion/partition-drop verification
 
-The repository does not claim that these operator-specific exercises have been completed for an arbitrary installation. Passing unit and integration tests is not a substitute for them.

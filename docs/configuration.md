@@ -48,4 +48,4 @@ ciradar database check --config ciradar.json
 ciradar serve --config ciradar.json
 ```
 
-For production deployment, continue with [Production acceptance](production-acceptance.md).
+For deployment guidance, continue with [Deployment](self-hosting.md).

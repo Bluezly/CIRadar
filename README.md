@@ -1,80 +1,57 @@
 # CI Radar
 
-[![CI](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml) [![CodeQL](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml)
+[![CI](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-CI Radar is a self-hosted service for diagnosing CI failures and tracking flaky tests across multiple CI systems.
+CI Radar is a self-hosted service for turning CI failures into structured diagnoses. It ingests build events and test reports, groups recurring failures, tracks flaky tests, and exposes the result through a CLI, API, dashboard, alerts, and ChatOps.
 
-It accepts build logs, webhooks, and JUnit-style reports, turns them into structured failure records, and keeps the results in an embedded store or PostgreSQL. The core diagnosis path is rule-based. Model-assisted explanations and repair suggestions are optional.
-
-[Docs](docs/README.md) · [Arabic](README.ar.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md)
+The diagnosis engine is deterministic by default. Optional model-backed explanations and repair proposals can be enabled separately.
 
 ## Quick start
-
-Clone and build:
 
 ```bash
 git clone https://github.com/Bluezly/CIRadar.git
 cd CIRadar
 go build -o ciradar ./cmd/ciradar
-```
-
-Or install the CLI directly:
-
-```bash
-go install github.com/Bluezly/CIRadar/cmd/ciradar@latest
-```
-
-Try the analyzer without creating a config file:
-
-```bash
 ./ciradar demo npm-econnreset
-./ciradar rules
 ```
 
-A demo result looks like this:
-
-```text
-Category         : DEPENDENCY_REGISTRY
-Provider         : npm
-Operation        : package-download
-Summary          : npm package download connection was reset
-Recommendation   : Avoid changing dependencies speculatively; verify npm/network health and retry after recovery.
-```
-
-Create a local instance:
+Create a local configuration and start the server:
 
 ```bash
 ./ciradar init
 ./ciradar serve
 ```
 
-The dashboard listens on `http://127.0.0.1:8787/` by default. `ciradar init` prints the root token used for the first sign-in.
+The dashboard listens on `127.0.0.1:8787` by default. `ciradar init` prints the bootstrap token used for the first sign-in.
 
-## What it does
+You can also install the CLI directly:
 
-- Classifies common CI failures with a built-in rule catalog and explicit `UNKNOWN` fallback.
-- Correlates repeated failures across jobs and repositories.
-- Ingests JUnit-family reports and keeps test history, flake state, quarantine state, and critical-test policy.
-- Sends notifications and supports Slack/Teams actions.
-- Integrates with GitHub and GitLab review workflows.
-- Exposes a CLI, HTTP API, dashboard, and MCP server.
-- Runs with an embedded state file or PostgreSQL.
+```bash
+go install github.com/Bluezly/CIRadar/cmd/ciradar@latest
+```
 
-The built-in catalog currently contains 630 rules. Custom rules can be loaded from configuration without rebuilding the binary.
+## What it handles
 
-## CI providers
+- CI failure classification with an explicit `UNKNOWN` fallback
+- recurring incident correlation across jobs and repositories
+- JUnit, Playwright, Jest, pytest, Cypress, and Mocha test-result ingestion
+- flaky-test history, quarantine, critical-test policy, and impact-aware test selection
+- GitHub and GitLab workflow actions
+- Slack and Microsoft Teams ChatOps
+- notifications, DORA metrics, and CI cost tracking
+- embedded storage for local use or PostgreSQL for shared deployments
+- optional OIDC, SAML, MCP, embeddings, and model-assisted explanations
 
-GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build.
+CI events can be normalized from GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build.
 
-Provider support means CI Radar can normalize and analyze events from that provider. It does not imply that every provider-specific failure has a dedicated rule.
-
-## Common commands
+## CLI
 
 ```bash
 ciradar analyze build.log
 ciradar baseline --repo owner/repo successful.log
 ciradar incidents --json
-ciradar status --json
 ciradar tests ingest --repo owner/repo --format junit results.xml
 ciradar tests list --repo owner/repo
 ciradar tests select --repo owner/repo --changed src/a.go,src/b.go
@@ -82,52 +59,41 @@ ciradar database check
 ciradar doctor
 ```
 
-Run `ciradar help` for the full command list.
-
-## Storage
-
-| Mode | Use it for |
-| --- | --- |
-| Embedded | Local evaluation and small single-process installs |
-| PostgreSQL | Shared state and multi-instance deployments |
-
-PostgreSQL values are sent as bound parameters. CI Radar maintains its own PostgreSQL wire client, so deployments with strict security or interoperability requirements should review that boundary before production use. See [PostgreSQL](docs/postgresql.md).
+Run `ciradar help` for the complete command list.
 
 ## Docker
 
-Initialize a configuration and copy the environment template:
+Copy the environment template, generate the required secrets, and create a config:
 
 ```bash
-ciradar init --config ciradar.json
 cp .env.example .env
-ciradar secret key
+./ciradar secret key
+./ciradar init --config ciradar.json
 ```
 
-Set independent values for `CIRADAR_MASTER_KEY`, `POSTGRES_PASSWORD`, and `CIRADAR_DASHBOARD_SESSION_SECRET`, then start the stack:
+Set the values in `.env`, then start the stack:
 
 ```bash
 docker compose up --build
 ```
 
-For an internet-facing deployment, put CI Radar behind HTTPS and read [Self-hosting](docs/self-hosting.md) first.
-
-## Optional model assistance
-
-CI Radar can call a local or operator-configured model endpoint for explanations and repair proposals. It is disabled by default and is not required for classification. Data-handling options are documented in [Model integration](docs/llm.md).
+For an internet-facing deployment, put CI Radar behind HTTPS and use PostgreSQL. See [Deployment](docs/self-hosting.md) and [PostgreSQL](docs/postgresql.md).
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
-- [Self-hosting](docs/self-hosting.md)
+- [Architecture](docs/architecture.md)
 - [Connectors](docs/connectors.md)
 - [Test intelligence](docs/test-intelligence.md)
 - [ChatOps](docs/chatops.md)
 - [PostgreSQL](docs/postgresql.md)
 - [SSO](docs/sso.md)
 - [MCP](docs/mcp.md)
+- [Model assistance](docs/model-assistance.md)
 - [Benchmarking](docs/benchmarking.md)
-- [Known limits](docs/known-limits.md)
+- [Testing](docs/testing.md)
+- [Limitations](docs/limitations.md)
+- [Development history](docs/history.md)
 
 ## Development
 
@@ -138,12 +104,8 @@ make race
 make vet
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-
-## Status
-
-CI Radar is a release candidate. The automated test suite covers the supported code paths, but it is not a substitute for load, failover, backup/restore, or identity-provider testing in your own environment. See [Known limits](docs/known-limits.md).
+Pull requests run the same core checks in GitHub Actions, plus PostgreSQL integration, static analysis, vulnerability scanning, and cross-platform builds. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE).
+CI Radar is licensed under AGPL-3.0-or-later. See [LICENSE](LICENSE).

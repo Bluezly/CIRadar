@@ -50,4 +50,4 @@ CI runs these tests against a live single-node PostgreSQL service.
 
 ## Explicit limits
 
-A passing suite does not prove replicated failover, backup restoration, long-running production load, native behavior on every target OS, or interoperability with every identity provider. Those belong to deployment acceptance.
+A passing suite does not prove replicated failover, backup restoration, long-running production load, native behavior on every target OS, or interoperability with every identity provider. Those need to be exercised in the target deployment environment.
