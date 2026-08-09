@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"ciradar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/db"
 )
 
 const (

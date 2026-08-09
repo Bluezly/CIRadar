@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	gh "ciradar/internal/github"
-	"ciradar/internal/model"
+	gh "github.com/Bluezly/CIRadar/internal/github"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 type githubIssueCreateBody struct {

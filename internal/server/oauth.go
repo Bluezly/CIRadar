@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/model"
-	"ciradar/internal/secrets"
+	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/secrets"
 )
 
 const (

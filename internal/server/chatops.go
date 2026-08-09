@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func (s *Server) slackChatOps(w http.ResponseWriter, r *http.Request) {
