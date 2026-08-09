@@ -113,8 +113,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: >-
           go build -buildvcs=false -trimpath
-          -ldflags "-s -w -X ciradar/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          -X ciradar/internal/version.Commit=${GITHUB_SHA::12}"
+          -ldflags "-s -w -X github.com/Bluezly/CIRadar/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          -X github.com/Bluezly/CIRadar/internal/version.Commit=${GITHUB_SHA::12}"
           -o "${{ matrix.output }}" ./cmd/ciradar
       - name: Checksum
         run: sha256sum "${{ matrix.output }}" > "${{ matrix.output }}.sha256"
