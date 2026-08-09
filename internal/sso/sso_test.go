@@ -3,6 +3,7 @@ package sso
 import (
 	"context"
 	"crypto"
+	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -371,6 +372,20 @@ func TestParseJWKRejectsWeakAndInvalidKeys(t *testing.T) {
 	}
 	if _, err := parseJWK(invalidEC); err == nil {
 		t.Fatal("off-curve EC JWK accepted")
+	}
+	privateKey, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	point := privateKey.PublicKey().Bytes()
+	validEC := map[string]any{
+		"kty": "EC",
+		"crv": "P-256",
+		"x":   base64.RawURLEncoding.EncodeToString(point[1:33]),
+		"y":   base64.RawURLEncoding.EncodeToString(point[33:]),
+	}
+	if _, err := parseJWK(validEC); err != nil {
+		t.Fatalf("valid EC JWK rejected: %v", err)
 	}
 }
 

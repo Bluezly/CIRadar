@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -722,13 +723,14 @@ func parseJWK(j map[string]any) (crypto.PublicKey, error) {
 		if len(xBytes) != 32 || len(yBytes) != 32 {
 			return nil, errors.New("invalid EC JWK coordinates")
 		}
-		x := new(big.Int).SetBytes(xBytes)
-		y := new(big.Int).SetBytes(yBytes)
-		curve := elliptic.P256()
-		if !curve.IsOnCurve(x, y) {
+		point := make([]byte, 65)
+		point[0] = 4
+		copy(point[1:33], xBytes)
+		copy(point[33:], yBytes)
+		if _, err := ecdh.P256().NewPublicKey(point); err != nil {
 			return nil, errors.New("invalid EC JWK point")
 		}
-		return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
+		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(xBytes), Y: new(big.Int).SetBytes(yBytes)}, nil
 	default:
 		return nil, errors.New("unsupported JWK type")
 	}
