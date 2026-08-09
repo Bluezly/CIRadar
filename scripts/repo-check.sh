@@ -3,6 +3,7 @@ set -eu
 
 formatted="$(gofmt -l .)"
 if [ -n "$formatted" ]; then
+  printf '%s\n' 'gofmt check failed; unformatted files:'
   printf '%s\n' "$formatted"
   exit 1
 fi
