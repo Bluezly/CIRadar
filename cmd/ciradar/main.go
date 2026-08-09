@@ -122,7 +122,7 @@ func usage() {
 Usage:
   ciradar init [--config ciradar.json]
   ciradar analyze [--config ciradar.json] [--json] [--correlate] <log-file|->
-  ciradar demo [--config ciradar.json] [--json] npm-econnreset|go-test-failure
+  ciradar demo [--json] [--config ciradar.json] npm-econnreset|go-test-failure
   ciradar baseline [--config ciradar.json] --repo OWNER/REPO <successful-log>
   ciradar benchmark --dataset PATH [--config ciradar.json] [--json] [thresholds]
   ciradar incidents [--config ciradar.json] [--json]
@@ -798,13 +798,13 @@ func cmdAnalyze(args []string) error {
 
 func cmdDemo(args []string) error {
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
-	path := fs.String("config", "ciradar.json", "configuration file path")
+	path := fs.String("config", "", "optional configuration file for custom rules and redaction")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: ciradar demo [--config ciradar.json] [--json] npm-econnreset|go-test-failure")
+		return errors.New("usage: ciradar demo [--json] [--config ciradar.json] npm-econnreset|go-test-failure")
 	}
 	samples := map[string]string{
 		"npm-econnreset":  "npm ERR! code ECONNRESET\nnpm ERR! network request to https://registry.npmjs.org/react failed, reason: socket hang up\n",
@@ -814,15 +814,20 @@ func cmdDemo(args []string) error {
 	if !ok {
 		return fmt.Errorf("unknown demo %q; choose npm-econnreset or go-test-failure", fs.Arg(0))
 	}
-	cfg, err := config.Load(*path)
-	if err != nil {
-		return err
+	tenantID := "demo"
+	a := analyzer.New("ciradar-demo-v1")
+	if strings.TrimSpace(*path) != "" {
+		cfg, err := config.Load(*path)
+		if err != nil {
+			return err
+		}
+		a, err = buildAnalyzer(cfg)
+		if err != nil {
+			return err
+		}
+		tenantID = cfg.DefaultTenantID
 	}
-	a, err := buildAnalyzer(cfg)
-	if err != nil {
-		return err
-	}
-	in := model.AnalysisInput{TenantID: cfg.DefaultTenantID, Repository: "demo/local", Organization: "demo", Workflow: "demo", Job: "demo", Log: logText, OccurredAt: time.Now().UTC()}
+	in := model.AnalysisInput{TenantID: tenantID, Repository: "demo/local", Organization: "demo", Workflow: "demo", Job: "demo", Log: logText, OccurredAt: time.Now().UTC()}
 	result := a.Analyze(in, analyzer.Context{})
 	if *jsonOut {
 		return printJSON(result)
