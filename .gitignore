@@ -1,9 +1,15 @@
 .ciradar/
 ciradar.json
 ciradar-report.json
+.env
 *.pem
 *.key
 *.log
 /dist/
 *.exe
 ciradar-linux-*
+ciradar-darwin-*
+coverage.out
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,14 @@
+.git
+.github
+.ciradar
+dist
+docs
+benchmarks
+examples
+*.log
+*.pem
+*.key
+*.exe
+*.zip
+ciradar.json
+.env
