@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/config"
-	"ciradar/internal/db"
-	"ciradar/internal/insights"
-	"ciradar/internal/model"
-	"ciradar/internal/similarity"
-	"ciradar/internal/testselection"
-	"ciradar/internal/version"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/insights"
+	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/similarity"
+	"github.com/Bluezly/CIRadar/internal/testselection"
+	"github.com/Bluezly/CIRadar/internal/version"
 )
 
 type Server struct {

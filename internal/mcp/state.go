@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 type session struct {
