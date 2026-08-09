@@ -10,8 +10,8 @@ import (
 
 func TestBuiltinRuleCountAndUniqueness(t *testing.T) {
 	rules := BuiltinRules()
-	if len(rules) != 1223 {
-		t.Fatalf("builtin rule count=%d want=1223", len(rules))
+	if len(rules) != 1384 {
+		t.Fatalf("builtin rule count=%d want=1384", len(rules))
 	}
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
@@ -85,7 +85,7 @@ func TestRealWorldFailureSignatures(t *testing.T) {
 		errorFamily string
 	}{
 		{name: "staticcheck deprecated api", repository: "Bluezly/CIRadar", log: "Error: internal/sso/sso.go:728:7: curve.IsOnCurve has been deprecated since Go 1.21: this is a low-level unsafe API. For ECDH, use the crypto/ecdh package. (SA1019)", category: model.CategoryCodeFailure, provider: "Staticcheck", errorFamily: "deprecated-api"},
-		{name: "staticcheck generic diagnostic", repository: "golang/example", log: "pkg/cache/cache.go:44:2: this value of err is never used (SA4006)", category: model.CategoryCodeFailure, provider: "Staticcheck", errorFamily: "static-analysis-failure"},
+		{name: "staticcheck sa4006 diagnostic", repository: "golang/example", log: "pkg/cache/cache.go:44:2: this value of err is never used (SA4006)", category: model.CategoryCodeFailure, provider: "Staticcheck", errorFamily: "unused-assignment"},
 		{name: "pnpm outdated lockfile", repository: "pnpm/pnpm", log: "ERR_PNPM_OUTDATED_LOCKFILE Cannot install with frozen-lockfile because pnpm-lock.yaml is not up to date with package.json", category: model.CategoryCodeFailure, provider: "pnpm", errorFamily: "outdated-lockfile"},
 		{name: "corepack signing key", repository: "pnpm/pnpm", log: "Error: Cannot find matching keyid: {\"signatures\":[],\"keys\":[]}", category: model.CategoryToolchainFailure, provider: "Corepack", errorFamily: "signature-key-mismatch"},
 		{name: "npm peer conflict", repository: "npm/cli", log: "npm ERR! code ERESOLVE\nnpm ERR! ERESOLVE unable to resolve dependency tree\nnpm ERR! Could not resolve dependency: peer react@18 from pkg@1.0.0", category: model.CategoryCodeFailure, provider: "npm", errorFamily: "peer-dependency-conflict"},

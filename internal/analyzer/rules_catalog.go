@@ -20,13 +20,14 @@ type catalogRuleSpec struct {
 }
 
 func catalogRules() []Rule {
-	specs := make([]catalogRuleSpec, 0, 473)
+	specs := make([]catalogRuleSpec, 0, 640)
 	specs = append(specs, catalogNetworkRules()...)
 	specs = append(specs, catalogLanguageRules()...)
 	specs = append(specs, catalogBackendRules()...)
 	specs = append(specs, catalogInfrastructureRules()...)
 	specs = append(specs, catalogMainframeRules()...)
 	specs = append(specs, catalogCIRules()...)
+	specs = append(specs, catalogStaticcheckRules()...)
 	specs = append(specs, catalogRealWorldRules()...)
 	specs = append(specs, catalogOSSRules()...)
 	specs = append(specs, catalogEcosystemRules()...)
