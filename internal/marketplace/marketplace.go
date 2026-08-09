@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/config"
-	"ciradar/internal/db"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 type Account struct {
