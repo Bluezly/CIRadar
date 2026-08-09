@@ -1,54 +1,40 @@
 name: Bug report
-description: Report a reproducible CI Radar defect
-title: "[Bug]: "
+description: Something is not working
+title: ""
 labels: [bug]
 body:
-  - type: markdown
-    attributes:
-      value: Remove credentials, tokens, private repository names, and raw secrets before submitting logs.
   - type: input
     id: version
     attributes:
-      label: CI Radar version
-      placeholder: Paste the output of `ciradar version`
-    validations:
-      required: true
-  - type: dropdown
-    id: deployment
-    attributes:
-      label: Deployment mode
-      options:
-        - Embedded database
-        - PostgreSQL
-        - Docker Compose
-        - Standalone binary
-        - Other
+      label: Version
+      description: Output of `ciradar version`
     validations:
       required: true
   - type: textarea
     id: problem
     attributes:
       label: What happened?
-      description: Include the expected result and the actual result.
+      description: Tell us what you expected and what happened instead.
     validations:
       required: true
   - type: textarea
     id: reproduce
     attributes:
-      label: Reproduction steps
+      label: Steps to reproduce
     validations:
       required: true
   - type: textarea
-    id: sanitized_logs
+    id: logs
     attributes:
-      label: Sanitized logs
+      label: Logs
+      description: Please remove tokens, private repository names, and other sensitive data first.
       render: text
   - type: checkboxes
     id: checks
     attributes:
-      label: Safety checks
+      label: Before submitting
       options:
-        - label: I removed secrets and private identifiers.
-          required: true
         - label: I searched existing issues.
+          required: true
+        - label: I removed secrets and private identifiers from the report.
           required: true
