@@ -1167,12 +1167,18 @@ func cmdRules(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.Load(*path)
-	if err != nil {
+	rulesDirectory := config.Default().RulesDirectory
+	if _, err := os.Stat(*path); err == nil {
+		cfg, loadErr := config.Load(*path)
+		if loadErr != nil {
+			return loadErr
+		}
+		rulesDirectory = cfg.RulesDirectory
+	} else if !errors.Is(err, os.ErrNotExist) || *path != "ciradar.json" {
 		return err
 	}
 	rules := analyzer.BuiltinRules()
-	extra, err := analyzer.LoadCustomRules(cfg.RulesDirectory)
+	extra, err := analyzer.LoadCustomRules(rulesDirectory)
 	if err != nil {
 		return err
 	}
