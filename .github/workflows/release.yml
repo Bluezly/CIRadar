@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:18.4
+        env:
+          POSTGRES_USER: ciradar
+          POSTGRES_PASSWORD: ciradar_release_test
+          POSTGRES_DB: ciradar_release_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ciradar -d ciradar_release_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.5"
+          cache: false
+      - name: Validate tag version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SOURCE_VERSION="$(go run ./cmd/ciradar version | awk '{print $3}')"
+          test "$VERSION" = "$SOURCE_VERSION"
+      - name: Static analysis
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.1
+          staticcheck ./...
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...
+      - name: PostgreSQL release integration
+        env:
+          CIRADAR_TEST_POSTGRES_DSN: postgres://ciradar:ciradar_release_test@127.0.0.1:5432/ciradar_release_test?sslmode=disable&pool_max_conns=4
+        run: go test -count=1 -run TestPostgresIntegration ./internal/db
+      - name: Build release assets
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          COMMIT="${GITHUB_SHA::12}"
+          VERSION="$VERSION" BUILD_DATE="$BUILD_DATE" COMMIT="$COMMIT" ./scripts/build.sh
+          git archive --format=zip --prefix="CIRadar-${VERSION}-Source/" -o "dist/CIRadar-${VERSION}-Source.zip" "$GITHUB_SHA"
+          cd dist
+          sha256sum CIRadar-Windows-x64.exe CIRadar-Windows-arm64.exe ciradar-linux-x64 ciradar-linux-arm64 ciradar-darwin-x64 ciradar-darwin-arm64 "CIRadar-${VERSION}-Source.zip" > SHA256SUMS
+      - name: Attest release assets
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            dist/CIRadar-Windows-x64.exe \
+            dist/CIRadar-Windows-arm64.exe \
+            dist/ciradar-linux-x64 \
+            dist/ciradar-linux-arm64 \
+            dist/ciradar-darwin-x64 \
+            dist/ciradar-darwin-arm64 \
+            "dist/CIRadar-${VERSION}-Source.zip" \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --generate-notes \
+            --title "CI Radar ${VERSION}"

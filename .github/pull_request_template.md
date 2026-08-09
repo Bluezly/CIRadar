@@ -1,15 +1,21 @@
-## What changed
+## Summary
 
-## Why
+Describe the user-visible or operator-visible change.
+
+## Reason
+
+Explain the problem being solved and why this approach was chosen.
 
 ## Validation
 
-- [ ] `gofmt -l .` is empty
-- [ ] `go test -race ./...` passes
+- [ ] `make check` passes
+- [ ] `go test -count=1 ./...` passes
+- [ ] `go test -race -count=1 ./...` passes for concurrency-sensitive changes
 - [ ] `go vet ./...` passes
-- [ ] Security and tenant-isolation implications were reviewed
-- [ ] Documentation and release notes were updated when behavior changed
+- [ ] New behavior has regression coverage
+- [ ] Tenant isolation, authentication, outbound network, and secret-handling impact were reviewed where relevant
+- [ ] Documentation and `CHANGELOG.md` were updated when behavior changed
 
 ## Compatibility
 
-Describe configuration, API, database, or migration impact.
+Describe configuration, API, database, migration, and rollout impact. Write `None` when there is no compatibility impact.
