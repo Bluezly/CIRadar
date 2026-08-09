@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	gh "ciradar/internal/github"
-	"ciradar/internal/model"
+	gh "github.com/Bluezly/CIRadar/internal/github"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func CreateGitHubDraftPR(ctx context.Context, client *gh.Client, source model.RepairSource, analysis model.AnalysisResult, patch, branchPrefix string, maximumFiles, maximumLines int) (model.RepairResult, error) {
@@ -62,7 +62,7 @@ func CreateGitHubDraftPR(ctx context.Context, client *gh.Client, source model.Re
 	if base == "" {
 		return result, errors.New("repair base branch is unknown")
 	}
-	branch := sanitizeBranch(firstText(branchPrefix, "ciradar/repair-") + shortID(analysis.ID) + "-" + shortID(plan.ID))
+	branch := sanitizeBranch(firstText(branchPrefix, "github.com/Bluezly/CIRadar/repair-") + shortID(analysis.ID) + "-" + shortID(plan.ID))
 	result.Branch = branch
 	if pull, found, err := client.FindPullRequestByHead(ctx, source.InstallationID, owner, repo, branch, base); err != nil {
 		return result, err
