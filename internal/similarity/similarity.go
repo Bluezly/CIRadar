@@ -10,8 +10,8 @@ import (
 	"strings"
 	"unicode"
 
-	"ciradar/internal/db"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 var ErrAnalysisNotFound = errors.New("analysis not found")

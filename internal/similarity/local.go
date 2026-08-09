@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"ciradar/internal/config"
-	"ciradar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/httpguard"
 )
 
 type wordVectorModel struct {
