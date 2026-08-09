@@ -1,28 +1,28 @@
-# Optional LLM layer
+# Model assistance
 
-The deterministic analyzer remains the source of truth. The optional LLM layer creates a natural-language explanation, a suggested fix, an optional patch, and warnings.
+Model assistance is optional. CI Radar classifies a failure before any model call and keeps the rule-based result as the primary diagnosis.
 
-CI Radar uses two different measurements:
+When enabled, a model can add an explanation, a suggested fix, and an optional patch. Automatic enhancement uses `evidence_strength` and `llm.minimum_score`; manually requested enhancement is not blocked by that threshold.
 
-- `externality_score` ranges from `-100` for code evidence to `+100` for external evidence.
-- `evidence_strength` ranges from `0` to `100` and measures how much evidence supports the diagnosis regardless of direction.
+Automatic draft repair is more restrictive. It requires a code-attributed diagnosis and compares `code_evidence_score` with `repair.minimum_score`. Repair still produces a proposal; it does not auto-merge changes.
 
-`llm.minimum_score` is retained for configuration compatibility, but it now means minimum evidence strength for automatic enhancement. A code diagnosis with `externality_score=-62` and `evidence_strength=62` is eligible when the configured minimum is `60`.
+## Endpoints
 
-The threshold applies only to `auto_enhance`. An explicit authenticated request to enhance an analysis is never rejected because of the automatic threshold.
+CI Radar supports OpenAI-compatible chat/Responses endpoints, native Anthropic Messages, and local endpoints such as Ollama-compatible services. Embeddings can use the configured local or remote provider independently of text generation.
 
-Automatic draft repair additionally requires `Attribution=CODE` and compares `repair.minimum_score` with `code_evidence_score`. The default automatic repair minimum is `60`. Explicit confirmation-gated repair actions do not use the automatic threshold.
+## Data sent to a model
 
-It supports OpenAI-compatible chat and embedding endpoints. Remote providers can use a bring-your-own key; trusted local Qwen, Ollama, or compatible endpoints may omit the API key. Results are cached by deterministic input fingerprint and model.
+Logs, file names, and repository content are treated as untrusted input. Raw logs are not sent. The main controls are:
 
-The prompt treats logs, changed file names, and repository content as untrusted data. Raw logs are not sent. Set `send_redacted_excerpt` and `send_changed_files` independently. The prompt sends the signed externality score and separate code, external, and total evidence values so a model cannot mistake a negative code score for low confidence.
+- `send_redacted_excerpt`
+- `send_changed_files`
+- `send_source_code`
+- `allow_remote_source_code`
+- `data_policy`
+- `block_on_residual_secret`
 
-Remote embedding failures use the configured similarity fallback.
+With source context enabled, CI Radar fetches eligible files from the exact GitHub commit and caps the number and size of files sent. Returned patches are accepted only when they apply to the original, non-truncated source used for the request.
 
-## Source-grounded repair and data policy
+`local_only` is the safest policy for sensitive repositories. `metadata_only` disables excerpts, changed-file names, and source files. `redacted_remote` allows a remote endpoint after redaction and requires an extra opt-in before source code can leave the host.
 
-When `send_source_code` is enabled, CI Radar fetches eligible changed files from the exact GitHub commit. It also extracts likely repository paths from common Go, Python, JavaScript/TypeScript and similar stack traces so the model receives code near the failure, not only a log excerpt. Prompt budgeting truncates oversized files rather than silently deleting all source context. Any returned diff is rejected unless it applies exactly to the original, non-truncated fetched source. A valid diff is still a proposal: tests and human review remain mandatory.
-
-`data_policy=local_only` is the safest option for sensitive code and logs. For remote endpoints, CI Radar redacts labeled secrets, common provider tokens, private keys, JWTs, high-entropy values, and Base64/URL-safe Base64 credentials including line-wrapped payloads. `block_on_residual_secret=true` performs a conservative outbound second pass and blocks the request when risk remains. Redaction cannot prove that every organization-specific secret format is removed; operators should use a local model or `metadata_only` for high-sensitivity repositories. In `metadata_only`, excerpts, changed-file names, and source files are disabled. In `redacted_remote`, source-code transmission additionally requires `allow_remote_source_code=true`; this opt-in should be enabled only after an explicit data review. Anthropic endpoints use the native Messages API with `provider=anthropic` rather than an OpenAI-compatibility shim.
-
-The client supports both OpenAI-compatible Chat Completions and the Responses request shape. These endpoints are not wire-compatible: `/responses` uses `input`, `instructions`, `max_output_tokens`, and `text.format`; chat endpoints use `messages`, `max_tokens`, and `response_format`.
+Redaction covers common credential formats and configured organization patterns, but it cannot guarantee removal of every private token format. Use local-only or metadata-only mode when that uncertainty is not acceptable.

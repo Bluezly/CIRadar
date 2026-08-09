@@ -26,7 +26,7 @@ The script runs the live PostgreSQL integration suite, PostgreSQL protocol/SAML 
 
 ## PostgreSQL tenant-state hydration
 
-Some PostgreSQL operations intentionally hydrate selected entity rows into the shared in-memory `Store` implementation so embedded and PostgreSQL behavior use the same validation and calculation logic. RC.15 narrows quarantine set/remove operations to the single target test-statistics row and single target quarantine row instead of loading every test/quarantine row for the tenant.
+Some PostgreSQL operations intentionally hydrate selected entity rows into the shared in-memory `Store` implementation so embedded and PostgreSQL behavior use the same validation and calculation logic. RC.16 narrows quarantine set/remove operations to the single target test-statistics row and single target quarantine row instead of loading every test/quarantine row for the tenant.
 
 Other tenant-scoped operations may still hydrate bounded sets. Large installations should measure these paths with production-like row counts and retention settings rather than inferring capacity from unit tests.
 

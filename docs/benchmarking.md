@@ -97,4 +97,4 @@ The JSON report also contains per-category TP/FP/FN, the full confusion matrix, 
 
 ## Runtime feedback is not benchmark precision
 
-The `/api/v1/analyses/{id}/feedback` endpoint can collect reviewer verdicts and optional `actual_category`, `actual_cause`, `actual_provider`, and `actual_error_family` labels. `agreement_percent` is a weighted reviewer-agreement signal, not precision. Labeled category and attribution accuracy are calculated only when ground-truth labels are available. The legacy `precision_percent` fields remain compatibility aliases in RC.15 and must not be cited as benchmark precision.
+The `/api/v1/analyses/{id}/feedback` endpoint can collect reviewer verdicts and optional `actual_category`, `actual_cause`, `actual_provider`, and `actual_error_family` labels. `agreement_percent` is a weighted reviewer-agreement signal, not precision. Labeled category and attribution accuracy are calculated only when ground-truth labels are available. The legacy `precision_percent` fields remain compatibility aliases in RC.16 and must not be cited as benchmark precision.
