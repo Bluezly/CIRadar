@@ -1,6 +1,6 @@
 .PHONY: check test race vet staticcheck vuln build windows linux darwin checksums clean
 
-VERSION ?= 1.3.2-oss-rc.15
+VERSION ?= 1.3.2-oss-rc.16
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 STRIP ?= 1

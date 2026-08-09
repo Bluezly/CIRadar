@@ -11,6 +11,12 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git diff --check
 fi
 
+comments="$(grep -RInE '^[[:space:]]*//' --include='*.go' --include='*.js' --exclude-dir=.git --exclude-dir=dist . || true)"
+if [ -n "$comments" ]; then
+  printf '%s\n' "$comments"
+  exit 1
+fi
+
 node --check internal/server/dashboard.js
 python3 scripts/check-doc-links.py
 python3 - <<'PY'
@@ -21,7 +27,7 @@ for path in Path('.').rglob('*.json'):
     json.loads(path.read_text(encoding='utf-8'))
 
 for path in Path('.').rglob('*'):
-    if not path.is_file() or path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.gif', '.zip', '.exe'}:
+    if not path.is_file() or '.git' in path.parts or path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.gif', '.zip', '.exe'}:
         continue
     data = path.read_bytes()
     if b'\x00' in data:
@@ -34,8 +40,6 @@ for path in Path('.').rglob('*'):
     if path.suffix.lower() == '.bat' and '\r\n' not in text:
         raise SystemExit(f'Windows batch file must use CRLF: {path}')
 PY
-
-go test -count=1 ./internal/version
 
 for script in scripts/*.sh; do
   sh -n "$script"
