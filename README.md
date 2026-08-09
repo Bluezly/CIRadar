@@ -1,5 +1,7 @@
 # CI Radar
 
+[![CI](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml) [![CodeQL](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml)
+
 CI Radar is a self-hosted service for diagnosing CI failures and tracking flaky tests across multiple CI systems.
 
 It accepts build logs, webhooks, and JUnit-style reports, turns them into structured failure records, and keeps the results in an embedded store or PostgreSQL. The core diagnosis path is rule-based. Model-assisted explanations and repair suggestions are optional.
@@ -8,10 +10,18 @@ It accepts build logs, webhooks, and JUnit-style reports, turns them into struct
 
 ## Quick start
 
-Build the CLI:
+Clone and build:
 
 ```bash
+git clone https://github.com/Bluezly/CIRadar.git
+cd CIRadar
 go build -o ciradar ./cmd/ciradar
+```
+
+Or install the CLI directly:
+
+```bash
+go install github.com/Bluezly/CIRadar/cmd/ciradar@latest
 ```
 
 Try the analyzer without creating a config file:
