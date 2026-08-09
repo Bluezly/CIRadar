@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func TestPostgresIntegrationObservationLifecycle(t *testing.T) {

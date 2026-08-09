@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/model"
-	"ciradar/internal/pgwire"
+	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/pgwire"
 )
 
 func TestRelationalObjectsRoundTripTenantData(t *testing.T) {

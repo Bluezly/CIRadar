@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func TestPersistenceAndCorrelation(t *testing.T) {

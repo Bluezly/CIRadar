@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func TestFeedbackMetricsSeparatesAgreementFromLabeledAccuracy(t *testing.T) {
