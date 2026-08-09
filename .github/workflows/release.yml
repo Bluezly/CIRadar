@@ -5,15 +5,28 @@ on:
     tags:
       - "v*"
 
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.1.0"
+        required: true
+        type: string
+
 permissions:
   contents: write
   id-token: write
   attestations: write
 
+concurrency:
+  group: release-${{ github.ref }}-${{ inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
+    name: Build and publish release
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+
     services:
       postgres:
         image: postgres:18.4
@@ -28,49 +41,180 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
+
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: "1.26.5"
           cache: true
-      - name: Validate tag version
+
+      - name: Resolve release version
+        id: version
+        shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          SOURCE_VERSION="$(go run ./cmd/ciradar version | awk '{print $3}')"
-          test "$VERSION" = "$SOURCE_VERSION"
-      - name: Static analysis
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            VERSION="${{ inputs.version }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $VERSION"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "Release version: $VERSION"
+
+      - name: Repository checks
+        run: ./scripts/repo-check.sh
+
+      - name: Unit tests
+        run: go test -count=1 ./...
+
+      - name: Race detector
+        run: go test -race -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2026.1
           staticcheck ./...
+
+      - name: Vulnerability scan
+        run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
+
       - name: PostgreSQL release integration
         env:
           CIRADAR_TEST_POSTGRES_DSN: postgres://ciradar:ciradar_release_test@127.0.0.1:5432/ciradar_release_test?sslmode=disable&pool_max_conns=4
-        run: go test -count=1 -run TestPostgresIntegration ./internal/db
-      - name: Build release assets
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          go test \
+            -count=1 \
+            -run TestPostgresIntegration \
+            ./internal/db
+
+      - name: Build release assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           COMMIT="${GITHUB_SHA::12}"
-          VERSION="$VERSION" BUILD_DATE="$BUILD_DATE" COMMIT="$COMMIT" ./scripts/build.sh
-          git archive --format=zip --prefix="CIRadar-${VERSION}-Source/" -o "dist/CIRadar-${VERSION}-Source.zip" "$GITHUB_SHA"
+
+          VERSION="$VERSION" \
+          BUILD_DATE="$BUILD_DATE" \
+          COMMIT="$COMMIT" \
+          ./scripts/build.sh
+
+          git archive \
+            --format=zip \
+            --prefix="CIRadar-${VERSION}-Source/" \
+            -o "dist/CIRadar-${VERSION}-Source.zip" \
+            "$GITHUB_SHA"
+
           cd dist
-          sha256sum CIRadar-Windows-x64.exe CIRadar-Windows-arm64.exe ciradar-linux-x64 ciradar-linux-arm64 ciradar-darwin-x64 ciradar-darwin-arm64 "CIRadar-${VERSION}-Source.zip" > SHA256SUMS
+
+          sha256sum \
+            CIRadar-Windows-x64.exe \
+            CIRadar-Windows-arm64.exe \
+            ciradar-linux-x64 \
+            ciradar-linux-arm64 \
+            ciradar-darwin-x64 \
+            ciradar-darwin-arm64 \
+            "CIRadar-${VERSION}-Source.zip" \
+            > SHA256SUMS
+
+      - name: Verify binaries
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          test -s dist/CIRadar-Windows-x64.exe
+          test -s dist/CIRadar-Windows-arm64.exe
+          test -s dist/ciradar-linux-x64
+          test -s dist/ciradar-linux-arm64
+          test -s dist/ciradar-darwin-x64
+          test -s dist/ciradar-darwin-arm64
+          test -s "dist/CIRadar-${VERSION}-Source.zip"
+          test -s dist/SHA256SUMS
+
+          chmod +x dist/ciradar-linux-x64
+
+          OUTPUT="$(dist/ciradar-linux-x64 version)"
+
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -F "$VERSION"
+
       - name: Attest release assets
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
-          subject-path: dist/*
+          subject-path: |
+            dist/CIRadar-Windows-x64.exe
+            dist/CIRadar-Windows-arm64.exe
+            dist/ciradar-linux-x64
+            dist/ciradar-linux-arm64
+            dist/ciradar-darwin-x64
+            dist/ciradar-darwin-arm64
+            dist/CIRadar-${{ steps.version.outputs.version }}-Source.zip
+            dist/SHA256SUMS
+
+      - name: Create tag for manual release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh api \
+            "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+            >/dev/null 2>&1
+          then
+            echo "Tag ${TAG} already exists."
+          else
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" \
+              -f sha="${GITHUB_SHA}"
+          fi
+
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
+          set -euo pipefail
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists."
+            exit 1
+          fi
+
+          gh release create "$TAG" \
             dist/CIRadar-Windows-x64.exe \
             dist/CIRadar-Windows-arm64.exe \
             dist/ciradar-linux-x64 \
