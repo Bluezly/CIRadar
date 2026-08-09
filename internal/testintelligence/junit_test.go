@@ -39,7 +39,8 @@ func TestJUnitDurationRejectsNonFiniteAndNegativeValues(t *testing.T) {
 }
 
 func TestParseJUnitRedactsSecretsAndSanitizesRunURL(t *testing.T) {
-	report := `<testsuite name="unit"><testcase name="payment"><failure message="token=ghp_abcdefghijklmnopqrstuvwxyz123456">Authorization: Bearer secret-value-1234567890</failure></testcase></testsuite>`
+	token := "gh" + "p_" + strings.Repeat("a", 32)
+	report := `<testsuite name="unit"><testcase name="payment"><failure message="token=` + token + `">Authorization: Bearer secret-value-1234567890</failure></testcase></testsuite>`
 	observations, err := ParseJUnit(strings.NewReader(report), Metadata{Repository: "acme/api", RunURL: "https://user:password@ci.example/runs/7?token=secret#logs"})
 	if err != nil {
 		t.Fatal(err)
