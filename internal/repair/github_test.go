@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	gh "ciradar/internal/github"
-	"ciradar/internal/model"
+	gh "github.com/Bluezly/CIRadar/internal/github"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func TestCreateGitHubDraftRepairPR(t *testing.T) {
@@ -57,7 +57,7 @@ func TestCreateGitHubDraftRepairPR(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/api/pulls":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body["draft"] != true || body["base"] != "feature" || !strings.HasPrefix(body["head"].(string), "ciradar/repair-") {
+			if body["draft"] != true || body["base"] != "feature" || !strings.HasPrefix(body["head"].(string), "github.com/Bluezly/CIRadar/repair-") {
 				t.Fatalf("pull body=%#v", body)
 			}
 			pullCreated = true
@@ -87,7 +87,7 @@ func TestCreateGitHubDraftRepairPR(t *testing.T) {
 	analysis := model.AnalysisResult{ID: "analysis-1234567890", TenantID: "alpha", Attribution: model.AttributionCode, Confidence: model.ConfidenceLikelyCode, Score: -90, ExternalityScore: -90, EvidenceStrength: 90, CodeEvidenceScore: 90, Summary: "retry count is too low"}
 	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", InstallationID: 77, CommitSHA: "abc", BaseBranch: "feature", RunURL: "https://github.example/run/1"}
 	patch := "--- a/src/app.js\n+++ b/src/app.js\n@@ -1 +1 @@\n-const retries = 1;\n+const retries = 2;\n"
-	result, err := CreateGitHubDraftPR(context.Background(), client, source, analysis, patch, "ciradar/repair-", 10, 1000)
+	result, err := CreateGitHubDraftPR(context.Background(), client, source, analysis, patch, "github.com/Bluezly/CIRadar/repair-", 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,11 +164,11 @@ func TestCreateGitHubDraftRepairPRIsIdempotentAcrossLostPersistence(t *testing.T
 	analysis := model.AnalysisResult{ID: "analysis-idempotent", TenantID: "alpha", Attribution: model.AttributionCode, Summary: "retry count is too low"}
 	source := model.RepairSource{TenantID: "alpha", Provider: "github", Repository: "acme/api", InstallationID: 77, CommitSHA: "abc", BaseBranch: "feature"}
 	patch := "--- a/src/app.js\n+++ b/src/app.js\n@@ -1 +1 @@\n-const retries = 1;\n+const retries = 2;\n"
-	first, err := CreateGitHubDraftPR(context.Background(), client, source, analysis, patch, "ciradar/repair-", 10, 1000)
+	first, err := CreateGitHubDraftPR(context.Background(), client, source, analysis, patch, "github.com/Bluezly/CIRadar/repair-", 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := CreateGitHubDraftPR(context.Background(), client, source, analysis, patch, "ciradar/repair-", 10, 1000)
+	second, err := CreateGitHubDraftPR(context.Background(), client, source, analysis, patch, "github.com/Bluezly/CIRadar/repair-", 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
