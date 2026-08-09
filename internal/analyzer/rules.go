@@ -200,5 +200,5 @@ func BuiltinRules() []Rule {
 		{ID: "test-assertion", Category: model.CategoryCodeFailure, Provider: "test-runner", Operation: "test", ErrorFamily: "assertion-failure", Weight: -38, SignalGroup: "deterministic", Summary: "A deterministic test assertion failed", Recommendation: "Inspect the failing assertion and changes affecting the tested behavior.", Patterns: []*regexp.Regexp{re(`AssertionError|expected .* (to equal|but got)|Tests:.*failed`)}, Excludes: []*regexp.Regexp{re(`timeout|ECONNRESET|EAI_AGAIN|connection refused`)}},
 		{ID: "test-flake-retry", Category: model.CategoryTestFlake, Provider: "test-runner", Operation: "test", ErrorFamily: "flaky-retry", Weight: 25, SignalGroup: "flake", Summary: "Test behavior indicates a possible flake", Recommendation: "Rerun the isolated test and inspect timing, ordering, network, or shared-state dependencies.", Patterns: []*regexp.Regexp{re(`flaky test|test.*is flaky|passed on retry|succeeds? on rerun|retrying failed test|test.*intermittent`)}},
 	}
-	return append(rules, ExtendedRules()...)
+	return append(rules, catalogRules()...)
 }
