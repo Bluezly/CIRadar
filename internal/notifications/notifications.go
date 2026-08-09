@@ -20,11 +20,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ciradar/internal/config"
-	"ciradar/internal/db"
-	"ciradar/internal/httpguard"
-	"ciradar/internal/model"
-	"ciradar/internal/version"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/version"
 )
 
 type Dispatcher struct {

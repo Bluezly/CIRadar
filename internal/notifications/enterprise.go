@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/config"
-	"ciradar/internal/httpguard"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func teamsPayload(ev model.NotificationEvent) map[string]any {
