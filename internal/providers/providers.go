@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"ciradar/internal/db"
-	"ciradar/internal/httpguard"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 type Endpoint struct {
