@@ -19,12 +19,12 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/analyzer"
-	"ciradar/internal/config"
-	"ciradar/internal/db"
-	gh "ciradar/internal/github"
-	"ciradar/internal/model"
-	"ciradar/internal/notifications"
+	"github.com/Bluezly/CIRadar/internal/analyzer"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/db"
+	gh "github.com/Bluezly/CIRadar/internal/github"
+	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/notifications"
 )
 
 func testGitHubClient(t *testing.T, handler http.Handler) (*gh.Client, *httptest.Server) {

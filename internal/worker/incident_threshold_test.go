@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ciradar/internal/analyzer"
-	"ciradar/internal/config"
-	"ciradar/internal/db"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/analyzer"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func thresholdTestWorker(t *testing.T) (*Worker, *db.Store) {
