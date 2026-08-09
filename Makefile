@@ -1,11 +1,11 @@
 .PHONY: check test race vet staticcheck vuln build windows linux darwin checksums clean
 
-VERSION ?= 1.3.2-oss-rc.16
+VERSION ?= 1.3.2-oss-rc.17
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 STRIP ?= 1
 STRIP_FLAGS := $(if $(filter 1 true yes,$(STRIP)),-s -w,)
-LDFLAGS := $(STRIP_FLAGS) -X ciradar/internal/version.Version=$(VERSION) -X ciradar/internal/version.Commit=$(COMMIT) -X ciradar/internal/version.BuildDate=$(BUILD_DATE)
+LDFLAGS := $(STRIP_FLAGS) -X github.com/Bluezly/CIRadar/internal/version.Version=$(VERSION) -X github.com/Bluezly/CIRadar/internal/version.Commit=$(COMMIT) -X github.com/Bluezly/CIRadar/internal/version.BuildDate=$(BUILD_DATE)
 
 check:
 	./scripts/repo-check.sh

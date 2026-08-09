@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
 set -eu
-VERSION="${VERSION:-1.3.2-oss-rc.16}"
+VERSION="${VERSION:-1.3.2-oss-rc.17}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 COMMIT="${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || printf unknown)}"
 STRIP="${STRIP:-1}"
-LDFLAGS="-X ciradar/internal/version.Version=$VERSION -X ciradar/internal/version.BuildDate=$BUILD_DATE -X ciradar/internal/version.Commit=$COMMIT"
+LDFLAGS="-X github.com/Bluezly/CIRadar/internal/version.Version=$VERSION -X github.com/Bluezly/CIRadar/internal/version.BuildDate=$BUILD_DATE -X github.com/Bluezly/CIRadar/internal/version.Commit=$COMMIT"
 case "$STRIP" in
   1|true|TRUE|yes|YES) LDFLAGS="-s -w $LDFLAGS" ;;
   0|false|FALSE|no|NO) ;;

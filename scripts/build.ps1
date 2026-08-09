@@ -1,9 +1,9 @@
 $ErrorActionPreference = "Stop"
-$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.2-oss-rc.16" }
+$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.2-oss-rc.17" }
 $BuildDate = if ($env:BUILD_DATE) { $env:BUILD_DATE } else { (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
 try { $Commit = if ($env:COMMIT) { $env:COMMIT } else { (git rev-parse --short HEAD).Trim() } } catch { $Commit = "unknown" }
 $Strip = if ($env:STRIP) { $env:STRIP.ToLowerInvariant() } else { "1" }
-$MetadataFlags = "-X ciradar/internal/version.Version=$Version -X ciradar/internal/version.BuildDate=$BuildDate -X ciradar/internal/version.Commit=$Commit"
+$MetadataFlags = "-X github.com/Bluezly/CIRadar/internal/version.Version=$Version -X github.com/Bluezly/CIRadar/internal/version.BuildDate=$BuildDate -X github.com/Bluezly/CIRadar/internal/version.Commit=$Commit"
 if ($Strip -in @("1", "true", "yes")) {
   $Ldflags = "-s -w $MetadataFlags"
 } elseif ($Strip -in @("0", "false", "no")) {
