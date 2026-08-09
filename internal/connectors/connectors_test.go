@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/config"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func TestWebhookSignatures(t *testing.T) {
