@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/analyzer"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/analyzer"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func ParseReport(format string, r io.Reader, meta Metadata) ([]model.TestObservation, error) {
