@@ -117,7 +117,8 @@ jobs:
           set -euo pipefail
 
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          COMMIT="${GITHUB_SHA::12}"
+          SOURCE_COMMIT="$(git rev-parse HEAD)"
+          COMMIT="${SOURCE_COMMIT:0:12}"
 
           VERSION="$VERSION" \
           BUILD_DATE="$BUILD_DATE" \
@@ -128,7 +129,7 @@ jobs:
             --format=zip \
             --prefix="CIRadar-${VERSION}-Source/" \
             -o "dist/CIRadar-${VERSION}-Source.zip" \
-            "$GITHUB_SHA"
+            "$SOURCE_COMMIT"
 
           cd dist
 
@@ -187,17 +188,32 @@ jobs:
         run: |
           set -euo pipefail
 
+          TARGET_SHA="$(git rev-parse HEAD)"
+
           if gh api \
             "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
             >/dev/null 2>&1
           then
-            echo "Tag ${TAG} already exists."
+            CURRENT_SHA="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" \
+              --jq '.object.sha')"
+
+            if [[ "$CURRENT_SHA" == "$TARGET_SHA" ]]; then
+              echo "Tag ${TAG} already points to ${TARGET_SHA}."
+            else
+              echo "Moving ${TAG} from ${CURRENT_SHA} to ${TARGET_SHA} for an explicit manual republish."
+              gh api \
+                --method PATCH \
+                "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" \
+                -f sha="${TARGET_SHA}" \
+                -F force=true
+            fi
           else
             gh api \
               --method POST \
               "repos/${GITHUB_REPOSITORY}/git/refs" \
               -f ref="refs/tags/${TAG}" \
-              -f sha="${GITHUB_SHA}"
+              -f sha="${TARGET_SHA}"
           fi
 
       - name: Publish GitHub release
@@ -210,19 +226,29 @@ jobs:
           set -euo pipefail
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists."
-            exit 1
+            echo "Release ${TAG} already exists; replacing release assets."
+            gh release upload "$TAG" \
+              dist/CIRadar-Windows-x64.exe \
+              dist/CIRadar-Windows-arm64.exe \
+              dist/ciradar-linux-x64 \
+              dist/ciradar-linux-arm64 \
+              dist/ciradar-darwin-x64 \
+              dist/ciradar-darwin-arm64 \
+              "dist/CIRadar-${VERSION}-Source.zip" \
+              dist/SHA256SUMS \
+              --clobber
+            gh release edit "$TAG" --title "CI Radar ${VERSION}"
+          else
+            gh release create "$TAG" \
+              dist/CIRadar-Windows-x64.exe \
+              dist/CIRadar-Windows-arm64.exe \
+              dist/ciradar-linux-x64 \
+              dist/ciradar-linux-arm64 \
+              dist/ciradar-darwin-x64 \
+              dist/ciradar-darwin-arm64 \
+              "dist/CIRadar-${VERSION}-Source.zip" \
+              dist/SHA256SUMS \
+              --verify-tag \
+              --generate-notes \
+              --title "CI Radar ${VERSION}"
           fi
-
-          gh release create "$TAG" \
-            dist/CIRadar-Windows-x64.exe \
-            dist/CIRadar-Windows-arm64.exe \
-            dist/ciradar-linux-x64 \
-            dist/ciradar-linux-arm64 \
-            dist/ciradar-darwin-x64 \
-            dist/ciradar-darwin-arm64 \
-            "dist/CIRadar-${VERSION}-Source.zip" \
-            dist/SHA256SUMS \
-            --verify-tag \
-            --generate-notes \
-            --title "CI Radar ${VERSION}"
