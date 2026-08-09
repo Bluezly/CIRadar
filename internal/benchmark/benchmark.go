@@ -13,8 +13,8 @@ import (
 	"sort"
 	"strings"
 
-	"ciradar/internal/analyzer"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/analyzer"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 const (
