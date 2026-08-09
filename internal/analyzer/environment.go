@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 var (

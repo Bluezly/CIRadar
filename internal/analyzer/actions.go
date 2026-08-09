@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func SuggestedActions(result model.AnalysisResult) []model.SuggestedAction {

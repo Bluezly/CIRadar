@@ -1,6 +1,6 @@
 package analyzer
 
-import "ciradar/internal/model"
+import "github.com/Bluezly/CIRadar/internal/model"
 
 func catalogNetworkRules() []catalogRuleSpec {
 	return []catalogRuleSpec{
