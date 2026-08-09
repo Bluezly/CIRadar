@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/httpguard"
 )
 
 func TestProviderPollerBlocksPrivateTargets(t *testing.T) {
