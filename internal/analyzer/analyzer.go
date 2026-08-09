@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Bluezly/CIRadar/internal/model"
@@ -24,6 +25,10 @@ type Context struct {
 
 type Analyzer struct {
 	rules               []Rule
+	ruleHintsOnce       sync.Once
+	ruleHints           []rulePatternHints
+	hintMatcherOnce     sync.Once
+	hintMatcher         *literalMatcher
 	redactor            *Redactor
 	fingerprintKey      []byte
 	maxExcerpt          int
@@ -110,9 +115,14 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	redacted := a.redactor.Redact(in.Log)
 	env := ExtractEnvironment(redacted)
 
+	matchLogs := a.prepareMatchLogs(redacted, in.Log)
 	matched := make([]Rule, 0, 4)
-	for _, rule := range a.rules {
-		if matchesRule(rule, redacted) || (redacted != in.Log && matchesRule(rule, in.Log)) {
+	for i, rule := range a.rules {
+		var hints rulePatternHints
+		if matchLogs.hintLines != nil {
+			hints = a.ruleHints[i]
+		}
+		if matchesRuleViews(rule, hints, matchLogs) {
 			matched = append(matched, rule)
 		}
 	}
@@ -294,6 +304,26 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 	return result
 }
 
+func (a *Analyzer) prepareMatchLogs(logs ...string) matchLogSet {
+	large := false
+	for _, log := range logs {
+		if len(log) > maxDirectMatchLogBytes {
+			large = true
+			break
+		}
+	}
+	if !large {
+		return prepareMatchLogs(nil, logs...)
+	}
+	a.ruleHintsOnce.Do(func() {
+		a.ruleHints = buildRulePatternHints(a.rules)
+	})
+	a.hintMatcherOnce.Do(func() {
+		a.hintMatcher = newLiteralMatcher(a.ruleHints)
+	})
+	return prepareMatchLogs(a.hintMatcher, logs...)
+}
+
 func clampEvidenceScore(v int) int {
 	if v < 0 {
 		return 0
@@ -338,27 +368,123 @@ func canonicalMatchLog(log string) string {
 	return replacer.Replace(s)
 }
 
-func matchesRule(rule Rule, log string) bool {
-	canonical := canonicalMatchLog(log)
-	views := []string{log}
-	if canonical != log {
-		views = append(views, canonical)
+const maxDirectMatchLogBytes = 96 * 1024
+
+var diagnosticTerms = []string{
+	"error", "fail", "fatal", "panic", "exception", "warn", "timed out", "timeout",
+	"denied", "forbidden", "unauthorized", "not found", "cannot", "could not", "unable",
+	"invalid", "mismatch", "expected", "actual", "refused", "reset by peer", "unreachable",
+	"terminated", "killed", "exit code", "segmentation", "out of memory", "no space left",
+	"permission", "unsupported", "deprecated", "assert", "result:", "results:", "diff",
+}
+
+func isDiagnosticLine(line string) bool {
+	lower := strings.ToLower(line)
+	trimmed := strings.TrimSpace(lower)
+	if strings.HasPrefix(trimmed, "--- ") || strings.HasPrefix(trimmed, "+++ ") || strings.HasPrefix(trimmed, "\\--- ") {
+		return true
 	}
-	for _, ex := range rule.Excludes {
-		for _, view := range views {
-			if ex.MatchString(view) {
-				return false
-			}
-		}
-	}
-	for _, p := range rule.Patterns {
-		for _, view := range views {
-			if p.MatchString(view) {
-				return true
-			}
+	for _, term := range diagnosticTerms {
+		if strings.Contains(lower, term) {
+			return true
 		}
 	}
 	return false
+}
+
+func compactMatchLog(log string) string {
+	if len(log) <= maxDirectMatchLogBytes {
+		return log
+	}
+
+	normalized := strings.ReplaceAll(log, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	lines := strings.Split(normalized, "\n")
+	selected := make([]bool, len(lines))
+	markRange := func(start, end int) {
+		if start < 0 {
+			start = 0
+		}
+		if end >= len(lines) {
+			end = len(lines) - 1
+		}
+		for i := start; i <= end; i++ {
+			selected[i] = true
+		}
+	}
+
+	markRange(0, 63)
+	markRange(len(lines)-96, len(lines)-1)
+	for i, line := range lines {
+		if isDiagnosticLine(line) {
+			markRange(i-4, i+12)
+		}
+	}
+
+	var b strings.Builder
+	b.Grow(maxDirectMatchLogBytes)
+	previous := -2
+	for i, line := range lines {
+		if !selected[i] {
+			continue
+		}
+		if previous >= 0 && i != previous+1 {
+			b.WriteString("\n... omitted log lines ...\n")
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+		previous = i
+	}
+	return b.String()
+}
+
+func prepareMatchLogs(matcher *literalMatcher, logs ...string) matchLogSet {
+	prepared := matchLogSet{}
+	if matcher != nil {
+		prepared.hintLines = make(map[string][]string)
+	}
+	fastSeen := make(map[string]struct{}, len(logs)*2)
+	fullSeen := make(map[string]struct{}, len(logs)*2)
+	addView := func(dst *[]matchView, seen map[string]struct{}, text string, collectHints bool) {
+		if text == "" {
+			return
+		}
+		if _, ok := seen[text]; ok {
+			return
+		}
+		*dst = append(*dst, matchView{text: text})
+		seen[text] = struct{}{}
+		if collectHints && matcher != nil {
+			for _, line := range strings.Split(text, "\n") {
+				matcher.findLine(line, prepared.hintLines)
+			}
+		}
+	}
+	for _, log := range logs {
+		if log == "" {
+			continue
+		}
+		if matcher == nil {
+			addView(&prepared.fast, fastSeen, log, false)
+			addView(&prepared.fast, fastSeen, canonicalMatchLog(log), false)
+			continue
+		}
+		addView(&prepared.full, fullSeen, log, true)
+		addView(&prepared.full, fullSeen, canonicalMatchLog(log), true)
+		matchLog := compactMatchLog(log)
+		addView(&prepared.fast, fastSeen, matchLog, false)
+		addView(&prepared.fast, fastSeen, canonicalMatchLog(matchLog), false)
+	}
+	return prepared
+}
+
+func matchesRule(rule Rule, log string) bool {
+	if len(log) <= maxDirectMatchLogBytes {
+		return matchesRuleViews(rule, rulePatternHints{}, prepareMatchLogs(nil, log))
+	}
+	hints := buildRulePatternHints([]Rule{rule})
+	matcher := newLiteralMatcher(hints)
+	return matchesRuleViews(rule, hints[0], prepareMatchLogs(matcher, log))
 }
 
 func confidenceFor(score int, category model.Category) model.Confidence {
