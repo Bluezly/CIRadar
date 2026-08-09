@@ -8,7 +8,7 @@ import (
 	"ciradar/internal/model"
 )
 
-func TestRC14BuiltinRuleCountAndUniqueness(t *testing.T) {
+func TestBuiltinRuleCountAndUniqueness(t *testing.T) {
 	rules := BuiltinRules()
 	if len(rules) != 630 {
 		t.Fatalf("builtin rule count=%d want=630", len(rules))
@@ -22,7 +22,7 @@ func TestRC14BuiltinRuleCountAndUniqueness(t *testing.T) {
 	}
 }
 
-func TestRC14RecoveredRepresentativeDiagnoses(t *testing.T) {
+func TestRepresentativeDiagnoses(t *testing.T) {
 	tests := []struct {
 		name        string
 		log         string
@@ -46,7 +46,7 @@ func TestRC14RecoveredRepresentativeDiagnoses(t *testing.T) {
 	}
 }
 
-func TestRC14CrossProjectRegressionCases(t *testing.T) {
+func TestCrossProjectRegressionCases(t *testing.T) {
 	tests := []struct {
 		name        string
 		repository  string

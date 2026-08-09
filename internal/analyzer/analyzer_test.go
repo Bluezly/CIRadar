@@ -465,7 +465,8 @@ func TestRedactionDetectsBase64EncodedCredentialJSON(t *testing.T) {
 }
 
 func TestRedactionDetectsWrappedBase64Secret(t *testing.T) {
-	secret := `{"client_secret":"very-sensitive-value","access_token":"ghp_abcdefghijklmnopqrstuvwxyz1234567890"}`
+	token := "gh" + "p_" + strings.Repeat("a", 36)
+	secret := `{"client_secret":"very-sensitive-value","access_token":"` + token + `"}`
 	encoded := base64.StdEncoding.EncodeToString([]byte(secret))
 	var wrapped strings.Builder
 	for len(encoded) > 20 {
@@ -486,7 +487,7 @@ func TestRedactionDetectsWrappedBase64Secret(t *testing.T) {
 }
 
 func TestRedactionDetectsBase64EncodedRawGitHubToken(t *testing.T) {
-	token := "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+	token := "gh" + "p_" + strings.Repeat("a", 36)
 	encoded := base64.StdEncoding.EncodeToString([]byte(token))
 	got := NewRedactor().Redact("opaque=" + encoded)
 	if strings.Contains(got, encoded) || !strings.Contains(got, "[REDACTED_ENCODED_SECRET]") {
