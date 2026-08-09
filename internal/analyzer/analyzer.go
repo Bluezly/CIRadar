@@ -112,7 +112,7 @@ func (a *Analyzer) Analyze(in model.AnalysisInput, ctx Context) model.AnalysisRe
 
 	matched := make([]Rule, 0, 4)
 	for _, rule := range a.rules {
-		if matchesRule(rule, redacted) {
+		if matchesRule(rule, redacted) || (redacted != in.Log && matchesRule(rule, in.Log)) {
 			matched = append(matched, rule)
 		}
 	}
@@ -314,15 +314,48 @@ func fingerprintValue(key, material []byte) string {
 	return hex.EncodeToString(h[:16])
 }
 
+var (
+	ansiCSIRe = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	ansiOSCRe = regexp.MustCompile(`\x1b\][^\x07]*(?:\x07|\x1b\\)`)
+)
+
+func canonicalMatchLog(log string) string {
+	s := strings.ReplaceAll(log, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = ansiCSIRe.ReplaceAllString(s, "")
+	s = ansiOSCRe.ReplaceAllString(s, "")
+	replacer := strings.NewReplacer(
+		"\u00a0", " ",
+		"\u200b", "",
+		"\u200c", "",
+		"\u200d", "",
+		"\ufeff", "",
+		"‘", "'",
+		"’", "'",
+		"“", `"`,
+		"”", `"`,
+	)
+	return replacer.Replace(s)
+}
+
 func matchesRule(rule Rule, log string) bool {
+	canonical := canonicalMatchLog(log)
+	views := []string{log}
+	if canonical != log {
+		views = append(views, canonical)
+	}
 	for _, ex := range rule.Excludes {
-		if ex.MatchString(log) {
-			return false
+		for _, view := range views {
+			if ex.MatchString(view) {
+				return false
+			}
 		}
 	}
 	for _, p := range rule.Patterns {
-		if p.MatchString(log) {
-			return true
+		for _, view := range views {
+			if p.MatchString(view) {
+				return true
+			}
 		}
 	}
 	return false

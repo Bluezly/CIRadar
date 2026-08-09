@@ -29,6 +29,8 @@ func catalogRules() []Rule {
 	specs = append(specs, catalogCIRules()...)
 	specs = append(specs, catalogRealWorldRules()...)
 	specs = append(specs, catalogOSSRules()...)
+	specs = append(specs, catalogEcosystemRules()...)
+	specs = append(specs, catalogModernRules()...)
 	rules := make([]Rule, 0, len(specs))
 	for _, spec := range specs {
 		rules = append(rules, Rule{ID: spec.id, Category: spec.category, Provider: spec.provider, Operation: spec.operation, ErrorFamily: spec.errorFamily, Summary: spec.summary, Recommendation: spec.recommendation, Weight: spec.weight, SignalGroup: spec.signalGroup, Patterns: []*regexp.Regexp{re(spec.pattern)}})

@@ -10,8 +10,8 @@ import (
 
 func TestBuiltinRuleCountAndUniqueness(t *testing.T) {
 	rules := BuiltinRules()
-	if len(rules) != 850 {
-		t.Fatalf("builtin rule count=%d want=850", len(rules))
+	if len(rules) != 1221 {
+		t.Fatalf("builtin rule count=%d want=1221", len(rules))
 	}
 	seen := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
