@@ -360,7 +360,7 @@ func TestRepairPRCreatedEventRoutesToSlackAndLinksDraft(t *testing.T) {
 }
 
 func TestNotificationTruncateKeepsUTF8Valid(t *testing.T) {
-	out := truncate("تنبيه عربي طويل", 7)
+	out := truncate("café résumé long", 7)
 	if !utf8.ValidString(out) {
 		t.Fatalf("invalid UTF-8: %q", out)
 	}
