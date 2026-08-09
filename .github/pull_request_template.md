@@ -1,14 +1,14 @@
-## What changed?
+## Summary
 
-Describe the change and the problem it solves.
+What changed and why?
 
-## How was it tested?
+## Testing
 
 - [ ] `make check`
 - [ ] `go test -count=1 ./...`
 - [ ] `go vet ./...`
-- [ ] `go test -race -count=1 ./...` when concurrency is involved
+- [ ] `go test -race -count=1 ./...` when the change affects concurrent code
 
 ## Compatibility
 
-List any API, configuration, database, or rollout impact. Write `None` if there is none.
+Note any API, configuration, database, or migration impact. Use `None` when there is none.
