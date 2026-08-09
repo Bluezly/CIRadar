@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/db"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func TestSelectionUsesFile(t *testing.T) {
