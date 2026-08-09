@@ -18,9 +18,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ciradar/internal/config"
-	"ciradar/internal/db"
-	"ciradar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/model"
 )
 
 func testStore(t *testing.T) *db.Store {

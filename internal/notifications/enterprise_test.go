@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ciradar/internal/config"
+	"github.com/Bluezly/CIRadar/internal/config"
 )
 
 func TestEnterpriseHTTPChannels(t *testing.T) {
