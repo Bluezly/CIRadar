@@ -1,175 +1,165 @@
 # CI Radar
 
-CI Radar is a free, self-hosted, open-source CI intelligence platform. It classifies failures with deterministic evidence, correlates incidents, tracks test reliability, measures CI cost and DORA signals, and can add optional local or BYOK AI without replacing the deterministic decision core.
+**Self-hosted CI failure diagnosis and test reliability across multiple CI providers.**
 
-License: AGPL-3.0-or-later.
+CI Radar turns CI logs, webhook events, and test reports into structured diagnoses, correlated incidents, flaky-test history, impact signals, and actionable notifications. Its diagnosis core is deterministic and explainable. Optional model-assisted features are separate, disabled by default, and never replace the core decision path.
 
-Current release notes: `RELEASE-NOTES-OSS-RC14.md`.
+CI Radar is licensed under **AGPL-3.0-or-later** and can be run as a standalone binary or with PostgreSQL for multi-instance deployments.
 
-## What RC.14 includes
+[Arabic README](README.ar.md) · [Documentation](docs/README.md) · [Support](.github/SUPPORT.md) · [Security](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
-- 630 built-in deterministic diagnosis rules spanning CI providers, language/toolchain failures, registries, cloud/infrastructure, data systems, and enterprise/mainframe signatures
-- Tenant-isolated 24-hour diagnostic memory for repeated fingerprints in server/worker flows; benchmark analysis remains stateless
-- 15 CI providers: GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps Pipelines, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build
-- GitHub Checks, sticky GitHub Pull Request comments, full linked GitHub Issue lifecycle (create/read/update/assign/label/close/reopen/lock/comment), and sticky GitLab Merge Request comments
-- relational tenant-scoped PostgreSQL storage or portable embedded storage
-- tenant isolation, RBAC, API keys, encrypted secrets, retention, audit events, trusted proxies, CSP, OIDC, and native SAML SP flow
-- Slack, Teams, Discord, Telegram, email, PagerDuty, Opsgenie, and signed generic webhooks
-- ChatOps for acknowledge, resolve, quarantine, and restore
-- Slack ChatOps workspace-to-tenant binding so a signed action cannot cross tenant boundaries through an embedded button value
-- dedicated `test_quarantined` notifications emitted when automatic quarantine actually succeeds
-- JUnit, Playwright, Jest, pytest, Cypress, and Mocha result ingestion
-- triage-first test history with variants, grouped failures, unique PR impact, critical-test policy, quarantine, CI gates, source impact indexing, and per-test coverage maps
-- a plain table-first dashboard prioritized by unresolved work, affected Pull Requests, and conservative engineering-time loss
-- DORA metrics, runner duration, estimated cost, and historical trends
-- lexical similarity fallback, local static vectors, local neural embeddings through Ollama, or BYOK remote embeddings
-- MCP over stdio and Streamable HTTP with OAuth discovery, PKCE, sessions, SSE, server notifications, and confirmation-gated write tools
-- safe automatic rerun for external failures, disabled by default
-- source-grounded LLM repair suggestions with exact patch validation, confirmation-gated local patch application, optional idempotent GitHub draft repair Pull Requests, and repair-PR notifications
-- Windows, Linux, and macOS builds for amd64 and arm64
+## Why CI Radar
+
+CI failures are usually spread across provider logs, pull requests, reruns, test reports, and chat alerts. CI Radar gives those signals one data model and one operational surface.
+
+- **Deterministic diagnosis:** 630 built-in rules with visible evidence, contradiction handling, explicit `UNKNOWN`, and organization-defined custom rules.
+- **Multi-CI ingestion:** GitHub Actions, GitLab CI, Buildkite, CircleCI, Jenkins, Azure DevOps, Bitrise, TeamCity, Travis CI, AWS CodeBuild, Bitbucket Pipelines, Drone, Semaphore, AppVeyor, and Google Cloud Build.
+- **Incident correlation:** groups repeated fingerprints across repositories while preserving tenant boundaries.
+- **Test reliability:** JUnit-family ingestion, flaky-state history, variants, critical-test policy, quarantine, and automatic quarantine notifications.
+- **Impact-aware test selection:** static import graphs plus optional per-test coverage maps.
+- **Developer workflows:** GitHub Checks, pull-request comments, GitHub Issues, GitLab merge-request comments, Slack/Teams ChatOps, and notification routing.
+- **Operations:** DORA metrics, CI duration and cost estimates, audit events, retention, RBAC, OIDC, SAML, MCP, and PostgreSQL-backed distributed state.
+- **Conservative automation:** external-failure reruns and repair proposals are opt-in; state-changing MCP operations require confirmation.
 
 ## Quick start
 
+### Build from source
+
+The module language level is Go 1.23. Release builds and CI use Go 1.26.5.
+
+```bash
+go build -o ciradar ./cmd/ciradar
+./ciradar init
+./ciradar demo npm-econnreset
+./ciradar serve
+```
+
+Open `http://127.0.0.1:8787/` and sign in with the root token generated by `ciradar init`.
+
+### Use a release binary
+
+Download the binary for your platform from the repository's **Releases** page, verify it against `SHA256SUMS`, and verify the GitHub artifact attestation when provenance matters, then run:
+
 ```bash
 ciradar init
-ciradar demo npm-econnreset
-ciradar demo go-test-failure
+ciradar doctor
 ciradar serve
 ```
 
-`demo` is built into the binary, so the quick start does not depend on files from the source archive. `ciradar init` creates a configuration containing bootstrap secrets with owner-only permissions on POSIX systems. Restrict the file ACL on Windows and move production secrets to environment variables or a secret manager.
+### Docker Compose
 
-Open `http://127.0.0.1:8787/`, choose Session, and sign in with the generated root token.
-
-## API routing and authentication hardening
-
-The dashboard is served only at `/`. Unknown non-API paths return HTTP 404, and every unmatched path under `/api` returns a JSON 404 response. This prevents a misspelled integration endpoint from receiving dashboard HTML with HTTP 200.
-
-Bearer-token and `/auth/token` failures are tracked separately from the general request limit. After 10 failed authentication attempts from one resolved client IP within five minutes, CI Radar applies an exponential delay starting at five seconds and capped at 15 minutes. Trusted-proxy configuration still controls which client IP is used.
-
-## Build integrity and diagnostics
-
-Release builds produce `SHA256SUMS`. Verify a downloaded binary before execution with `sha256sum -c SHA256SUMS` or the equivalent platform tool. A checksum detects corruption or substitution only when the checksum file itself comes from a trusted release channel.
-
-The build scripts strip release binaries by default. Set `STRIP=0` when building an internal diagnostic binary with DWARF data retained. Go panic stacks normally retain function and source-location information even in stripped release builds, but an unstripped build is still more useful for debuggers and post-mortem tooling.
-
-## Dependency and protocol ownership
-
-The Go module intentionally has no third-party Go module dependencies. That reduces supply-chain surface but makes this project responsible for maintaining its custom PostgreSQL wire client and strict SAML parsing/orchestration. PostgreSQL values are sent through the Extended Query Protocol as separate bound parameters rather than interpolated into SQL text, but the wire implementation itself remains project-maintained. SAML XML-signature verification is delegated to the operator-configured `xmlsec1` executable, whose resolved executable is SHA-256 pinned and rechecked before verification; optional integrations such as PostgreSQL, Ollama, and external CI providers remain runtime dependencies when enabled. The custom protocol surfaces should receive independent security review before high-risk production deployment, and a mature PostgreSQL driver remains the preferred long-term replacement if the dependency policy changes.
-
-## PostgreSQL
-
-```json
-{
-  "database_driver": "postgres",
-  "database_url": "env:CIRADAR_DATABASE_URL"
-}
-```
+Create the configuration first, then copy the environment template and fill in **three different secrets** before starting the stack:
 
 ```bash
+ciradar init --config ciradar.json
+cp .env.example .env
+ciradar secret key
+```
+
+Put the output of `ciradar secret key` in `CIRADAR_MASTER_KEY`. Set independent random values for `POSTGRES_PASSWORD` and `CIRADAR_DASHBOARD_SESSION_SECRET`, then set `CIRADAR_PUBLIC_BASE_URL` to the externally reachable HTTPS origin. Do not reuse one secret for another purpose.
+
+```bash
+docker compose up --build
+```
+
+The Compose example keeps PostgreSQL on the internal Docker network and exposes CI Radar on port `8787`. Put a TLS-terminating reverse proxy in front of public deployments.
+
+## How it works
+
+```text
+CI providers / test reports / API
+              |
+       authenticated ingestion
+              |
+       normalized CI events
+              |
+   redaction -> deterministic rules
+              |
+    attribution + fingerprints
+              |
+ incidents / tests / DORA / cost
+              |
+ embedded store or PostgreSQL
+              |
+ dashboard / API / alerts / ChatOps / MCP
+```
+
+The analyzer produces evidence-backed attribution instead of forcing every failure into a known category. Runtime diagnostic memory is tenant-isolated and bounded. The benchmark path stays stateless so product evaluation cannot be improved by previously seen results.
+
+See [Architecture](docs/architecture.md) for component boundaries and [Benchmarking](docs/benchmarking.md) for the accuracy-evidence policy.
+
+## Common commands
+
+```bash
+ciradar analyze build.log
+ciradar baseline --repo owner/repo successful.log
+ciradar incidents --json
+ciradar status --json
+ciradar tests ingest --repo owner/repo --format junit results.xml
+ciradar tests list --repo owner/repo
+ciradar tests select --repo owner/repo --changed src/a.go,src/b.go
 ciradar database check
-ciradar serve
+ciradar rules
+ciradar doctor
+ciradar version
 ```
 
-## Accuracy measurement
+Run `ciradar help` for the complete command list.
 
-Unit tests prove implementation behavior; they do not prove real-world diagnosis accuracy. `ciradar benchmark` evaluates the deterministic analyzer on an external labeled corpus and reports category accuracy, macro precision/recall/F1, UNKNOWN coverage, Wilson confidence intervals, confusion matrices, per-category errors, rule utilization, a dataset SHA-256, and an analyzer-configuration SHA-256. The configuration digest changes when rules or redaction behavior changes, while the private fingerprint key is deliberately excluded because it does not affect classification.
+## Deployment modes
+
+| Mode | Best for | Notes |
+| --- | --- | --- |
+| Embedded | Evaluation, local use, small single-process deployments | Portable state file; no multi-instance coordination |
+| PostgreSQL | Shared state, multiple workers/instances, production-oriented deployments | Tenant-scoped relational state, distributed rate limits, job leases |
+
+PostgreSQL application values are sent with Extended Query Protocol parameters. CI Radar still maintains its own PostgreSQL wire client, so the protocol layer remains an explicit independent-review boundary. Native SAML similarly uses project-maintained parsing/orchestration with signature verification delegated to a pinned `xmlsec1` executable.
+
+Read [PostgreSQL](docs/postgresql.md), [SSO](docs/sso.md), and [Production acceptance](docs/production-acceptance.md) before production rollout.
+
+## Security posture
+
+Security-sensitive defaults are conservative:
+
+- raw log persistence is disabled;
+- remote LLM use is disabled;
+- automatic rerun and automatic quarantine are disabled;
+- MCP writes require an Operator role and confirmation;
+- outbound integrations reject private and metadata-service addresses unless explicitly allowed;
+- browser sessions use HttpOnly/SameSite session cookies and same-origin protections;
+- tenant identity is derived from authenticated context, including explicit Slack workspace-to-tenant binding for ChatOps.
+
+The full threat model, disclosure guidance, and known review boundaries are in [SECURITY.md](SECURITY.md).
+
+## Optional LLM assistance
+
+CI Radar can use local or operator-configured LLM endpoints for explanations and bounded repair proposals. This layer is optional and disabled by default. The deterministic analyzer remains the source of the primary diagnosis. Remote data modes have explicit redaction and source-code controls.
+
+See [LLM integration](docs/llm.md).
+
+## Accuracy and project maturity
+
+The repository includes a reproducible benchmark harness, but the bundled dataset is only a synthetic smoke fixture. It is **not** a product accuracy claim. Publishable precision/recall results require an externally sourced, independently labeled, held-out dataset under the policy in [docs/benchmarking.md](docs/benchmarking.md).
+
+CI Radar is still a release candidate. Automated tests do not prove sustained production scale, replicated PostgreSQL failover, disaster recovery, or real-IdP interoperability. Those checks belong to deployment acceptance and are documented explicitly rather than implied.
+
+## Development
 
 ```bash
-ciradar benchmark --dataset /path/to/dataset.json --split test --output benchmark-report.json
+make check
+make test
+make race
+make vet
 ```
 
-`benchmarks/example` is synthetic smoke-test data and must not be published as a product-accuracy score. `BENCHMARKING.md` defines the held-out labeling and publication policy. CI now runs the synthetic benchmark only as a regression test of the measurement harness.
+CI also runs formatting checks, Staticcheck, live PostgreSQL integration tests, dashboard/config syntax checks, the benchmark smoke gate, and cross-platform builds.
 
-User feedback metrics are kept separate from benchmark precision. `agreement_percent` summarizes correct/partial/incorrect reviewer feedback. Optional `actual_category`, `actual_cause`, `actual_provider`, and `actual_error_family` labels produce labeled accuracy metrics. The older `precision_percent` and `external_precision_percent` response fields remain compatibility aliases for agreement in this release and should not be interpreted as statistical precision.
+For contribution rules and test expectations, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Test impact selection
+## Documentation
 
-Build the repository import graph:
+Start with [docs/README.md](docs/README.md). It links to self-hosting, connectors, test intelligence, ChatOps, SSO, PostgreSQL, MCP, benchmarking, repair/LLM behavior, and production acceptance.
 
-```bash
-ciradar tests index --repo acme/api --root .
-```
+## License
 
-Optionally add exact per-test coverage links:
-
-```bash
-ciradar tests coverage --repo acme/api coverage-map.json
-```
-
-Select impacted tests:
-
-```bash
-ciradar tests select --repo acme/api --changed src/payments.go,src/ledger.go
-```
-
-A repeated local `analyze` command is score-stable by default. Add `--correlate` only when you explicitly want stored cross-run correlation to affect the score.
-
-The signed `externality_score` is directional: negative means code evidence and positive means external evidence. Automation that should work for either direction uses `evidence_strength`; automatic repair uses `code_evidence_score`. A negative score is not low confidence.
-
-The selector reports its strategy, confidence, reasons, impact path, candidates evaluated, graph availability, coverage identity count, and diagnostics when no test is selected. Coverage matches outrank import-graph paths; history and flake signals are secondary. The built-in source index currently parses Go, JavaScript, TypeScript, and Python. Coverage maps work for any language.
-
-## Similarity modes
-
-```json
-{
-  "semantic": {
-    "enabled": true,
-    "mode": "ollama",
-    "local_endpoint": "http://127.0.0.1:11434/api/embed",
-    "local_model": "embeddinggemma"
-  }
-}
-```
-
-Modes:
-
-- `lexical`: transparent FNV bag-of-words fallback, not marketed as embeddings
-- `local-vectors`: local word-vector file
-- `ollama`: local neural embeddings
-- `remote`: BYOK remote embeddings
-
-Every result includes the engine used.
-
-## SSO
-
-OIDC is native. SAML is also handled directly by CI Radar as an SP. SAML XML signatures are verified with a pinned IdP certificate through `xmlsec1`; strict response-shape, binding, algorithm, and replay checks are enabled by default. The parser/orchestration code remains project-maintained and should receive independent review before high-risk deployment. Metadata is available at `/auth/saml/metadata`.
-
-See `SSO.md`.
-
-## MCP
-
-MCP supports:
-
-- stdio
-- Streamable HTTP
-- protected-resource and authorization-server metadata
-- dynamic client registration
-- Authorization Code with PKCE
-- session IDs
-- SSE event streams
-- server notifications
-- Viewer read tools
-- Operator write tools requiring a short-lived human confirmation token
-
-See `MCP.md`.
-
-## Safe rerun and repair
-
-Automatic rerun is off by default. It is considered only when attribution is `EXTERNAL`, confidence exceeds the configured threshold, the category is retry-safe, no provider-wide incident is active, and the run has not already been retried.
-
-Native rerun requests are available for GitHub, GitLab, CircleCI, Buildkite, Travis, Google Cloud Build, Azure DevOps, Bitbucket, Drone, Semaphore, AppVeyor, Bitrise, and TeamCity. Jenkins and AWS CodeBuild can use a same-origin configured retry endpoint.
-
-Repair is separate from rerun. A patch must pass path, size, binary-file, symlink, and confirmation checks. Automatic merge is not implemented.
-
-## Security defaults
-
-- raw log storage disabled
-- redaction before persistence, fingerprints, and optional AI
-- LLM and embeddings optional
-- auto-rerun, auto-quarantine, and auto-repair disabled
-- tenant-scoped API, storage, dashboard, and MCP
-- strict CSP and HttpOnly encrypted dashboard sessions
-- PostgreSQL TLS verification enabled by default
-
-Read `SECURITY.md`, `POSTGRESQL.md`, `CONNECTORS.md`, `TEST-INTELLIGENCE.md`, `MCP.md`, `SELF-HOSTING.md`, `COMPARISONS.md`, `COMPETITOR-BENCHMARK.md`, and `PROJECT-STATUS.md` before production use.
+GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

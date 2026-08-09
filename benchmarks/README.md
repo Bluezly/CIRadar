@@ -10,6 +10,6 @@ Run:
 ciradar benchmark --dataset benchmarks/example/dataset.json --split test
 ```
 
-The authoritative methodology and publication rules are in `BENCHMARKING.md`.
+The authoritative methodology and publication rules are in [docs/benchmarking.md](../docs/benchmarking.md).
 
 A benchmark report records both the resolved dataset SHA-256 and the analyzer SHA-256. Publish both values with any result. The example dataset is synthetic and is only a command/format smoke test.
