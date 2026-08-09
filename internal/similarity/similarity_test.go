@@ -180,3 +180,18 @@ func TestReadResponseBodyRejectsOversizedPayload(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestRemoteEmbeddingErrorDoesNotReadOrExposeLargeBody(t *testing.T) {
+	const secret = "upstream-secret-value"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(secret + strings.Repeat("x", 9<<20)))
+	}))
+	defer server.Close()
+
+	cfg := config.LLMConfig{EmbeddingsEndpoint: server.URL, AllowPrivateNetwork: true, APIKey: "key", Timeout: time.Second}
+	_, err := embedRemote(context.Background(), cfg, "test", []string{"failure"})
+	if err == nil || !strings.Contains(err.Error(), "embedding HTTP 502") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("error=%v", err)
+	}
+}

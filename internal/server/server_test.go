@@ -24,6 +24,7 @@ import (
 	"github.com/Bluezly/CIRadar/internal/config"
 	"github.com/Bluezly/CIRadar/internal/db"
 	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/version"
 )
 
 func testServer(t *testing.T) (*Server, *db.Store, config.Config) {
@@ -1339,5 +1340,26 @@ func TestWriteErrorJSONEscapesHTML(t *testing.T) {
 	}
 	if !strings.Contains(body, `\u003cscript\u003e`) {
 		t.Fatalf("escaped script marker missing: %s", body)
+	}
+}
+
+func TestSourcePageEscapesBuildMetadata(t *testing.T) {
+	oldVersion, oldCommit := version.Version, version.Commit
+	version.Version = `<script>alert("version")</script>`
+	version.Commit = `<img src=x onerror=alert("commit")>`
+	t.Cleanup(func() {
+		version.Version = oldVersion
+		version.Commit = oldCommit
+	})
+
+	s := &Server{}
+	result := httptest.NewRecorder()
+	s.sourcePage(result, httptest.NewRequest(http.MethodGet, "http://ciradar.test/source", nil))
+	body := result.Body.String()
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<img") {
+		t.Fatalf("unescaped build metadata in source page: %s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") || !strings.Contains(body, "&lt;img") {
+		t.Fatalf("escaped build metadata missing: %s", body)
 	}
 }

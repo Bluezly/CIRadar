@@ -409,3 +409,39 @@ func TestRetryReportsUnreadableResponse(t *testing.T) {
 		t.Fatalf("result=%#v", result)
 	}
 }
+
+func TestFetchLogUsesSafeDefaultLimitForInlineLogs(t *testing.T) {
+	for _, limit := range []int64{0, -1} {
+		got, err := FetchLog(context.Background(), config.CIConnector{}, model.CIEvent{InlineLog: "build failed"}, limit)
+		if err != nil || got != "build failed" {
+			t.Fatalf("limit=%d log=%q err=%v", limit, got, err)
+		}
+	}
+}
+
+func TestConnectorHTTPErrorsDoNotExposeResponseBodies(t *testing.T) {
+	const secret = "upstream-secret-value"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"`+secret+`"}`)
+	}))
+	defer srv.Close()
+
+	if _, err := fetchBytes(context.Background(), srv.Client(), srv.URL, 1024, nil); err == nil || !strings.Contains(err.Error(), "http 401") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("fetch error=%v", err)
+	}
+	if err := postForm(context.Background(), srv.Client(), http.MethodPost, srv.URL, nil, nil); err == nil || !strings.Contains(err.Error(), "http 401") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("post error=%v", err)
+	}
+	co := config.CIConnector{Provider: "jenkins", BaseURL: srv.URL, AllowPrivateNetwork: true, RetryURL: srv.URL + "/retry"}
+	if _, err := Retry(context.Background(), co, model.CIEvent{}); err == nil || !strings.Contains(err.Error(), "retry HTTP 401") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("retry error=%v", err)
+	}
+}
+
+func TestAppVeyorRetryRejectsNonNumericBuildID(t *testing.T) {
+	_, _, _, _, err := retryRequest(config.CIConnector{Provider: "appveyor"}, model.CIEvent{Metadata: map[string]string{"build_id": `17,"reRunIncomplete":false,"extra":"x`}})
+	if err == nil || !strings.Contains(err.Error(), "positive numeric build_id") {
+		t.Fatalf("error=%v", err)
+	}
+}

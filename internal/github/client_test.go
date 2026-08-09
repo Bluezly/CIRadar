@@ -254,3 +254,42 @@ func TestGitHubAPIErrorPreservesStatusForProgrammaticHandling(t *testing.T) {
 		t.Fatalf("api error=%#v", apiErr)
 	}
 }
+
+func TestGitHubAPIErrorDoesNotExposeResponseBody(t *testing.T) {
+	const secret = "upstream-secret-value"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"denied","detail":"` + secret + `"}`))
+	}))
+	defer server.Close()
+	client := &Client{baseURL: server.URL, http: server.Client()}
+	var out map[string]any
+	err := client.doJSON(context.Background(), http.MethodGet, "/private", "", nil, &out)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error=%q", err.Error())
+	}
+}
+
+func TestDownloadJobLogDoesNotExposeErrorResponseBody(t *testing.T) {
+	const secret = "upstream-secret-value"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(secret))
+	}))
+	defer server.Close()
+	client := &Client{
+		baseURL:  server.URL,
+		download: server.Client(),
+		tokens: map[int64]cachedToken{
+			1: {Token: "cached", ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}
+	_, err := client.DownloadJobLog(context.Background(), 1, "owner", "repo", 9, 1024)
+	if err == nil || !strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("error=%v", err)
+	}
+}

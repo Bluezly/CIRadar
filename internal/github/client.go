@@ -43,14 +43,13 @@ type APIError struct {
 	Path       string
 	StatusCode int
 	Status     string
-	Body       string
 }
 
 func (e *APIError) Error() string {
 	if e == nil {
 		return "GitHub API error"
 	}
-	return fmt.Sprintf("GitHub API %s %s: %s: %s", e.Method, e.Path, e.Status, e.Body)
+	return fmt.Sprintf("GitHub API %s %s: %s", e.Method, e.Path, e.Status)
 }
 
 func IsStatus(err error, code int) bool {
@@ -224,11 +223,8 @@ func (c *Client) DownloadJobLog(ctx context.Context, installationID int64, owner
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, readErr := readLimitedBody(resp.Body, 1<<20)
-		if readErr != nil {
-			return "", fmt.Errorf("GitHub logs API %s: read error response: %w", resp.Status, readErr)
-		}
-		return "", fmt.Errorf("GitHub logs API %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return "", fmt.Errorf("GitHub logs API %s", resp.Status)
 	}
 	if maxBytes <= 0 {
 		maxBytes = 32 << 20
@@ -307,15 +303,13 @@ func (c *Client) doJSON(ctx context.Context, method, path, token string, body an
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return &APIError{Method: method, Path: path, StatusCode: resp.StatusCode, Status: resp.Status}
+	}
 	responseBody, readErr := readLimitedBody(resp.Body, 8<<20)
 	if readErr != nil {
 		return fmt.Errorf("GitHub API %s %s: read response: %w", method, path, readErr)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if len(responseBody) > 2<<20 {
-			responseBody = responseBody[:2<<20]
-		}
-		return &APIError{Method: method, Path: path, StatusCode: resp.StatusCode, Status: resp.Status, Body: strings.TrimSpace(string(responseBody))}
 	}
 	if out == nil {
 		return nil

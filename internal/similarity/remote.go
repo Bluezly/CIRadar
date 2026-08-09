@@ -156,12 +156,13 @@ func embedRemote(ctx context.Context, cfg config.LLMConfig, modelName string, in
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return nil, fmt.Errorf("embedding HTTP %d", resp.StatusCode)
+	}
 	body, err := readResponseBody(resp.Body, 8<<20)
 	if err != nil {
 		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("embedding HTTP %d", resp.StatusCode)
 	}
 	var output struct {
 		Data []struct {

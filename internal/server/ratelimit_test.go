@@ -303,3 +303,33 @@ func TestStatusCapturePassesBodyAndTracksExplicitUnauthorized(t *testing.T) {
 		t.Fatalf("body=%q", got)
 	}
 }
+
+func TestStatusCaptureTracksImplicitOKWrites(t *testing.T) {
+	result := httptest.NewRecorder()
+	wrapped, capture := captureStatus(result)
+	if _, err := wrapped.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	if capture.status != http.StatusOK {
+		t.Fatalf("captured status=%d", capture.status)
+	}
+	if result.Code != http.StatusOK || result.Body.String() != "ok" {
+		t.Fatalf("response status=%d body=%q", result.Code, result.Body.String())
+	}
+}
+
+func TestStatusCaptureTracksImplicitOKFlush(t *testing.T) {
+	result := httptest.NewRecorder()
+	wrapped, capture := captureStatus(result)
+	flusher, ok := wrapped.(http.Flusher)
+	if !ok {
+		t.Fatal("wrapped response lost flusher support")
+	}
+	flusher.Flush()
+	if capture.status != http.StatusOK {
+		t.Fatalf("captured status=%d", capture.status)
+	}
+	if result.Code != http.StatusOK || !result.Flushed {
+		t.Fatalf("response status=%d flushed=%v", result.Code, result.Flushed)
+	}
+}

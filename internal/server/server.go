@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net"
@@ -210,7 +211,8 @@ func (s *Server) sourcePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, "<!doctype html><html><head><meta charset=utf-8><title>CI Radar source</title><link rel=stylesheet href=/assets/dashboard.css></head><body><main><section class=panel><h1>CI Radar source code</h1><p>This deployment runs free software licensed under AGPL-3.0-or-later.</p><p>The corresponding source archive is distributed beside the server binary. The administrator should set <code>source_url</code> to the exact public source revision for this deployment.</p><p>Version: "+version.Version+" · Commit: "+version.Commit+"</p></section></main></body></html>")
+	page := "<!doctype html><html><head><meta charset=utf-8><title>CI Radar source</title><link rel=stylesheet href=/assets/dashboard.css></head><body><main><section class=panel><h1>CI Radar source code</h1><p>This deployment runs free software licensed under AGPL-3.0-or-later.</p><p>The corresponding source archive is distributed beside the server binary. The administrator should set <code>source_url</code> to the exact public source revision for this deployment.</p><p>Version: " + html.EscapeString(version.Version) + " · Commit: " + html.EscapeString(version.Commit) + "</p></section></main></body></html>"
+	_, _ = io.WriteString(w, page)
 }
 
 func (s *Server) Run(ctx context.Context) error {

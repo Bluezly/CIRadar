@@ -131,16 +131,13 @@ func (p *Poller) fetch(ctx context.Context, ep Endpoint) (model.ProviderStatus, 
 		return model.ProviderStatus{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return model.ProviderStatus{}, fmt.Errorf("provider status endpoint returned %s", resp.Status)
+	}
 	bodyBytes, err := readProviderBody(resp.Body, 1<<20)
 	if err != nil {
 		return model.ProviderStatus{}, fmt.Errorf("read provider status response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		message := bodyBytes
-		if len(message) > 2048 {
-			message = message[:2048]
-		}
-		return model.ProviderStatus{}, fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(message)))
 	}
 	var body summaryResponse
 	if err := json.Unmarshal(bodyBytes, &body); err != nil {

@@ -20,6 +20,8 @@ import (
 	"github.com/Bluezly/CIRadar/internal/secrets"
 )
 
+const MaxLogBytesLimit int64 = 256 << 20
+
 type NotificationChannel struct {
 	Name                     string            `json:"name"`
 	Type                     string            `json:"type"`
@@ -443,6 +445,9 @@ func (c *Config) normalize() error {
 	}
 	if c.MaxLogBytes < 1024 {
 		c.MaxLogBytes = 32 << 20
+	}
+	if c.MaxLogBytes > MaxLogBytesLimit {
+		return fmt.Errorf("max_log_bytes must not exceed %d bytes", MaxLogBytesLimit)
 	}
 	if c.GitHubAPIURL == "" {
 		c.GitHubAPIURL = "https://api.github.com"

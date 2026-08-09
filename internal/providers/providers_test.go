@@ -60,3 +60,17 @@ func TestProviderPollerSuppressesRepeatedWarningsAndLogsRecovery(t *testing.T) {
 		t.Fatalf("recovery log missing: %s", recovered)
 	}
 }
+
+func TestProviderPollerDoesNotExposeUpstreamErrorBody(t *testing.T) {
+	const secret = "upstream-secret-value"
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, secret)
+	}))
+	defer target.Close()
+	poller := &Poller{http: target.Client(), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	_, err := poller.fetch(context.Background(), Endpoint{Name: "test", URL: target.URL})
+	if err == nil || !strings.Contains(err.Error(), "503") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("error=%v", err)
+	}
+}

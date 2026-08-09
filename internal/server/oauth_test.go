@@ -522,3 +522,14 @@ func TestRegisteredOAuthRedirectReturnsOnlyStoredValidURI(t *testing.T) {
 		t.Fatalf("invalid stored redirect accepted as %q", got)
 	}
 }
+
+func TestConstantStringEquality(t *testing.T) {
+	if !constantString("same-value", "same-value") {
+		t.Fatal("equal strings did not compare equal")
+	}
+	for _, candidate := range []string{"different", "same-valu", "same-value-longer"} {
+		if constantString("same-value", candidate) {
+			t.Fatalf("unexpected equality for %q", candidate)
+		}
+	}
+}

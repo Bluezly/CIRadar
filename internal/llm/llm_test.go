@@ -463,3 +463,23 @@ func TestRedactedRemoteSanitizesModelOutputAndDropsSecretPatch(t *testing.T) {
 		t.Fatalf("missing secret-output warning: %#v", out.Warnings)
 	}
 }
+
+func TestEnhanceDoesNotExposeUpstreamErrorBody(t *testing.T) {
+	const secret = "upstream-secret-value"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"` + secret + `"}`))
+	}))
+	defer srv.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.LLMConfig{Enabled: true, Endpoint: srv.URL, AllowPrivateNetwork: true, APIKey: "key", Model: "test", Timeout: time.Second, MaxInputCharacters: 2000, MaxOutputTokens: 200, DataPolicy: "local_only"}
+	analysis := model.AnalysisResult{ID: "upstream-error", TenantID: "default", Category: model.CategoryCodeFailure, Attribution: model.AttributionCode, Score: -80, CreatedAt: time.Now(), Summary: "failure"}
+	_, err = New(cfg, store).Enhance(context.Background(), analysis, nil)
+	if err == nil || !strings.Contains(err.Error(), "LLM HTTP 500") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("error=%v", err)
+	}
+}

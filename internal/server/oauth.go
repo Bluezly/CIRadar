@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -553,14 +554,7 @@ func uniqueStrings(values []string) []string {
 }
 
 func constantString(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var difference byte
-	for index := range a {
-		difference |= a[index] ^ b[index]
-	}
-	return difference == 0
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func randomOpaque(size int) (string, error) {

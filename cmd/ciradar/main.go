@@ -1232,6 +1232,9 @@ func printHuman(r model.AnalysisResult) {
 }
 
 func readInput(path string, max int64) ([]byte, error) {
+	if max <= 0 || max > config.MaxLogBytesLimit {
+		return nil, fmt.Errorf("input size limit must be between 1 and %d bytes", config.MaxLogBytesLimit)
+	}
 	var r io.Reader
 	if path == "-" {
 		r = os.Stdin

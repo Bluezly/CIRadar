@@ -205,3 +205,15 @@ func TestDemoDoesNotRequireConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadInputRejectsInvalidSizeLimits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "input.log")
+	if err := os.WriteFile(path, []byte("failure"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, limit := range []int64{0, -1, config.MaxLogBytesLimit + 1} {
+		if _, err := readInput(path, limit); err == nil || !strings.Contains(err.Error(), "size limit") {
+			t.Fatalf("limit=%d error=%v", limit, err)
+		}
+	}
+}

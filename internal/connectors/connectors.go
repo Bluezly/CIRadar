@@ -900,6 +900,12 @@ func firstTime(a, b time.Time) time.Time {
 }
 
 func FetchLog(ctx context.Context, co config.CIConnector, ev model.CIEvent, max int64) (string, error) {
+	if max <= 0 {
+		max = 32 << 20
+	}
+	if max > config.MaxLogBytesLimit {
+		max = config.MaxLogBytesLimit
+	}
 	if ev.InlineLog != "" {
 		if int64(len(ev.InlineLog)) > max {
 			return ev.InlineLog[:max], nil
@@ -1148,12 +1154,13 @@ func fetchBytes(ctx context.Context, c *http.Client, endpoint string, max int64,
 		return nil, e
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		drainErrorBody(resp.Body)
+		return nil, fmt.Errorf("http %d", resp.StatusCode)
+	}
 	b, e := io.ReadAll(io.LimitReader(resp.Body, max+1))
 	if e != nil {
 		return nil, e
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	if int64(len(b)) > max {
 		b = b[:max]
@@ -1294,12 +1301,13 @@ func postForm(ctx context.Context, client *http.Client, method, endpoint string,
 		return err
 	}
 	defer resp.Body.Close()
-	b, err := readStrictResponseBody(resp.Body, 1<<20)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		drainErrorBody(resp.Body)
+		return fmt.Errorf("http %d", resp.StatusCode)
+	}
+	_, err = readStrictResponseBody(resp.Body, 1<<20)
 	if err != nil {
 		return fmt.Errorf("read HTTP response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
 }
@@ -1339,14 +1347,19 @@ func Retry(ctx context.Context, co config.CIConnector, ev model.CIEvent) (RetryR
 	}
 	defer resp.Body.Close()
 	result := RetryResult{Provider: co.Provider, Endpoint: endpoint, HTTPStatus: resp.StatusCode, RequestID: firstNonEmpty(resp.Header.Get("X-Request-Id"), resp.Header.Get("X-Gitlab-Trace-Id"), resp.Header.Get("X-Circleci-Request-Id"))}
-	responseBody, err := readStrictResponseBody(resp.Body, 1<<20)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		drainErrorBody(resp.Body)
+		return result, fmt.Errorf("retry HTTP %d", resp.StatusCode)
+	}
+	_, err = readStrictResponseBody(resp.Body, 1<<20)
 	if err != nil {
 		return result, fmt.Errorf("read retry response: %w", err)
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return result, fmt.Errorf("retry HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
-	}
 	return result, nil
+}
+
+func drainErrorBody(r io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(r, 64<<10))
 }
 
 func readStrictResponseBody(r io.Reader, max int64) ([]byte, error) {
@@ -1464,7 +1477,15 @@ func retryRequest(co config.CIConnector, ev model.CIEvent) (string, string, stri
 		}
 		endpoint = base + "/api/builds"
 		method = http.MethodPut
-		body = `{"buildId":` + buildID + `,"reRunIncomplete":true}`
+		numericBuildID, err := strconv.ParseInt(buildID, 10, 64)
+		if err != nil || numericBuildID <= 0 {
+			return "", "", "", nil, errors.New("appVeyor retry requires a positive numeric build_id")
+		}
+		bodyBytes, err := json.Marshal(map[string]any{"buildId": numericBuildID, "reRunIncomplete": true})
+		if err != nil {
+			return "", "", "", nil, fmt.Errorf("encode appVeyor retry request: %w", err)
+		}
+		body = string(bodyBytes)
 		headers["Authorization"] = "Bearer " + co.Token
 	case "bitrise":
 		app := firstNonEmpty(ev.Metadata["app_slug"], co.Project)

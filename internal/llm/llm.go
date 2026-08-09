@@ -114,7 +114,7 @@ func (e *Enhancer) EnhanceWithSources(ctx context.Context, analysis model.Analys
 		}
 	}
 	if status < 200 || status >= 300 {
-		return model.LLMEnhancement{}, fmt.Errorf("LLM HTTP %d: %s", status, trim(string(body), 1000))
+		return model.LLMEnhancement{}, fmt.Errorf("LLM HTTP %d", status)
 	}
 	content, usage, err := extractContent(body)
 	if err != nil {

@@ -546,3 +546,16 @@ func TestPublicBaseURLRequiredForNonLoopbackListen(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
+
+func TestMaxLogBytesHasDefensiveUpperBound(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxLogBytes = MaxLogBytesLimit + 1
+	if err := cfg.normalize(); err == nil || !strings.Contains(err.Error(), "max_log_bytes") {
+		t.Fatalf("oversized max_log_bytes accepted: %v", err)
+	}
+	cfg = testConfig()
+	cfg.MaxLogBytes = MaxLogBytesLimit
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("maximum max_log_bytes rejected: %v", err)
+	}
+}

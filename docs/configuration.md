@@ -25,7 +25,7 @@ Use environment variables or a secret manager for production secrets. Do not com
 | `database_url` | PostgreSQL DSN when PostgreSQL mode is enabled |
 | `rules_directory` | Organization-defined deterministic rules |
 | `retention_days` | Retention window for eligible historical data |
-| `max_log_bytes` | Maximum decoded log size accepted for analysis |
+| `max_log_bytes` | Maximum decoded log size accepted for analysis; capped at 256 MiB |
 | `store_raw_logs` | Raw-log persistence; disabled by default |
 | `cross_tenant_correlation` | Cross-tenant correlation; disabled by default |
 
