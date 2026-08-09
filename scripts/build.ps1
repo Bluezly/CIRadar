@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.2-oss-rc.14" }
+$Version = if ($env:VERSION) { $env:VERSION } else { "1.3.2-oss-rc.15" }
 $BuildDate = if ($env:BUILD_DATE) { $env:BUILD_DATE } else { (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ") }
 try { $Commit = if ($env:COMMIT) { $env:COMMIT } else { (git rev-parse --short HEAD).Trim() } } catch { $Commit = "unknown" }
 $Strip = if ($env:STRIP) { $env:STRIP.ToLowerInvariant() } else { "1" }
@@ -13,8 +13,8 @@ if ($Strip -in @("1", "true", "yes")) {
 }
 New-Item -ItemType Directory -Force -Path dist | Out-Null
 Remove-Item -Force -ErrorAction SilentlyContinue dist/SHA256SUMS
-go test ./...
-go test -race ./...
+go test -count=1 ./...
+go test -race -count=1 ./...
 go vet ./...
 $targets = @(
   @{ OS="windows"; Arch="amd64"; Output="dist/CIRadar-Windows-x64.exe" },

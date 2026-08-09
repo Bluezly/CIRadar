@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-VERSION="${VERSION:-1.3.2-oss-rc.14}"
+VERSION="${VERSION:-1.3.2-oss-rc.15}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 COMMIT="${COMMIT:-$(git rev-parse --short HEAD 2>/dev/null || printf unknown)}"
 STRIP="${STRIP:-1}"
@@ -10,10 +10,11 @@ case "$STRIP" in
   0|false|FALSE|no|NO) ;;
   *) printf 'STRIP must be 0 or 1\n' >&2; exit 2 ;;
 esac
+./scripts/repo-check.sh
 mkdir -p dist
 rm -f dist/SHA256SUMS
-go test ./...
-go test -race ./...
+go test -count=1 ./...
+go test -race -count=1 ./...
 go vet ./...
 build(){ CGO_ENABLED=0 GOOS="$1" GOARCH="$2" go build -buildvcs=false -trimpath -ldflags "$LDFLAGS" -o "$3" ./cmd/ciradar; }
 build windows amd64 dist/CIRadar-Windows-x64.exe
