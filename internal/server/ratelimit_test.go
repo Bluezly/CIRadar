@@ -304,13 +304,13 @@ func TestStatusCapturePassesBodyAndTracksExplicitUnauthorized(t *testing.T) {
 	}
 }
 
-func TestStatusCaptureTracksImplicitOKWrites(t *testing.T) {
+func TestStatusCapturePassesImplicitOKWritesWithoutInterceptingBody(t *testing.T) {
 	result := httptest.NewRecorder()
 	wrapped, capture := captureStatus(result)
 	if _, err := wrapped.Write([]byte("ok")); err != nil {
 		t.Fatal(err)
 	}
-	if capture.status != http.StatusOK {
+	if capture.status != 0 {
 		t.Fatalf("captured status=%d", capture.status)
 	}
 	if result.Code != http.StatusOK || result.Body.String() != "ok" {
