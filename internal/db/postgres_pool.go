@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"ciradar/internal/pgwire"
+	"github.com/Bluezly/CIRadar/internal/pgwire"
 )
 
 const defaultPostgresPoolSize = 10

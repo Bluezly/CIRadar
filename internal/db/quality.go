@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/model"
-	"ciradar/internal/testintelligence"
+	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/testintelligence"
 )
 
 func feedbackKey(tenantID, analysisID, actor string) string {
