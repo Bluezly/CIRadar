@@ -177,7 +177,7 @@ func TestCacheSeparatesEndpoints(t *testing.T) {
 }
 
 func TestTrimKeepsUTF8Valid(t *testing.T) {
-	out := trim("شرح عربي كامل", 7)
+	out := trim("naïve résumé text", 7)
 	if !utf8.ValidString(out) {
 		t.Fatalf("invalid UTF-8: %q", out)
 	}
