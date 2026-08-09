@@ -3,9 +3,10 @@ package db
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -114,8 +115,9 @@ func (p *PostgresBackend) AuthFailureRetryAfter(ctx context.Context, keyHash str
 }
 
 func advisoryLockKey(value string) int64 {
-	sum := sha256.Sum256([]byte(value))
-	return int64(binary.BigEndian.Uint64(sum[:8]))
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(value))
+	return int64(h.Sum64() & uint64(math.MaxInt64))
 }
 
 func normalizeAuthFailureKeyHash(keyHash string) (string, error) {
@@ -133,8 +135,11 @@ func normalizeAuthFailureKeyHash(keyHash string) (string, error) {
 }
 
 func authFailureAdvisoryLockKey(keyHash string) int64 {
-	value, _ := strconv.ParseUint(keyHash[:16], 16, 64)
-	return int64(value)
+	value, err := strconv.ParseInt(keyHash[:15], 16, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 func authFailureDelay(failures, threshold int, baseDelay, maxDelay time.Duration) time.Duration {

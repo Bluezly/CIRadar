@@ -166,6 +166,9 @@ func TestAdvisoryLockKeyIsStableAndUsesWideHash(t *testing.T) {
 	if a == b {
 		t.Fatal("distinct advisory lock names unexpectedly collided")
 	}
+	if a < 0 || b < 0 {
+		t.Fatal("advisory lock key exceeded the signed PostgreSQL bigint range")
+	}
 }
 
 func TestAuthFailureKeyHashValidationAndLockKey(t *testing.T) {
@@ -179,6 +182,9 @@ func TestAuthFailureKeyHashValidationAndLockKey(t *testing.T) {
 	}
 	if got := authFailureAdvisoryLockKey(normalized); got != authFailureAdvisoryLockKey(key) {
 		t.Fatal("auth advisory lock key is not stable")
+	}
+	if got := authFailureAdvisoryLockKey(strings.Repeat("f", 64)); got < 0 {
+		t.Fatal("auth advisory lock key exceeded the signed PostgreSQL bigint range")
 	}
 	for _, invalid := range []string{"", "abc", strings.Repeat("g", 64), strings.Repeat("a", 63), strings.Repeat("a", 65)} {
 		if _, err := normalizeAuthFailureKeyHash(invalid); err == nil {

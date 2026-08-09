@@ -28,6 +28,7 @@ func catalogRules() []Rule {
 	specs = append(specs, catalogMainframeRules()...)
 	specs = append(specs, catalogCIRules()...)
 	specs = append(specs, catalogStaticcheckRules()...)
+	specs = append(specs, catalogSecurityScannerRules()...)
 	specs = append(specs, catalogRealWorldRules()...)
 	specs = append(specs, catalogOSSRules()...)
 	specs = append(specs, catalogEcosystemRules()...)
