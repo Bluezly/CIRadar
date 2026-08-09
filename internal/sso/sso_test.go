@@ -571,3 +571,33 @@ func TestValidateJWKUsageRejectsNonSigningMetadata(t *testing.T) {
 		t.Fatalf("valid JWK metadata rejected: %v", err)
 	}
 }
+
+func TestLogoutIgnoresExternalReturnTo(t *testing.T) {
+	m := &Manager{cfg: config.SSOConfig{Mode: "proxy", CookieName: "ciradar_session"}}
+	req := httptest.NewRequest(http.MethodGet, "https://ciradar.example/auth/logout?return_to=https://evil.example/phish", nil)
+	result := httptest.NewRecorder()
+	m.Logout(result, req)
+	if result.Code != http.StatusFound {
+		t.Fatalf("status=%d", result.Code)
+	}
+	if got := result.Header().Get("Location"); got != "/" {
+		t.Fatalf("logout redirect=%q", got)
+	}
+}
+
+func TestOIDCPostLogoutRedirectUsesConfiguredOrigin(t *testing.T) {
+	got := oidcPostLogoutRedirect("https://ciradar.example/auth/callback?code=secret#fragment")
+	if got != "https://ciradar.example/" {
+		t.Fatalf("post logout redirect=%q", got)
+	}
+	for _, invalid := range []string{
+		"",
+		"/auth/callback",
+		"javascript:alert(1)",
+		"https://user:pass@ciradar.example/auth/callback",
+	} {
+		if got := oidcPostLogoutRedirect(invalid); got != "" {
+			t.Fatalf("invalid redirect %q produced %q", invalid, got)
+		}
+	}
+}

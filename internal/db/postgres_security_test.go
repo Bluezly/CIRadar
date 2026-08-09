@@ -167,3 +167,22 @@ func TestAdvisoryLockKeyIsStableAndUsesWideHash(t *testing.T) {
 		t.Fatal("distinct advisory lock names unexpectedly collided")
 	}
 }
+
+func TestAuthFailureKeyHashValidationAndLockKey(t *testing.T) {
+	key := strings.Repeat("ab", 32)
+	normalized, err := normalizeAuthFailureKeyHash(strings.ToUpper(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized != key {
+		t.Fatalf("normalized key=%q", normalized)
+	}
+	if got := authFailureAdvisoryLockKey(normalized); got != authFailureAdvisoryLockKey(key) {
+		t.Fatal("auth advisory lock key is not stable")
+	}
+	for _, invalid := range []string{"", "abc", strings.Repeat("g", 64), strings.Repeat("a", 63), strings.Repeat("a", 65)} {
+		if _, err := normalizeAuthFailureKeyHash(invalid); err == nil {
+			t.Fatalf("invalid auth key hash %q was accepted", invalid)
+		}
+	}
+}

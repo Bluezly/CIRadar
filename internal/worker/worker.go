@@ -21,6 +21,7 @@ import (
 	gh "github.com/Bluezly/CIRadar/internal/github"
 	"github.com/Bluezly/CIRadar/internal/insights"
 	"github.com/Bluezly/CIRadar/internal/llm"
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	"github.com/Bluezly/CIRadar/internal/model"
 	"github.com/Bluezly/CIRadar/internal/notifications"
 	"github.com/Bluezly/CIRadar/internal/providers"
@@ -56,7 +57,7 @@ const (
 
 func (w *Worker) Run(ctx context.Context) {
 	if err := w.store.RequeueStaleJobs(ctx, jobLeaseTimeout); err != nil && !errors.Is(err, context.Canceled) {
-		w.log.Error("requeue stale jobs failed", "error", err)
+		w.log.Error("requeue stale jobs failed", "error_kind", logsafe.Kind(err))
 	}
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -79,7 +80,7 @@ func (w *Worker) loop(ctx context.Context, id string) {
 		}
 		job, err := w.store.ClaimJob(ctx, id)
 		if err != nil {
-			w.log.Error("claim job failed", "error", err)
+			w.log.Error("claim job failed", "error_kind", logsafe.Kind(err))
 			sleep(ctx, 2*time.Second)
 			continue
 		}
@@ -89,12 +90,12 @@ func (w *Worker) loop(ctx context.Context, id string) {
 		}
 		err = w.processWithLease(ctx, *job)
 		if err != nil {
-			w.log.Error("job failed", "job_id", job.ID, "type", job.Type, "error", err)
+			w.log.Error("job failed", "job_id", job.ID, "type", job.Type, "error_kind", logsafe.Kind(err))
 			if failErr := w.store.FailJob(ctx, job.ID, job.LeaseToken, job.Attempts, err.Error()); failErr != nil && !errors.Is(failErr, context.Canceled) {
-				w.log.Error("mark job as failed", "job_id", job.ID, "type", job.Type, "error", failErr)
+				w.log.Error("mark job as failed", "job_id", job.ID, "type", job.Type, "error_kind", logsafe.Kind(failErr))
 			}
 		} else if completeErr := w.store.CompleteJob(ctx, job.ID, job.LeaseToken); completeErr != nil && !errors.Is(completeErr, context.Canceled) {
-			w.log.Error("complete job failed", "job_id", job.ID, "type", job.Type, "error", completeErr)
+			w.log.Error("complete job failed", "job_id", job.ID, "type", job.Type, "error_kind", logsafe.Kind(completeErr))
 		}
 	}
 }
@@ -108,7 +109,7 @@ func (w *Worker) requeueLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := w.store.RequeueStaleJobs(ctx, jobLeaseTimeout); err != nil && !errors.Is(err, context.Canceled) {
-				w.log.Error("requeue stale jobs failed", "error", err)
+				w.log.Error("requeue stale jobs failed", "error_kind", logsafe.Kind(err))
 			}
 		}
 	}
@@ -136,7 +137,7 @@ func (w *Worker) processWithLease(ctx context.Context, job db.Job) error {
 					return
 				}
 				if !errors.Is(err, context.Canceled) {
-					w.log.Error("renew job lease failed", "job_id", job.ID, "type", job.Type, "error", err)
+					w.log.Error("renew job lease failed", "job_id", job.ID, "type", job.Type, "error_kind", logsafe.Kind(err))
 				}
 			}
 		}
@@ -238,7 +239,7 @@ func (w *Worker) process(ctx context.Context, job db.Job) error {
 				status, detail = "error", err.Error()
 			}
 			if updateErr := w.store.UpdateDelivery(ctx, ev.DeliveryID, status, detail); updateErr != nil {
-				w.log.Error("update delivery failed", "delivery_id", ev.DeliveryID, "status", status, "error", updateErr)
+				w.log.Error("update delivery failed", "delivery_id", ev.DeliveryID, "status", status, "error_kind", logsafe.Kind(updateErr))
 			}
 		}
 		return err
@@ -254,7 +255,7 @@ func (w *Worker) process(ctx context.Context, job db.Job) error {
 				status, detail = "error", err.Error()
 			}
 			if updateErr := w.store.UpdateDelivery(ctx, ev.DeliveryID, status, detail); updateErr != nil {
-				w.log.Error("update delivery failed", "delivery_id", ev.DeliveryID, "status", status, "error", updateErr)
+				w.log.Error("update delivery failed", "delivery_id", ev.DeliveryID, "status", status, "error_kind", logsafe.Kind(updateErr))
 			}
 		}
 		return err
@@ -282,7 +283,7 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 	ev.TenantID = tenantID
 	if ev.DurationSeconds > 0 || (!ev.StartedAt.IsZero() && !ev.CompletedAt.IsZero()) {
 		if _, err := insights.RecordUsage(ctx, w.store, ev, co.CostPerMinute, co.Currency); err != nil {
-			w.log.Warn("record CI usage failed", "tenant", tenantID, "provider", ev.Provider, "repository", ev.Repository, "error", err)
+			w.log.Warn("record CI usage failed", "tenant", tenantID, "provider", ev.Provider, "repository", ev.Repository, "error_kind", logsafe.Kind(err))
 		}
 	}
 	logText, err := connectors.FetchLog(ctx, *co, ev, w.cfg.MaxLogBytes)
@@ -304,7 +305,7 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 		}
 		if len(changes) > 0 && w.notifier != nil && w.notifier.Enabled() {
 			if err := w.store.EnqueueForTenant(ctx, tenantID, "notify.event", notifications.EnvironmentChangedEvent(tenantID, ev.Repository, ev.Organization, ev.Workflow, ev.Job, ev.CommitSHA, ev.RunURL, changes), time.Now().UTC()); err != nil {
-				w.log.Error("enqueue environment notification failed", "tenant", tenantID, "repository", ev.Repository, "error", err)
+				w.log.Error("enqueue environment notification failed", "tenant", tenantID, "repository", ev.Repository, "error_kind", logsafe.Kind(err))
 			}
 		}
 		return nil
@@ -329,16 +330,16 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 		return err
 	}
 	if err := w.store.PutObject(ctx, tenantID, "analysis_source", result.ID, model.RepairSource{TenantID: tenantID, Provider: ev.Provider, Repository: ev.Repository, InstallationID: ev.InstallationID, CommitSHA: ev.CommitSHA, BaseBranch: ev.Branch, RunURL: ev.RunURL, PullRequestNumber: ev.PullRequestNumber}); err != nil {
-		w.log.Error("store analysis source failed", "tenant", tenantID, "analysis_id", result.ID, "error", err)
+		w.log.Error("store analysis source failed", "tenant", tenantID, "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 	}
 	if autoEnhanceEligible(w.cfg.LLM, result) {
 		if err := w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID}, time.Now().UTC()); err != nil {
-			w.log.Error("enqueue LLM enhancement failed", "tenant", tenantID, "analysis_id", result.ID, "error", err)
+			w.log.Error("enqueue LLM enhancement failed", "tenant", tenantID, "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 		}
 	}
 	if w.notifier != nil && w.notifier.Enabled() {
 		if err := w.store.EnqueueForTenant(ctx, tenantID, "notify.event", notifications.AnalysisEvent(in, result, w.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-			w.log.Error("enqueue analysis notification failed", "tenant", tenantID, "analysis_id", result.ID, "error", err)
+			w.log.Error("enqueue analysis notification failed", "tenant", tenantID, "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 		}
 	}
 	incident, created, err := w.maybeCreateIncident(ctx, tenantID, in.Repository, result, corr)
@@ -351,19 +352,19 @@ func (w *Worker) processCIEvent(ctx context.Context, ev model.CIEvent) error {
 			kind = "incident_opened"
 		}
 		if err := w.store.EnqueueForTenant(ctx, tenantID, "notify.event", notifications.IncidentEvent(kind, *incident, w.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-			w.log.Error("enqueue incident notification failed", "tenant", tenantID, "incident_id", incident.ID, "error", err)
+			w.log.Error("enqueue incident notification failed", "tenant", tenantID, "incident_id", incident.ID, "error_kind", logsafe.Kind(err))
 		}
 	}
 	if ev.Provider == "gitlab" && ev.MergeRequestIID > 0 && prCommentEligible(w.cfg.PRComments, result) {
 		if shouldPublishDeveloperComment(w.cfg.PRComments.Mode, result) {
 			body := renderDeveloperComment(result, ev.RunURL)
 			if err := connectors.UpsertGitLabMRComment(ctx, *co, ev, "<!-- ci-radar-diagnosis -->", body, w.cfg.PRComments.UpdateExisting); err != nil {
-				w.log.Warn("could not publish GitLab MR comment", "error", err, "repository", ev.Repository, "mr", ev.MergeRequestIID)
+				w.log.Warn("could not publish GitLab MR comment", "error_kind", logsafe.Kind(err), "repository", ev.Repository, "mr", ev.MergeRequestIID)
 			}
 		}
 	}
 	if err := w.maybeRetryCIEvent(ctx, *co, ev, result); err != nil {
-		w.log.Warn("automatic connector retry failed", "provider", ev.Provider, "repository", ev.Repository, "error", err)
+		w.log.Warn("automatic connector retry failed", "provider", ev.Provider, "repository", ev.Repository, "error_kind", logsafe.Kind(err))
 	}
 	return nil
 }
@@ -418,10 +419,10 @@ func (w *Worker) maybeRetryCIEvent(ctx context.Context, co config.CIConnector, e
 		record.Status = "failed"
 		record.Error = retryErr.Error()
 		if err := w.store.PutObject(ctx, ev.TenantID, "automatic_retry", key, record); err != nil {
-			w.log.Error("store failed automatic retry state failed", "tenant", ev.TenantID, "run_id", runKey, "error", err)
+			w.log.Error("store failed automatic retry state failed", "tenant", ev.TenantID, "run_id", runKey, "error_kind", logsafe.Kind(err))
 		}
 		if err := w.store.RecordAudit(ctx, model.AuditEvent{TenantID: ev.TenantID, Actor: "system", Role: model.RoleOperator, Action: "workflow.retry_failed", Resource: "ci_run", ResourceID: runKey, Metadata: map[string]string{"provider": ev.Provider, "repository": ev.Repository, "error": retryErr.Error()}}); err != nil {
-			w.log.Error("record automatic retry failure audit failed", "tenant", ev.TenantID, "run_id", runKey, "error", err)
+			w.log.Error("record automatic retry failure audit failed", "tenant", ev.TenantID, "run_id", runKey, "error_kind", logsafe.Kind(err))
 		}
 		return retryErr
 	}
@@ -432,7 +433,7 @@ func (w *Worker) maybeRetryCIEvent(ctx context.Context, co config.CIConnector, e
 		return err
 	}
 	if err := w.store.RecordAudit(ctx, model.AuditEvent{TenantID: ev.TenantID, Actor: "system", Role: model.RoleOperator, Action: "workflow.retry", Resource: "ci_run", ResourceID: runKey, Metadata: map[string]string{"provider": ev.Provider, "repository": ev.Repository, "request_id": retryResult.RequestID}}); err != nil {
-		w.log.Error("record automatic retry audit failed", "tenant", ev.TenantID, "run_id", runKey, "error", err)
+		w.log.Error("record automatic retry audit failed", "tenant", ev.TenantID, "run_id", runKey, "error_kind", logsafe.Kind(err))
 	}
 	w.log.Info("automatic connector retry requested", "tenant", ev.TenantID, "provider", ev.Provider, "repository", ev.Repository, "run_id", runKey)
 	return nil
@@ -443,7 +444,7 @@ func (w *Worker) maybeCreateDraftRepair(ctx context.Context, analysis model.Anal
 		return
 	}
 	if _, err := w.createDraftRepair(ctx, analysis, enhancement, false); err != nil {
-		w.log.Warn("automatic draft repair failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error", err)
+		w.log.Warn("automatic draft repair failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error_kind", logsafe.Kind(err))
 	}
 }
 
@@ -483,10 +484,10 @@ func (w *Worker) createDraftRepair(ctx context.Context, analysis model.AnalysisR
 	result, createErr := repair.CreateGitHubDraftPR(ctx, w.github, source, analysis, enhancement.Patch, w.cfg.Repair.BranchPrefix, w.cfg.Repair.MaximumFiles, w.cfg.Repair.MaximumLines)
 	if createErr != nil {
 		result = model.RepairResult{TenantID: analysis.TenantID, AnalysisID: analysis.ID, Provider: source.Provider, Status: "failed", Error: createErr.Error(), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-		w.log.Warn("draft repair PR failed", "analysis_id", analysis.ID, "error", createErr)
+		w.log.Warn("draft repair PR failed", "analysis_id", analysis.ID, "error_kind", logsafe.Kind(createErr))
 	}
 	if err := w.store.PutObject(ctx, analysis.TenantID, "repair_result", analysis.ID, result); err != nil {
-		w.log.Error("store draft repair result failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error", err)
+		w.log.Error("store draft repair result failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error_kind", logsafe.Kind(err))
 		createErr = errors.Join(createErr, fmt.Errorf("store draft repair result: %w", err))
 	}
 	action := "repair.draft_pr_failed"
@@ -495,7 +496,7 @@ func (w *Worker) createDraftRepair(ctx context.Context, analysis model.AnalysisR
 	}
 	auditID := "audit_" + strings.ReplaceAll(action, ".", "_") + "_" + analysis.ID
 	if err := w.store.RecordAudit(ctx, model.AuditEvent{ID: auditID, TenantID: analysis.TenantID, Actor: "system", Role: model.RoleOperator, Action: action, Resource: "analysis", ResourceID: analysis.ID, Metadata: map[string]string{"pull_request_url": result.PullRequestURL, "error": result.Error}}); err != nil {
-		w.log.Error("record draft repair audit failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error", err)
+		w.log.Error("record draft repair audit failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "error_kind", logsafe.Kind(err))
 	}
 	if result.Status == "draft_pr_created" {
 		if err := w.enqueueRepairPRNotification(ctx, analysis, source, result); err != nil {
@@ -511,7 +512,7 @@ func (w *Worker) enqueueRepairPRNotification(ctx context.Context, analysis model
 	}
 	event := notifications.RepairPRCreatedEvent(analysis, source, result)
 	if err := w.store.EnqueueForTenant(ctx, analysis.TenantID, "notify.event", event, time.Now().UTC()); err != nil {
-		w.log.Error("enqueue repair PR notification failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "pull_request", result.PullRequestNumber, "error", err)
+		w.log.Error("enqueue repair PR notification failed", "tenant", analysis.TenantID, "analysis_id", analysis.ID, "pull_request", result.PullRequestNumber, "error_kind", logsafe.Kind(err))
 		return err
 	}
 	return nil
@@ -639,7 +640,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		}
 		rate := w.costRate("github", job.RunnerGroupName, job.Labels)
 		if _, err := insights.RecordUsage(ctx, w.store, model.CIEvent{TenantID: tenantID, Provider: "github", Repository: ev.Repository.FullName, Organization: owner, Workflow: ev.WorkflowRun.Name, Job: job.Name, RunID: ev.WorkflowRun.ID, JobID: strconv.FormatInt(job.ID, 10), CommitSHA: ev.WorkflowRun.HeadSHA, Conclusion: job.Conclusion, Status: job.Status, RunURL: ev.WorkflowRun.HTMLURL, StartedAt: job.StartedAt, CompletedAt: job.CompletedAt, DurationSeconds: duration, RunnerClass: firstNonEmpty(job.RunnerGroupName, job.RunnerName), RunnerLabels: job.Labels, Currency: w.cfg.Costs.Currency, OccurredAt: job.CompletedAt}, rate, w.cfg.Costs.Currency); err != nil {
-			w.log.Warn("record GitHub usage failed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "error", err)
+			w.log.Warn("record GitHub usage failed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "error_kind", logsafe.Kind(err))
 		}
 	}
 	if ev.WorkflowRun.Conclusion == "success" {
@@ -647,7 +648,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 	}
 	previousSuccess, err := w.github.HasPreviousSuccessfulRun(ctx, ev.Installation.ID, owner, repo, ev.WorkflowRun.HeadSHA, ev.WorkflowRun.ID)
 	if err != nil {
-		w.log.Warn("could not check previous successful run", "error", err)
+		w.log.Warn("could not check previous successful run", "error_kind", logsafe.Kind(err))
 	}
 	workflowChanged, dependencyChanged := false, false
 	changeInfoAvailable := false
@@ -655,7 +656,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 	if len(ev.WorkflowRun.PullRequests) > 0 {
 		files, err := w.github.ListPullRequestFiles(ctx, ev.Installation.ID, owner, repo, ev.WorkflowRun.PullRequests[0].Number)
 		if err != nil {
-			w.log.Warn("could not inspect PR files", "error", err)
+			w.log.Warn("could not inspect PR files", "error_kind", logsafe.Kind(err))
 		} else {
 			changedFiles = append(changedFiles, files...)
 			workflowChanged, dependencyChanged = classifyChangedFiles(files)
@@ -672,7 +673,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 		}
 		logText, err := w.github.DownloadJobLog(ctx, ev.Installation.ID, owner, repo, job.ID, w.cfg.MaxLogBytes)
 		if err != nil {
-			w.log.Warn("download job log failed", "job", job.Name, "error", err)
+			w.log.Warn("download job log failed", "job", job.Name, "error_kind", logsafe.Kind(err))
 			continue
 		}
 		input := model.AnalysisInput{TenantID: tenantID, SourceProvider: "github", SourceRunURL: ev.WorkflowRun.HTMLURL, Repository: ev.Repository.FullName, Organization: owner, Workflow: ev.WorkflowRun.Name, Job: job.Name, RunID: ev.WorkflowRun.ID, JobID: job.ID, CommitSHA: ev.WorkflowRun.HeadSHA, PreviousSuccess: previousSuccess, WorkflowChanged: workflowChanged, DependencyChanged: dependencyChanged, ChangeInfoAvailable: changeInfoAvailable, Log: logText, OccurredAt: time.Now().UTC()}
@@ -701,33 +702,33 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 			pullRequestNumber = ev.WorkflowRun.PullRequests[0].Number
 		}
 		if err := w.store.PutObject(ctx, tenantID, "analysis_source", result.ID, model.RepairSource{TenantID: tenantID, Provider: "github", Repository: ev.Repository.FullName, InstallationID: ev.Installation.ID, CommitSHA: ev.WorkflowRun.HeadSHA, BaseBranch: ev.WorkflowRun.HeadBranch, RunURL: ev.WorkflowRun.HTMLURL, PullRequestNumber: pullRequestNumber}); err != nil {
-			w.log.Error("store analysis source failed", "tenant", tenantID, "analysis_id", result.ID, "error", err)
+			w.log.Error("store analysis source failed", "tenant", tenantID, "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 		}
 		if autoEnhanceEligible(w.cfg.LLM, result) {
 			if err := w.store.EnqueueForTenant(ctx, tenantID, "llm.enhance", map[string]any{"tenant_id": tenantID, "analysis_id": result.ID, "changed_files": changedFiles}, time.Now().UTC()); err != nil {
-				w.log.Error("enqueue LLM enhancement failed", "tenant", tenantID, "analysis_id", result.ID, "error", err)
+				w.log.Error("enqueue LLM enhancement failed", "tenant", tenantID, "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 			}
 		}
 		diagnoses = append(diagnoses, jobDiagnosis{Job: job, Input: input, Result: result})
 		if w.notifier != nil && w.notifier.Enabled() {
 			if err := w.store.EnqueueForTenant(ctx, input.TenantID, "notify.event", notifications.AnalysisEvent(input, result, w.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-				w.log.Error("enqueue analysis notification failed", "tenant", input.TenantID, "analysis_id", result.ID, "error", err)
+				w.log.Error("enqueue analysis notification failed", "tenant", input.TenantID, "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 			}
 		}
 		incident, created, err := w.maybeCreateIncident(ctx, tenantID, input.Repository, result, corr)
 		if err != nil {
-			w.log.Warn("incident update failed", "error", err)
+			w.log.Warn("incident update failed", "error_kind", logsafe.Kind(err))
 		} else if incident != nil && w.notifier != nil && w.notifier.Enabled() {
 			kind := "incident_updated"
 			if created {
 				kind = "incident_opened"
 			}
 			if err := w.store.EnqueueForTenant(ctx, incident.TenantID, "notify.event", notifications.IncidentEvent(kind, *incident, w.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-				w.log.Error("enqueue incident notification failed", "tenant", incident.TenantID, "incident_id", incident.ID, "error", err)
+				w.log.Error("enqueue incident notification failed", "tenant", incident.TenantID, "incident_id", incident.ID, "error_kind", logsafe.Kind(err))
 			}
 		}
 		if err := w.publishCheck(ctx, ev, job, result, owner, repo); err != nil {
-			w.log.Warn("publish GitHub check failed", "error", err)
+			w.log.Warn("publish GitHub check failed", "error_kind", logsafe.Kind(err))
 		}
 		processed++
 		if result.Score > bestScore {
@@ -737,7 +738,7 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 	}
 	if len(ev.WorkflowRun.PullRequests) > 0 && w.cfg.PRComments.Enabled && len(diagnoses) > 0 {
 		if err := w.publishPRComment(ctx, ev, owner, repo, diagnoses); err != nil {
-			w.log.Warn("publish PR comment failed", "error", err)
+			w.log.Warn("publish PR comment failed", "error_kind", logsafe.Kind(err))
 		}
 	}
 	if processed == 0 {
@@ -745,11 +746,11 @@ func (w *Worker) processWorkflowRun(ctx context.Context, ev model.GitHubWorkflow
 	}
 	if w.cfg.AutomaticRetryEnabled && bestRetryEligible && bestScore >= w.cfg.AutomaticRetryMinScore && ev.WorkflowRun.RunAttempt < 2 {
 		if err := w.github.RerunFailedJobs(ctx, ev.Installation.ID, owner, repo, ev.WorkflowRun.ID); err != nil {
-			w.log.Warn("automatic retry failed", "error", err)
+			w.log.Warn("automatic retry failed", "error_kind", logsafe.Kind(err))
 		} else {
 			w.log.Info("automatic retry requested", "tenant", tenantID, "repository", ev.Repository.FullName, "run_id", ev.WorkflowRun.ID)
 			if err := w.store.RecordAudit(ctx, model.AuditEvent{TenantID: tenantID, Actor: "system", Role: model.RoleOperator, Action: "workflow.retry", Resource: "workflow_run", ResourceID: fmt.Sprint(ev.WorkflowRun.ID), Metadata: map[string]string{"repository": ev.Repository.FullName}}); err != nil {
-				w.log.Error("record workflow retry audit failed", "tenant", tenantID, "run_id", ev.WorkflowRun.ID, "error", err)
+				w.log.Error("record workflow retry audit failed", "tenant", tenantID, "run_id", ev.WorkflowRun.ID, "error_kind", logsafe.Kind(err))
 			}
 		}
 	}
@@ -784,12 +785,12 @@ func (w *Worker) captureSuccessfulEnvironment(ctx context.Context, tenantID stri
 		if len(changes) > 0 {
 			w.log.Info("CI environment changed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "changes", len(changes))
 			if err := w.store.RecordAudit(ctx, model.AuditEvent{TenantID: tenantID, Actor: "system", Role: model.RoleOperator, Action: "environment.changed", Resource: "repository", ResourceID: ev.Repository.FullName, Metadata: map[string]string{"workflow": ev.WorkflowRun.Name, "job": job.Name, "changes": strings.Join(changes, "; ")}}); err != nil {
-				w.log.Error("record environment change audit failed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "error", err)
+				w.log.Error("record environment change audit failed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "error_kind", logsafe.Kind(err))
 			}
 			if w.notifier != nil && w.notifier.Enabled() {
 				event := notifications.EnvironmentChangedEvent(tenantID, ev.Repository.FullName, owner, ev.WorkflowRun.Name, job.Name, ev.WorkflowRun.HeadSHA, ev.WorkflowRun.HTMLURL, changes)
 				if err := w.store.EnqueueForTenant(ctx, tenantID, "notify.event", event, time.Now().UTC()); err != nil {
-					w.log.Error("enqueue environment notification failed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "error", err)
+					w.log.Error("enqueue environment notification failed", "tenant", tenantID, "repository", ev.Repository.FullName, "job", job.Name, "error_kind", logsafe.Kind(err))
 				}
 			}
 		}

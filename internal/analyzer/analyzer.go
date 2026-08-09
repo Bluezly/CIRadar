@@ -335,13 +335,9 @@ func clampEvidenceScore(v int) int {
 }
 
 func fingerprintValue(key, material []byte) string {
-	if len(key) > 0 {
-		mac := hmac.New(sha256.New, key)
-		_, _ = mac.Write(material)
-		return hex.EncodeToString(mac.Sum(nil)[:16])
-	}
-	h := sha256.Sum256(material)
-	return hex.EncodeToString(h[:16])
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(material)
+	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
 
 var (

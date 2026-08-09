@@ -81,8 +81,9 @@ RETURNING count::text,window_start::text,CURRENT_TIMESTAMP::text`
 }
 
 func (p *PostgresBackend) AuthFailureRetryAfter(ctx context.Context, keyHash string, now time.Time) (time.Duration, error) {
-	if strings.TrimSpace(keyHash) == "" || len(keyHash) > 128 {
-		return 0, errors.New("auth failure key hash is invalid")
+	keyHash, err := normalizeAuthFailureKeyHash(keyHash)
+	if err != nil {
+		return 0, err
 	}
 	_ = now
 	c, err := p.connect(ctx)
@@ -117,6 +118,25 @@ func advisoryLockKey(value string) int64 {
 	return int64(binary.BigEndian.Uint64(sum[:8]))
 }
 
+func normalizeAuthFailureKeyHash(keyHash string) (string, error) {
+	keyHash = strings.ToLower(strings.TrimSpace(keyHash))
+	if len(keyHash) != sha256.Size*2 {
+		return "", errors.New("auth failure key hash is invalid")
+	}
+	for _, c := range keyHash {
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			continue
+		}
+		return "", errors.New("auth failure key hash is invalid")
+	}
+	return keyHash, nil
+}
+
+func authFailureAdvisoryLockKey(keyHash string) int64 {
+	value, _ := strconv.ParseUint(keyHash[:16], 16, 64)
+	return int64(value)
+}
+
 func authFailureDelay(failures, threshold int, baseDelay, maxDelay time.Duration) time.Duration {
 	if failures < threshold {
 		return 0
@@ -135,9 +155,9 @@ func authFailureDelay(failures, threshold int, baseDelay, maxDelay time.Duration
 }
 
 func (p *PostgresBackend) RecordAuthFailure(ctx context.Context, keyHash string, threshold int, window, baseDelay, maxDelay time.Duration, now time.Time) (delay time.Duration, err error) {
-	keyHash = strings.TrimSpace(keyHash)
-	if keyHash == "" || len(keyHash) > 128 {
-		return 0, errors.New("auth failure key hash is invalid")
+	keyHash, err = normalizeAuthFailureKeyHash(keyHash)
+	if err != nil {
+		return 0, err
 	}
 	if threshold < 1 || threshold > 1_000_000 {
 		return 0, errors.New("auth failure threshold is invalid")
@@ -174,7 +194,7 @@ func (p *PostgresBackend) RecordAuthFailure(ctx context.Context, keyHash string,
 			rollbackPostgres(c)
 		}
 	}()
-	if err = c.ExecParams(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, advisoryLockKey("ciradar:auth-failure:"+keyHash)); err != nil {
+	if err = c.ExecParams(ctx, `SELECT pg_advisory_xact_lock($1::bigint)`, authFailureAdvisoryLockKey(keyHash)); err != nil {
 		return 0, err
 	}
 	rows, err := c.QueryParams(ctx, `SELECT window_start::text,failures::text,coalesce(blocked_until::text,'') FROM ciradar_auth_failures WHERE key_hash=$1 FOR UPDATE`, keyHash)

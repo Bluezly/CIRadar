@@ -25,6 +25,7 @@ import (
 	"github.com/Bluezly/CIRadar/internal/db"
 	gh "github.com/Bluezly/CIRadar/internal/github"
 	"github.com/Bluezly/CIRadar/internal/insights"
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	mcpserver "github.com/Bluezly/CIRadar/internal/mcp"
 	"github.com/Bluezly/CIRadar/internal/model"
 	"github.com/Bluezly/CIRadar/internal/notifications"
@@ -1113,14 +1114,14 @@ func cmdDoctor(args []string) error {
 	}
 	store, err := openBackend(context.Background(), cfg)
 	if err != nil {
-		fmt.Println("  Database check: FAILED -", err)
+		fmt.Printf("  Database check: FAILED (%s)\n", logsafe.Kind(err))
 		return err
 	}
 	defer store.Close()
 	fmt.Println("  Database check: OK")
 	fmt.Println("  Raw log storage:", cfg.StoreRawLogs, "(recommended: false)")
 	if strings.TrimSpace(cfg.FingerprintHMACKey) == "" {
-		fmt.Println("  Fingerprint HMAC key: MISSING (fingerprints use unsalted SHA-256)")
+		fmt.Println("  Fingerprint HMAC key: MISSING (set one before sharing fingerprints across trust boundaries)")
 	} else {
 		fmt.Println("  Fingerprint HMAC key: PRESENT")
 	}
@@ -1148,14 +1149,14 @@ func cmdDoctor(args []string) error {
 	}
 	extra, err := analyzer.LoadCustomRules(cfg.RulesDirectory)
 	if err != nil {
-		fmt.Println("  Custom rules: FAILED -", err)
+		fmt.Printf("  Custom rules: FAILED (%s)\n", logsafe.Kind(err))
 		return err
 	}
 	fmt.Printf("  Rules: %d built-in + %d custom\n", len(analyzer.BuiltinRules()), len(extra))
 	if cfg.GitHubConfigured() {
 		fmt.Println("  GitHub App config: PRESENT")
 		if _, err := gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL, cfg.GitHubAllowPrivateNetwork); err != nil {
-			fmt.Println("  GitHub key check: FAILED -", err)
+			fmt.Printf("  GitHub key check: FAILED (%s)\n", logsafe.Kind(err))
 			return err
 		}
 		fmt.Println("  GitHub key check: OK")
@@ -1959,20 +1960,20 @@ func maintenanceLoop(ctx context.Context, store db.Backend, cfg config.Config, l
 			resolvedItems, err := store.ResolveStaleIncidentsDetailed(ctx, time.Now().UTC().Add(-cfg.IncidentResolveAfter))
 			resolved := len(resolvedItems)
 			if err != nil {
-				log.Warn("incident maintenance failed", "error", err)
+				log.Warn("incident maintenance failed", "error_kind", logsafe.Kind(err))
 			} else if resolved > 0 {
 				log.Info("stale incidents resolved", "count", resolved)
 				if cfg.Notifications.Enabled {
 					for _, i := range resolvedItems {
 						if err := store.EnqueueForTenant(ctx, i.TenantID, "notify.event", notifications.IncidentEvent("incident_resolved", i, cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-							log.Error("enqueue incident resolution notification failed", "tenant", i.TenantID, "incident_id", i.ID, "error", err)
+							log.Error("enqueue incident resolution notification failed", "tenant", i.TenantID, "incident_id", i.ID, "error_kind", logsafe.Kind(err))
 						}
 					}
 				}
 			}
 		case <-cleanupTicker.C:
 			if err := store.Cleanup(ctx, cfg.RetentionDays); err != nil {
-				log.Warn("cleanup failed", "error", err)
+				log.Warn("cleanup failed", "error_kind", logsafe.Kind(err))
 			}
 		}
 	}

@@ -284,3 +284,22 @@ func TestOAuthRoutesUseTighterRateLimitScopes(t *testing.T) {
 		})
 	}
 }
+
+func TestStatusCapturePassesBodyAndTracksExplicitUnauthorized(t *testing.T) {
+	result := httptest.NewRecorder()
+	wrapped, capture := captureStatus(result)
+	wrapped.WriteHeader(http.StatusUnauthorized)
+	body := []byte(`<script>alert("x")</script>`)
+	if _, err := wrapped.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if capture.status != http.StatusUnauthorized {
+		t.Fatalf("captured status=%d", capture.status)
+	}
+	if result.Code != http.StatusUnauthorized {
+		t.Fatalf("response status=%d", result.Code)
+	}
+	if got := result.Body.String(); got != string(body) {
+		t.Fatalf("body=%q", got)
+	}
+}

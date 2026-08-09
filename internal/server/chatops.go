@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	"github.com/Bluezly/CIRadar/internal/model"
 )
 
@@ -231,7 +232,7 @@ func (s *Server) performChatActionForTenant(r *http.Request, value, actor, bound
 			return "", e
 		}
 		if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "incident.acknowledge.chatops", Resource: "incident", ResourceID: id, Metadata: map[string]string{"channel": "chatops"}}); err != nil {
-			s.log.Error("record ChatOps acknowledgement audit failed", "tenant_id", tenant, "incident_id", id, "error", err)
+			s.log.Error("record ChatOps acknowledgement audit failed", "error_kind", logsafe.Kind(err))
 		}
 		return "CI Radar acknowledged incident " + inc.Title, nil
 	case "resolve":
@@ -243,7 +244,7 @@ func (s *Server) performChatActionForTenant(r *http.Request, value, actor, bound
 			return "", e
 		}
 		if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "incident.resolve.chatops", Resource: "incident", ResourceID: id, Metadata: map[string]string{"channel": "chatops"}}); err != nil {
-			s.log.Error("record ChatOps resolution audit failed", "tenant_id", tenant, "incident_id", id, "error", err)
+			s.log.Error("record ChatOps resolution audit failed", "error_kind", logsafe.Kind(err))
 		}
 		return "CI Radar resolved incident " + inc.Title, nil
 	case "quarantine":
@@ -256,7 +257,7 @@ func (s *Server) performChatActionForTenant(r *http.Request, value, actor, bound
 			return "", e
 		}
 		if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: tenant, Actor: actor, Role: model.RoleOperator, Action: "test.quarantine.chatops", Resource: "test", ResourceID: id}); err != nil {
-			s.log.Error("record ChatOps quarantine audit failed", "tenant_id", tenant, "test_key", id, "error", err)
+			s.log.Error("record ChatOps quarantine audit failed", "error_kind", logsafe.Kind(err))
 		}
 		return "CI Radar quarantined test until " + q.ExpiresAt.Format(time.RFC3339), nil
 	default:

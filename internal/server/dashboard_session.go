@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	"github.com/Bluezly/CIRadar/internal/model"
 )
 
@@ -132,7 +133,7 @@ func (s *Server) authenticateDashboardSession(r *http.Request) (model.Principal,
 	}
 	tenant, err := s.store.GetTenant(r.Context(), session.Principal.TenantID)
 	if err != nil {
-		s.log.Error("dashboard session tenant lookup failed", "tenant_id", session.Principal.TenantID, "error", err)
+		s.log.Error("dashboard session tenant lookup failed", "error_kind", logsafe.Kind(err))
 		return model.Principal{}, false
 	}
 	if tenant == nil || !tenant.Enabled {
@@ -147,7 +148,7 @@ func (s *Server) authenticateDashboardSession(r *http.Request) (model.Principal,
 	if session.Principal.APIKeyID != "" {
 		key, err := s.store.GetAPIKey(r.Context(), session.Principal.TenantID, session.Principal.APIKeyID)
 		if err != nil {
-			s.log.Error("dashboard session API key lookup failed", "tenant_id", session.Principal.TenantID, "api_key_id", session.Principal.APIKeyID, "error", err)
+			s.log.Error("dashboard session API key lookup failed", "error_kind", logsafe.Kind(err))
 			return model.Principal{}, false
 		}
 		if key == nil || !key.RevokedAt.IsZero() {
@@ -169,7 +170,7 @@ func (s *Server) authenticateToken(ctx context.Context, token, tenant string) (m
 	if s.cfg.AdminToken != "" && secureEqual(token, s.cfg.AdminToken) {
 		t, err := s.store.GetTenant(ctx, tenant)
 		if err != nil {
-			s.log.Error("admin token tenant lookup failed", "tenant_id", tenant, "error", err)
+			s.log.Error("admin token tenant lookup failed", "error_kind", logsafe.Kind(err))
 			return model.Principal{}, false
 		}
 		if t == nil || !t.Enabled {
@@ -179,7 +180,7 @@ func (s *Server) authenticateToken(ctx context.Context, token, tenant string) (m
 	}
 	p, err := s.store.AuthenticateAPIKey(ctx, token)
 	if err != nil {
-		s.log.Error("API key authentication lookup failed", "error", err)
+		s.log.Error("API key authentication lookup failed", "error_kind", logsafe.Kind(err))
 		return model.Principal{}, false
 	}
 	if p != nil {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 )
 
 const (
@@ -170,7 +171,7 @@ func (w *rateLimitWarning) log(logger *slog.Logger, message string, err error) {
 	}
 	w.last = now
 	w.mu.Unlock()
-	logger.Warn(message, "error", err)
+	logger.Warn(message, "error_kind", logsafe.Kind(err))
 }
 
 func rateLimitKey(secret, key string) string {
@@ -357,17 +358,7 @@ func (w *statusCapture) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
-func (w *statusCapture) Write(body []byte) (int, error) {
-	if w.status == 0 {
-		w.WriteHeader(http.StatusOK)
-	}
-	return w.ResponseWriter.Write(body)
-}
-
 func (w *statusCaptureFlusher) Flush() {
-	if w.status == 0 {
-		w.WriteHeader(http.StatusOK)
-	}
 	w.flusher.Flush()
 }
 

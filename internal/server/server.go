@@ -25,6 +25,7 @@ import (
 	gh "github.com/Bluezly/CIRadar/internal/github"
 	"github.com/Bluezly/CIRadar/internal/insights"
 	"github.com/Bluezly/CIRadar/internal/llm"
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	"github.com/Bluezly/CIRadar/internal/marketplace"
 	mcpserver "github.com/Bluezly/CIRadar/internal/mcp"
 	"github.com/Bluezly/CIRadar/internal/model"
@@ -69,7 +70,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	if cfg.GitHubAppID > 0 && strings.TrimSpace(cfg.GitHubPrivateKeyPath) != "" {
 		client, err := gh.New(cfg.GitHubAppID, cfg.GitHubPrivateKeyPath, cfg.GitHubAPIURL, cfg.GitHubAllowPrivateNetwork)
 		if err != nil {
-			log.Error("GitHub API client initialization failed", "error", err)
+			log.Error("GitHub API client initialization failed", "error_kind", logsafe.Kind(err))
 		} else {
 			s.github = client
 		}
@@ -81,7 +82,7 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 		}
 		mgr, err := sso.New(cfg.SSO, replayGuard)
 		if err != nil {
-			log.Error("SSO initialization failed", "error", err)
+			log.Error("SSO initialization failed", "error_kind", logsafe.Kind(err))
 		} else {
 			s.sso = mgr
 		}
@@ -718,7 +719,7 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 		owner := "ci-radar"
 		profile, profileErr := s.store.GetRepositoryProfile(r.Context(), p.TenantID, q.Get("repository"))
 		if profileErr != nil {
-			s.log.Error("load repository profile for auto-quarantine failed", "tenant_id", p.TenantID, "repository", q.Get("repository"), "error", profileErr)
+			s.log.Error("load repository profile for auto-quarantine failed", "error_kind", logsafe.Kind(profileErr))
 		} else if profile != nil {
 			if profile.Owner != "" {
 				owner = profile.Owner
@@ -735,13 +736,13 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 				auto = append(auto, qu)
 				autoQuarantined[st.TestKey] = struct{}{}
 				if auditErr := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: "system", Role: model.RoleOperator, Action: "test.auto_quarantine", Resource: "test", ResourceID: st.TestKey, Metadata: map[string]string{"repository": st.Repository, "score": fmt.Sprintf("%.1f", st.FlakeScore)}}); auditErr != nil {
-					s.log.Error("record auto-quarantine audit failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", auditErr)
+					s.log.Error("record auto-quarantine audit failed", "error_kind", logsafe.Kind(auditErr))
 				}
 				if enqueueErr := s.store.EnqueueForTenant(r.Context(), p.TenantID, "notify.event", notifications.TestQuarantinedEvent(st, qu, s.cfg.PublicBaseURL), time.Now().UTC()); enqueueErr != nil {
-					s.log.Error("enqueue auto-quarantine notification failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", enqueueErr)
+					s.log.Error("enqueue auto-quarantine notification failed", "error_kind", logsafe.Kind(enqueueErr))
 				}
 			} else {
-				s.log.Error("auto-quarantine test failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", e)
+				s.log.Error("auto-quarantine test failed", "error_kind", logsafe.Kind(e))
 			}
 		}
 	}
@@ -749,7 +750,7 @@ func (s *Server) ingestTestReport(w http.ResponseWriter, r *http.Request) {
 		_, quarantinedNow := autoQuarantined[st.TestKey]
 		if st.Classification == "flaky" && !st.Quarantined && !quarantinedNow {
 			if enqueueErr := s.store.EnqueueForTenant(r.Context(), p.TenantID, "notify.event", notifications.FlakyTestEvent(st, s.cfg.PublicBaseURL), time.Now().UTC()); enqueueErr != nil {
-				s.log.Error("enqueue flaky-test notification failed", "tenant_id", p.TenantID, "test_key", st.TestKey, "error", enqueueErr)
+				s.log.Error("enqueue flaky-test notification failed", "error_kind", logsafe.Kind(enqueueErr))
 			}
 		}
 	}
@@ -1062,12 +1063,12 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.cfg.Notifications.Enabled {
 		if err := s.store.EnqueueForTenant(r.Context(), in.TenantID, "notify.event", notifications.AnalysisEvent(in, result, s.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-			s.log.Error("analysis notification enqueue failed", "analysis_id", result.ID, "tenant_id", in.TenantID, "error", err)
+			s.log.Error("analysis notification enqueue failed", "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 		}
 	}
 	incident, created, err := s.maybeIncident(r.Context(), p.TenantID, in.Repository, result, corr)
 	if err != nil {
-		s.log.Error("incident update failed", "analysis_id", result.ID, "tenant_id", p.TenantID, "error", err)
+		s.log.Error("incident update failed", "analysis_id", result.ID, "error_kind", logsafe.Kind(err))
 		w.Header().Set("X-CI-Radar-Warning", "incident-update-failed")
 	}
 	if incident != nil && s.cfg.Notifications.Enabled {
@@ -1076,7 +1077,7 @@ func (s *Server) analyze(w http.ResponseWriter, r *http.Request) {
 			kind = "incident_opened"
 		}
 		if err := s.store.EnqueueForTenant(r.Context(), incident.TenantID, "notify.event", notifications.IncidentEvent(kind, *incident, s.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-			s.log.Error("incident notification enqueue failed", "incident_id", incident.ID, "tenant_id", incident.TenantID, "error", err)
+			s.log.Error("incident notification enqueue failed", "incident_id", incident.ID, "error_kind", logsafe.Kind(err))
 		}
 	}
 	s.audit(r, "analysis.create", "analysis", result.ID, map[string]string{"repository": in.Repository, "category": string(result.Category)})
@@ -1144,7 +1145,7 @@ func (s *Server) changeIncidentState(w http.ResponseWriter, r *http.Request, sta
 	}
 	if s.cfg.Notifications.Enabled {
 		if err := s.store.EnqueueForTenant(r.Context(), inc.TenantID, "notify.event", notifications.IncidentEvent(kind, *inc, s.cfg.PublicBaseURL), time.Now().UTC()); err != nil {
-			s.log.Error("incident notification enqueue failed", "incident_id", inc.ID, "tenant_id", inc.TenantID, "error", err)
+			s.log.Error("incident notification enqueue failed", "incident_id", inc.ID, "error_kind", logsafe.Kind(err))
 		}
 	}
 	s.audit(r, "incident."+state, "incident", inc.ID, map[string]string{"note": body.Note})
@@ -1566,7 +1567,7 @@ func (s *Server) ciWebhook(provider string) http.HandlerFunc {
 
 func (s *Server) recordTerminalDelivery(ctx context.Context, deliveryID, eventType, status, detail string) {
 	if _, err := s.store.RecordTerminalDelivery(ctx, deliveryID, eventType, status, detail); err != nil {
-		s.log.Error("record webhook delivery failed", "delivery_id", deliveryID, "event_type", eventType, "error", err)
+		s.log.Error("record webhook delivery failed", "delivery_id", deliveryID, "error_kind", logsafe.Kind(err))
 	}
 }
 
@@ -1637,7 +1638,7 @@ func (s *Server) githubMarketplaceWebhook(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		var postCommitErr *marketplace.PostCommitError
 		if errors.As(err, &postCommitErr) {
-			s.log.Error("marketplace webhook applied with warning", "delivery_id", delivery, "tenant_id", subscription.TenantID, "error", postCommitErr)
+			s.log.Error("marketplace webhook applied with warning", "delivery_id", delivery, "error_kind", logsafe.Kind(postCommitErr))
 			s.updateDeliveryStatus(r.Context(), delivery, "processed", "audit event was not recorded")
 			writeJSON(w, http.StatusOK, map[string]any{"status": "processed", "tenant_id": subscription.TenantID, "plan": subscription.PlanName, "subscription_status": subscription.Status, "audit_recorded": false, "warning": "subscription updated, but its audit event could not be recorded"})
 			return
@@ -1723,7 +1724,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateDeliveryStatus(ctx context.Context, deliveryID, status, detail string) {
 	if err := s.store.UpdateDelivery(ctx, deliveryID, status, detail); err != nil {
-		s.log.Error("update webhook delivery failed", "delivery_id", deliveryID, "status", status, "error", err)
+		s.log.Error("update webhook delivery failed", "delivery_id", deliveryID, "status", status, "error_kind", logsafe.Kind(err))
 	}
 }
 
@@ -1864,7 +1865,7 @@ func (s *Server) authenticate(r *http.Request) (model.Principal, bool) {
 		if p, ok := s.sso.Authenticate(r); ok {
 			t, err := s.store.GetTenant(r.Context(), p.TenantID)
 			if err != nil {
-				s.log.Error("SSO tenant lookup failed", "tenant_id", p.TenantID, "error", err)
+				s.log.Error("SSO tenant lookup failed", "error_kind", logsafe.Kind(err))
 				return model.Principal{}, false
 			}
 			if t != nil && t.Enabled {
@@ -1875,7 +1876,7 @@ func (s *Server) authenticate(r *http.Request) (model.Principal, bool) {
 	if token == "" && s.cfg.AllowUnauthenticatedLocalhost && isLoopback(s.ipResolver.resolve(r)) {
 		t, err := s.store.GetTenant(r.Context(), s.cfg.DefaultTenantID)
 		if err != nil {
-			s.log.Error("localhost tenant lookup failed", "tenant_id", s.cfg.DefaultTenantID, "error", err)
+			s.log.Error("localhost tenant lookup failed", "error_kind", logsafe.Kind(err))
 			return model.Principal{}, false
 		}
 		if t == nil || !t.Enabled {
@@ -1912,7 +1913,7 @@ func isLoopback(remote string) bool {
 func (s *Server) audit(r *http.Request, action, resource, id string, metadata map[string]string) {
 	p := principal(r)
 	if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: p.TenantID, Actor: p.Name, Role: p.Role, Action: action, Resource: resource, ResourceID: id, RemoteIP: s.ipResolver.resolve(r), RequestID: requestIDFrom(r), Metadata: metadata}); err != nil {
-		s.log.Error("audit record failed", "action", action, "resource", resource, "resource_id", id, "tenant_id", p.TenantID, "error", err)
+		s.log.Error("audit record failed", "action", action, "resource", resource, "error_kind", logsafe.Kind(err))
 	}
 }
 
@@ -2091,7 +2092,7 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst 
 
 func (s *Server) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	requestID := requestIDFrom(r)
-	s.log.Error("request failed", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "error", err)
+	s.log.Error("request failed", "request_id", requestID, "method", r.Method, "path", r.URL.Path, "error_kind", logsafe.Kind(err))
 	message := "internal server error"
 	if requestID != "" {
 		message += "; request_id=" + requestID

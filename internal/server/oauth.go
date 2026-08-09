@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	"github.com/Bluezly/CIRadar/internal/model"
 	"github.com/Bluezly/CIRadar/internal/secrets"
 )
@@ -202,7 +203,12 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client, ok := s.oauthClient(r.Context(), clientID)
-	if !ok || !containsString(client.RedirectURIs, redirectURI) {
+	if !ok {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client", "unknown client or redirect URI")
+		return
+	}
+	redirectURI, ok = registeredOAuthRedirect(client.RedirectURIs, redirectURI)
+	if !ok {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client", "unknown client or redirect URI")
 		return
 	}
@@ -247,7 +253,7 @@ func (s *Server) oauthAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := oauthConsentTemplate.Execute(w, oauthConsentPage{ClientName: clientName, RedirectURI: redirectURI, TenantID: p.TenantID, Scope: scope, Fields: fields}); err != nil {
-			s.log.Error("render OAuth consent page", "error", err)
+			s.log.Error("render OAuth consent page", "error_kind", logsafe.Kind(err))
 		}
 		return
 	}
@@ -440,6 +446,17 @@ func openOAuthValue(secret, purpose, value string, out any) error {
 		return err
 	}
 	return json.Unmarshal([]byte(plain), out)
+}
+
+func registeredOAuthRedirect(allowed []string, requested string) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	for _, candidate := range allowed {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == requested && validOAuthRedirect(candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 func validOAuthRedirect(raw string) bool {

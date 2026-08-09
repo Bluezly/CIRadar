@@ -498,3 +498,27 @@ func TestDeletedOAuthClientCannotRedeemPendingCode(t *testing.T) {
 		t.Fatalf("token redemption after client deletion status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestRegisteredOAuthRedirectReturnsOnlyStoredValidURI(t *testing.T) {
+	allowed := []string{
+		"https://client.example/callback",
+		"http://127.0.0.1:9876/callback",
+	}
+	got, ok := registeredOAuthRedirect(allowed, "https://client.example/callback")
+	if !ok || got != allowed[0] {
+		t.Fatalf("redirect=%q ok=%v", got, ok)
+	}
+	for _, requested := range []string{
+		"https://evil.example/callback",
+		"//evil.example/callback",
+		"javascript:alert(1)",
+		"https://client.example/callback#fragment",
+	} {
+		if got, ok := registeredOAuthRedirect(allowed, requested); ok || got != "" {
+			t.Fatalf("unregistered redirect %q accepted as %q", requested, got)
+		}
+	}
+	if got, ok := registeredOAuthRedirect([]string{"javascript:alert(1)"}, "javascript:alert(1)"); ok || got != "" {
+		t.Fatalf("invalid stored redirect accepted as %q", got)
+	}
+}

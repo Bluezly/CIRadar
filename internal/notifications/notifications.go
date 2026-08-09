@@ -23,6 +23,7 @@ import (
 	"github.com/Bluezly/CIRadar/internal/config"
 	"github.com/Bluezly/CIRadar/internal/db"
 	"github.com/Bluezly/CIRadar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	"github.com/Bluezly/CIRadar/internal/model"
 	"github.com/Bluezly/CIRadar/internal/version"
 )
@@ -77,7 +78,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, ev model.NotificationEvent) e
 		if err := d.dispatchChannel(ctx, ch, ev); err != nil {
 			var pe *permanentError
 			if errors.As(err, &pe) {
-				d.log.Warn("notification permanently failed", "channel", ch.Name, "event_id", ev.ID, "error", pe.Error())
+				d.log.Warn("notification permanently failed", "channel", ch.Name, "event_id", ev.ID, "error_kind", logsafe.Kind(pe))
 				continue
 			}
 			retryable = append(retryable, fmt.Errorf("%s: %w", ch.Name, err))

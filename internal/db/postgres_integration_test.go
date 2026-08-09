@@ -148,7 +148,7 @@ func TestPostgresIntegrationDistributedSecurityState(t *testing.T) {
 		t.Fatalf("second distributed rate-limit take: allowed=%v retry=%s err=%v", allowed, retry, err)
 	}
 
-	key := "auth-" + suffix
+	key := fmt.Sprintf("%064x", time.Now().UnixNano())
 	if delay, err := first.RecordAuthFailure(ctx, key, 2, time.Minute, 5*time.Second, time.Minute, time.Now()); err != nil || delay != 0 {
 		t.Fatalf("first auth failure: delay=%s err=%v", delay, err)
 	}

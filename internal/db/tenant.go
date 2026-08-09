@@ -340,7 +340,7 @@ func (s *Store) ListAudit(ctx context.Context, tenantID string, limit int) ([]mo
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]model.AuditEvent, 0, limit)
+	out := make([]model.AuditEvent, 0)
 	for i := len(s.state.AuditOrder) - 1; i >= 0 && len(out) < limit; i-- {
 		if e, ok := s.state.AuditEvents[s.state.AuditOrder[i]]; ok && e.TenantID == tenantID {
 			out = append(out, cloneAuditEvent(e))

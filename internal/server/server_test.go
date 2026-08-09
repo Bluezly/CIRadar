@@ -1193,7 +1193,8 @@ func TestMetricEndpointsReturnBadRequestForInvalidRange(t *testing.T) {
 }
 
 func TestInternalErrorsDoNotLeakBackendDetails(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var logOutput bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logOutput, nil))
 	s := &Server{log: log}
 	req := httptest.NewRequest(http.MethodGet, "http://ciradar.test/api/v1/status", nil)
 	req = req.WithContext(context.WithValue(req.Context(), requestIDKey, "req-safe-123"))
@@ -1208,6 +1209,13 @@ func TestInternalErrorsDoNotLeakBackendDetails(t *testing.T) {
 	}
 	if !strings.Contains(body, "req-safe-123") {
 		t.Fatalf("request id missing: %s", body)
+	}
+	logged := logOutput.String()
+	if strings.Contains(logged, "super-secret") || strings.Contains(logged, "db.internal") || strings.Contains(logged, "password=") {
+		t.Fatalf("internal details leaked to logs: %s", logged)
+	}
+	if !strings.Contains(logged, "error_kind=error") {
+		t.Fatalf("safe error classification missing from logs: %s", logged)
 	}
 }
 
@@ -1319,5 +1327,17 @@ func TestFeedbackSeedsTenantDiagnosticMemory(t *testing.T) {
 	recalled := s.analyzer.AnalyzeWithMemory(input, analyzer.Context{})
 	if recalled.Category != model.CategoryCodeFailure || recalled.Provider != "private-build" || recalled.ErrorFamily != "tenant-confirmed" {
 		t.Fatalf("recalled=%+v", recalled)
+	}
+}
+
+func TestWriteErrorJSONEscapesHTML(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeError(rr, http.StatusBadRequest, `<script>alert("x")</script>`)
+	body := rr.Body.String()
+	if strings.Contains(body, "<script>") || strings.Contains(body, "</script>") {
+		t.Fatalf("HTML was emitted without JSON escaping: %s", body)
+	}
+	if !strings.Contains(body, `\u003cscript\u003e`) {
+		t.Fatalf("escaped script marker missing: %s", body)
 	}
 }

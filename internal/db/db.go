@@ -1189,7 +1189,7 @@ func (s *Store) ListAnalysesForTenant(ctx context.Context, tenantID string, limi
 	if limit < 1 || limit > 500 {
 		limit = 50
 	}
-	out := make([]model.AnalysisResult, 0, limit)
+	out := make([]model.AnalysisResult, 0)
 	for i := len(s.state.AnalysisOrder) - 1; i >= 0 && len(out) < limit; i-- {
 		if a, ok := s.state.Analyses[s.state.AnalysisOrder[i]]; ok && normalizeTenant(a.TenantID) == tenantID {
 			out = append(out, cloneAnalysisResult(a.Result))
@@ -1526,7 +1526,7 @@ func (s *Store) ListNotificationDeliveriesForTenant(ctx context.Context, tenantI
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	out := make([]model.NotificationDelivery, 0, limit)
+	out := make([]model.NotificationDelivery, 0)
 	for i := len(s.state.NotificationOrder) - 1; i >= 0 && len(out) < limit; i-- {
 		if d, ok := s.state.NotificationDeliveries[s.state.NotificationOrder[i]]; ok && normalizeTenant(d.TenantID) == tenantID {
 			out = append(out, d)

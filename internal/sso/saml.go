@@ -181,7 +181,7 @@ func (m *Manager) samlCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, flow.ReturnTo, http.StatusFound)
+	http.Redirect(w, r, safeReturnTo(flow.ReturnTo), http.StatusFound)
 }
 
 type samlShape struct {

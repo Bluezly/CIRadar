@@ -257,20 +257,38 @@ func (m *Manager) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session creation failed", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, flow.ReturnTo, http.StatusFound)
+	http.Redirect(w, r, safeReturnTo(flow.ReturnTo), http.StatusFound)
 }
 
 func (m *Manager) Logout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: m.cfg.CookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: m.cfg.CookieSecure, SameSite: http.SameSiteLaxMode})
-	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
 	if m.cfg.Mode == "oidc" {
 		if d, err := m.getDiscovery(r.Context()); err == nil && d.EndSessionEndpoint != "" {
-			q := url.Values{"post_logout_redirect_uri": []string{returnTo}}
-			http.Redirect(w, r, d.EndSessionEndpoint+"?"+q.Encode(), http.StatusFound)
+			destination := d.EndSessionEndpoint
+			if postLogout := oidcPostLogoutRedirect(m.cfg.RedirectURL); postLogout != "" {
+				q := url.Values{"post_logout_redirect_uri": []string{postLogout}}
+				destination += "?" + q.Encode()
+			}
+			http.Redirect(w, r, destination, http.StatusFound)
 			return
 		}
 	}
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+func oidcPostLogoutRedirect(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" {
+		return ""
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") && !strings.EqualFold(parsed.Scheme, "http") {
+		return ""
+	}
+	parsed.Path = "/"
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func (m *Manager) Authenticate(r *http.Request) (*model.Principal, bool) {
