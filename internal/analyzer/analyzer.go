@@ -739,10 +739,6 @@ func observedFailureScore(line string, matched []Rule) int {
 	return score
 }
 
-func extractExcerpt(log string, matched []Rule, max int) string {
-	return extractExcerptAt(log, matched, findObservedFailure(log, matched).Index, max)
-}
-
 func extractExcerptAt(log string, matched []Rule, observedIndex, max int) string {
 	if log == "" {
 		return ""
