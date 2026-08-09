@@ -552,15 +552,6 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
-func containsString(values []string, expected string) bool {
-	for _, value := range values {
-		if constantString(value, expected) {
-			return true
-		}
-	}
-	return false
-}
-
 func constantString(a, b string) bool {
 	if len(a) != len(b) {
 		return false
