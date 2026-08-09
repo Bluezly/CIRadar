@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"ciradar/internal/httpguard"
+	"github.com/Bluezly/CIRadar/internal/httpguard"
 )
 
 type Client struct {
