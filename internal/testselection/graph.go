@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"ciradar/internal/db"
-	"ciradar/internal/model"
-	"ciradar/internal/version"
+	"github.com/Bluezly/CIRadar/internal/db"
+	"github.com/Bluezly/CIRadar/internal/model"
+	"github.com/Bluezly/CIRadar/internal/version"
 )
 
 var jsImportPattern = regexp.MustCompile(`(?m)(?:import\s+(?:[^'\"]+?\s+from\s+)?|export\s+[^'\"]*?\s+from\s+|require\s*\(|import\s*\()\s*['\"]([^'\"]+)['\"]`)
