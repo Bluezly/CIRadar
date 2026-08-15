@@ -16,7 +16,6 @@
   --success:#78c69d;
   --info:#8ba9de;
   --violet:#b5a1de;
-  --shadow:0 14px 40px rgba(0,0,0,.28);
   --radius:8px;
 }
 body.light{
@@ -36,7 +35,6 @@ body.light{
   --success:#25734b;
   --info:#345e9e;
   --violet:#6547a1;
-  --shadow:0 14px 40px rgba(0,0,0,.08);
 }
 *{box-sizing:border-box}
 html{background:var(--bg)}
@@ -82,7 +80,7 @@ input,select,textarea{
   color:var(--text);padding:10px 11px
 }
 input::placeholder{color:var(--subtle)}
-input:focus,select:focus,textarea:focus{border-color:var(--muted);box-shadow:0 0 0 1px var(--muted)}
+input:focus,select:focus,textarea:focus{border-color:var(--muted)}
 .login-submit{width:100%;padding:10px 13px}
 .advanced-login{border:1px solid var(--border);border-radius:7px;background:var(--surface);padding:0 11px}
 .advanced-login summary{cursor:pointer;color:var(--muted);font-size:12px;padding:9px 0}
@@ -124,9 +122,6 @@ input:focus,select:focus,textarea:focus{border-color:var(--muted);box-shadow:0 0
 .nav button.active svg{stroke-width:1.9}
 .nav b:empty{display:none}
 .nav b{min-width:21px;padding:1px 5px;border:1px solid var(--border);border-radius:10px;color:var(--muted);font-size:10px;font-weight:600;text-align:center}
-.sidebar-foot{margin-top:auto;display:flex;justify-content:space-between;gap:12px;padding:16px 8px 0;border-top:1px solid var(--border);color:var(--subtle);font-size:10px}
-.sidebar-foot a{text-decoration:none}
-.sidebar-foot a:hover{color:var(--text)}
 .workspace{min-width:0}
 .topbar{
   position:sticky;z-index:12;top:0;display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
@@ -148,7 +143,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--muted);box-shadow:0 0
 .session-button svg{width:14px;height:14px}
 .session-menu{
   position:absolute;right:0;top:calc(100% + 8px);width:220px;padding:8px;border:1px solid var(--border-strong);
-  border-radius:8px;background:var(--surface-2);box-shadow:var(--shadow)
+  border-radius:8px;background:var(--surface-2)
 }
 .session-meta{display:grid;gap:3px;padding:8px}
 .session-meta b{font-size:12px}
@@ -262,7 +257,7 @@ td small{display:block;margin-top:4px;color:var(--muted);line-height:1.35}
 .history-item:last-child,.failure-item:last-child,.audit-item:last-child{border-bottom:0}
 .history-item p,.failure-item p,.audit-item p{margin:2px 0 0;font-size:10px}
 .history-item a{color:var(--info);text-decoration:none}
-.modal{width:min(480px,92vw);padding:0;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);color:var(--text);box-shadow:var(--shadow)}
+.modal{width:min(480px,92vw);padding:0;border:1px solid var(--border-strong);border-radius:8px;background:var(--surface);color:var(--text)}
 .modal::backdrop{background:rgba(0,0,0,.65)}
 .modal form{display:grid;gap:13px;padding:19px}
 .modal header{display:flex;justify-content:space-between;align-items:flex-start}
@@ -287,7 +282,6 @@ td small{display:block;margin-top:4px;color:var(--muted);line-height:1.35}
   .brand{padding:2px 6px 11px}
   .nav{display:flex;overflow:auto}
   .nav button{width:auto;grid-template-columns:18px auto auto;white-space:nowrap}
-  .sidebar-foot{display:none}
   .topbar{position:static;display:block;padding:16px}
   .topbar-actions{justify-content:flex-start;margin-top:14px}
   .select-field:first-child select,.select-field select{min-width:130px}
