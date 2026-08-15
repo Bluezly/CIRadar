@@ -3,91 +3,241 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="light">
+<meta name="color-scheme" content="dark light">
 <title>CI Radar</title>
 <link rel="stylesheet" href="/assets/dashboard.css">
 </head>
 <body>
-<div class="app-shell">
-<aside class="sidebar">
-<a class="brand" href="#overview" aria-label="CI Radar home">CI Radar</a>
-<nav class="nav" aria-label="Primary navigation">
-<button type="button" data-tab="overview" class="active"><span>Overview</span><b id="nav-overview-count"></b></button>
-<button type="button" data-tab="incidents"><span>Incidents</span><b id="nav-incident-count"></b></button>
-<button type="button" data-tab="diagnoses"><span>Diagnoses</span><b id="nav-diagnosis-count"></b></button>
-<button type="button" data-tab="tests"><span>Tests</span><b id="nav-test-count"></b></button>
-<button type="button" data-tab="operations"><span>Operations</span><b id="nav-provider-count"></b></button>
-</nav>
+<section id="login-screen" class="login-screen" hidden>
+  <div class="login-shell">
+    <a class="login-brand" href="/" aria-label="CI Radar home">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>CI Radar</span>
+    </a>
+    <div class="login-panel">
+      <span class="eyebrow">Self-hosted CI intelligence</span>
+      <h1>Sign in to CI Radar</h1>
+      <p class="login-copy">Inspect failures, flaky tests, incidents, and delivery health for this instance.</p>
+      <div id="login-error" class="login-error" role="alert" aria-live="polite" hidden></div>
+      <form id="token-login-form" class="login-form">
+        <label>
+          <span>Admin token or API key</span>
+          <input id="token" type="password" autocomplete="current-password" spellcheck="false" placeholder="Paste a CI Radar credential">
+        </label>
+        <details class="advanced-login">
+          <summary>Advanced</summary>
+          <label>
+            <span>Tenant</span>
+            <input id="tenant" autocomplete="organization" value="default" spellcheck="false">
+          </label>
+          <p>Tenant is only needed when a root admin token must target a non-default tenant.</p>
+        </details>
+        <button id="secure-login" type="submit" class="primary login-submit">Sign in</button>
+      </form>
+      <div class="login-divider"><span>or</span></div>
+      <button id="sso-login" type="button" class="secondary login-sso">
+        <span>Continue with SSO</span>
+        <small>OIDC or SAML, when configured</small>
+      </button>
+      <p class="login-note">Credentials are exchanged for an encrypted HttpOnly dashboard session and are not stored by the browser UI.</p>
+    </div>
+    <div class="login-footer">
+      <span>CI Radar</span>
+      <a href="/source">Source</a>
+    </div>
+  </div>
+</section>
+
+<div id="app-shell" class="app-shell" hidden>
+  <aside class="sidebar">
+    <a class="brand" href="#overview" aria-label="CI Radar home">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>CI Radar</span>
+    </a>
+    <nav class="nav" aria-label="Primary navigation">
+      <button type="button" data-tab="overview" class="active">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5m0 14h16M7 15l4-5 4 3 4-7"/></svg>
+        <span>Overview</span><b id="nav-overview-count"></b>
+      </button>
+      <button type="button" data-tab="incidents">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2.8 19h18.4L12 3Z"/><path d="M12 9v4m0 3v.01"/></svg>
+        <span>Incidents</span><b id="nav-incident-count"></b>
+      </button>
+      <button type="button" data-tab="diagnoses">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14M5 10h9M5 15h6"/><path d="m15 17 2 2 4-5"/></svg>
+        <span>Diagnoses</span><b id="nav-diagnosis-count"></b>
+      </button>
+      <button type="button" data-tab="tests">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3v4m8-4v4M5 7h14v13H5z"/><path d="m9 14 2 2 4-5"/></svg>
+        <span>Tests</span><b id="nav-test-count"></b>
+      </button>
+      <button type="button" data-tab="operations">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9 7 7m10 10 2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg>
+        <span>Operations</span><b id="nav-provider-count"></b>
+      </button>
+    </nav>
+    <div class="sidebar-foot">
+      <span>Self-hosted</span>
+      <a href="/source">Source</a>
+    </div>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar">
+      <div class="page-heading">
+        <h1 id="page-title">Overview</h1>
+        <p id="page-description">Work that is slowing delivery right now.</p>
+      </div>
+      <div class="topbar-actions">
+        <label class="select-field">
+          <span>Repository</span>
+          <select id="repository-filter"><option value="">All repositories</option></select>
+        </label>
+        <label class="select-field">
+          <span>Period</span>
+          <select id="range">
+            <option value="24h">24 hours</option>
+            <option value="168h" selected>7 days</option>
+            <option value="720h">30 days</option>
+            <option value="2160h">90 days</option>
+          </select>
+        </label>
+        <button id="refresh" class="icon-button" type="button" title="Refresh" aria-label="Refresh">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>
+        </button>
+        <button id="theme-toggle" class="icon-button" type="button" title="Toggle theme" aria-label="Toggle theme">
+          <svg class="theme-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        </button>
+        <div class="session-control">
+          <button id="session-open" class="session-button" type="button" aria-haspopup="menu" aria-expanded="false">
+            <span class="session-copy">
+              <b id="session-name">Session</b>
+              <small id="session-role">viewer</small>
+            </span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 10 4 4 4-4"/></svg>
+          </button>
+          <div id="session-menu" class="session-menu" role="menu" hidden>
+            <div class="session-meta">
+              <b id="session-menu-name">Session</b>
+              <span id="session-menu-role">viewer</span>
+              <small id="session-tenant">default</small>
+            </div>
+            <button id="logout" type="button" role="menuitem">Sign out</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div id="error" class="error-banner" role="alert" aria-live="polite" hidden></div>
+
+    <main>
+      <section id="overview" class="view active">
+        <div id="overview-metrics" class="metric-row" aria-label="Reliability summary"></div>
+        <div class="overview-grid">
+          <article class="panel attention-panel">
+            <header class="panel-header">
+              <div><h2>Needs attention</h2><p>Highest-impact unresolved work</p></div>
+              <span id="attention-count" class="muted"></span>
+            </header>
+            <div id="attention-list" class="attention-list"></div>
+          </article>
+          <article class="panel trend-panel">
+            <header class="panel-header">
+              <div><h2>Failure pressure</h2><p>Incidents and test failures over time</p></div>
+              <span id="updated-at" class="muted">Not loaded</span>
+            </header>
+            <div id="reliability-trend" class="chart"></div>
+          </article>
+        </div>
+        <div class="overview-grid lower-grid">
+          <article class="panel">
+            <header class="panel-header">
+              <div><h2>Tests costing the most</h2><p>Prioritized by blocked PRs and estimated engineering time</p></div>
+              <button type="button" data-tab-jump="tests">View tests</button>
+            </header>
+            <div class="table-wrap">
+              <table><thead><tr><th>Test</th><th>Impact</th><th>State</th></tr></thead><tbody id="test-impact-preview"></tbody></table>
+            </div>
+          </article>
+          <article class="panel">
+            <header class="panel-header"><div><h2>Repository health</h2><p>Diagnoses and unstable tests by repository</p></div></header>
+            <div class="table-wrap">
+              <table><thead><tr><th>Repository</th><th>Diagnoses</th><th>Unstable tests</th><th>Time lost</th></tr></thead><tbody id="repository-health"></tbody></table>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="incidents" class="view">
+        <article class="panel">
+          <header class="panel-header table-header">
+            <div><h2>Incidents</h2><p id="incident-count"></p></div>
+            <div class="filters">
+              <input id="incident-search" type="search" placeholder="Search incidents">
+              <select id="incident-state"><option value="">All states</option><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select>
+              <select id="incident-severity"><option value="">All severities</option><option value="critical">Critical</option><option value="major">Major</option><option value="minor">Minor</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select>
+            </div>
+          </header>
+          <div class="table-wrap"><table><thead><tr><th>Incident</th><th>State</th><th>Repositories</th><th>Events</th><th>Last seen</th><th></th></tr></thead><tbody id="incident-table"></tbody></table></div>
+        </article>
+      </section>
+
+      <section id="diagnoses" class="view">
+        <article class="panel">
+          <header class="panel-header table-header">
+            <div><h2>Diagnoses</h2><p id="analysis-count"></p></div>
+            <div class="filters">
+              <input id="analysis-search" type="search" placeholder="Search diagnoses">
+              <select id="analysis-attribution"><option value="">All attributions</option><option value="EXTERNAL">External</option><option value="CODE">Code</option><option value="MIXED">Mixed</option><option value="TOOLCHAIN">Toolchain</option><option value="UNKNOWN">Unknown</option></select>
+              <select id="analysis-category"><option value="">All categories</option></select>
+            </div>
+          </header>
+          <div class="table-wrap"><table><thead><tr><th>Repository / job</th><th>Decision</th><th>Summary</th><th>Evidence</th><th>Time</th><th></th></tr></thead><tbody id="analysis-table"></tbody></table></div>
+        </article>
+      </section>
+
+      <section id="tests" class="view">
+        <div id="test-metrics" class="metric-row compact-metrics"></div>
+        <article class="panel">
+          <header class="panel-header table-header">
+            <div><h2>Test reliability</h2><p id="test-count"></p></div>
+            <div class="filters">
+              <input id="test-search" type="search" placeholder="Search tests">
+              <select id="test-state"><option value="">All states</option><option value="flaky">Flaky</option><option value="consistently_failing">Consistently failing</option><option value="suspected_flaky">Suspected flaky</option><option value="warming_up">Warming up</option><option value="stable">Stable</option><option value="mixed">Mixed</option></select>
+              <select id="test-sort"><option value="impact">Highest impact</option><option value="prs">Most PRs blocked</option><option value="flake">Highest flake score</option><option value="recent">Most recent</option></select>
+              <label class="check-field"><input id="test-critical" type="checkbox"> Critical only</label>
+            </div>
+          </header>
+          <div class="table-wrap"><table><thead><tr><th>Test</th><th>State</th><th>PRs impacted</th><th>Time lost</th><th>Failure rate</th><th>Last seen</th><th></th></tr></thead><tbody id="test-table"></tbody></table></div>
+        </article>
+      </section>
+
+      <section id="operations" class="view">
+        <div class="operations-grid">
+          <article class="panel"><header class="panel-header"><div><h2>Delivery metrics</h2><p>Selected period</p></div></header><div id="dora" class="definition-list"></div></article>
+          <article class="panel"><header class="panel-header"><div><h2>Providers</h2><p id="provider-count"></p></div></header><div id="providers" class="provider-list"></div></article>
+        </div>
+        <article class="panel"><header class="panel-header"><div><h2>Repository routing</h2><p>Ownership, criticality and notification targets</p></div></header><div class="table-wrap"><table><thead><tr><th>Repository</th><th>Team</th><th>Criticality</th><th>Channels</th></tr></thead><tbody id="repositories"></tbody></table></div></article>
+        <article class="panel"><header class="panel-header"><div><h2>Notification deliveries</h2><p>Latest delivery attempts</p></div></header><div class="table-wrap"><table><thead><tr><th>Channel</th><th>Status</th><th>Attempts</th><th>Last error</th></tr></thead><tbody id="deliveries"></tbody></table></div></article>
+      </section>
+    </main>
+  </div>
+</div>
+
+<aside id="drawer" class="drawer" aria-hidden="true">
+  <header class="drawer-head"><div><span id="drawer-kind"></span><h2 id="drawer-title"></h2></div><button id="drawer-close" type="button">Close</button></header>
+  <div id="drawer-body" class="drawer-body"></div>
 </aside>
-<div class="workspace">
-<header class="topbar">
-<div class="page-heading"><h1 id="page-title">Overview</h1><p id="page-description">Work that is slowing delivery right now.</p></div>
-<div class="topbar-actions">
-<label class="select-field"><span>Repository</span><select id="repository-filter"><option value="">All repositories</option></select></label>
-<label class="select-field"><span>Period</span><select id="range"><option value="24h">24 hours</option><option value="168h" selected>7 days</option><option value="720h">30 days</option><option value="2160h">90 days</option></select></label>
-<button id="refresh" type="button">Refresh</button>
-<button id="session-open" type="button">Session</button>
-</div>
-</header>
-<div id="error" class="error-banner" role="alert" aria-live="polite" hidden></div>
-<main>
-<section id="overview" class="view active">
-<div id="overview-metrics" class="metric-row" aria-label="Reliability summary"></div>
-<div class="overview-grid">
-<article class="panel attention-panel">
-<header class="panel-header"><div><h2>Needs attention</h2><p>Highest-impact unresolved work</p></div><span id="attention-count" class="muted"></span></header>
-<div id="attention-list" class="attention-list"></div>
-</article>
-<article class="panel trend-panel">
-<header class="panel-header"><div><h2>Failure pressure</h2><p>Incidents and test failures over time</p></div><span id="updated-at" class="muted">Not loaded</span></header>
-<div id="reliability-trend" class="chart"></div>
-</article>
-</div>
-<div class="overview-grid lower-grid">
-<article class="panel">
-<header class="panel-header"><div><h2>Tests costing the most</h2><p>Prioritized by blocked PRs and estimated engineering time</p></div><button type="button" data-tab-jump="tests">View tests</button></header>
-<div class="table-wrap"><table><thead><tr><th>Test</th><th>Impact</th><th>State</th></tr></thead><tbody id="test-impact-preview"></tbody></table></div>
-</article>
-<article class="panel">
-<header class="panel-header"><div><h2>Repository health</h2><p>Diagnoses and unstable tests by repository</p></div></header>
-<div class="table-wrap"><table><thead><tr><th>Repository</th><th>Diagnoses</th><th>Unstable tests</th><th>Time lost</th></tr></thead><tbody id="repository-health"></tbody></table></div>
-</article>
-</div>
-</section>
-<section id="incidents" class="view">
-<article class="panel">
-<header class="panel-header table-header"><div><h2>Incidents</h2><p id="incident-count"></p></div><div class="filters"><input id="incident-search" type="search" placeholder="Search incidents"><select id="incident-state"><option value="">All states</option><option value="open">Open</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option></select><select id="incident-severity"><option value="">All severities</option><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div></header>
-<div class="table-wrap"><table><thead><tr><th>Incident</th><th>State</th><th>Repositories</th><th>Events</th><th>Last seen</th><th></th></tr></thead><tbody id="incident-table"></tbody></table></div>
-</article>
-</section>
-<section id="diagnoses" class="view">
-<article class="panel">
-<header class="panel-header table-header"><div><h2>Diagnoses</h2><p id="analysis-count"></p></div><div class="filters"><input id="analysis-search" type="search" placeholder="Search diagnoses"><select id="analysis-attribution"><option value="">All attributions</option><option value="EXTERNAL">External</option><option value="CODE">Code</option><option value="MIXED">Mixed</option><option value="TOOLCHAIN">Toolchain</option><option value="UNKNOWN">Unknown</option></select><select id="analysis-category"><option value="">All categories</option></select></div></header>
-<div class="table-wrap"><table><thead><tr><th>Repository / job</th><th>Decision</th><th>Summary</th><th>Evidence</th><th>Time</th><th></th></tr></thead><tbody id="analysis-table"></tbody></table></div>
-</article>
-</section>
-<section id="tests" class="view">
-<div id="test-metrics" class="metric-row compact-metrics"></div>
-<article class="panel">
-<header class="panel-header table-header"><div><h2>Test reliability</h2><p id="test-count"></p></div><div class="filters"><input id="test-search" type="search" placeholder="Search tests"><select id="test-state"><option value="">All states</option><option value="flaky">Flaky</option><option value="consistently_failing">Consistently failing</option><option value="suspected_flaky">Suspected flaky</option><option value="warming_up">Warming up</option><option value="stable">Stable</option><option value="mixed">Mixed</option></select><select id="test-sort"><option value="impact">Highest impact</option><option value="prs">Most PRs blocked</option><option value="flake">Highest flake score</option><option value="recent">Most recent</option></select><label class="check-field"><input id="test-critical" type="checkbox"> Critical only</label></div></header>
-<div class="table-wrap"><table><thead><tr><th>Test</th><th>State</th><th>PRs impacted</th><th>Time lost</th><th>Failure rate</th><th>Last seen</th><th></th></tr></thead><tbody id="test-table"></tbody></table></div>
-</article>
-</section>
-<section id="operations" class="view">
-<div class="operations-grid">
-<article class="panel"><header class="panel-header"><div><h2>Delivery metrics</h2><p>Selected period</p></div></header><div id="dora" class="definition-list"></div></article>
-<article class="panel"><header class="panel-header"><div><h2>Providers</h2><p id="provider-count"></p></div></header><div id="providers" class="provider-list"></div></article>
-</div>
-<article class="panel"><header class="panel-header"><div><h2>Repository routing</h2><p>Ownership, criticality and notification targets</p></div></header><div class="table-wrap"><table><thead><tr><th>Repository</th><th>Team</th><th>Criticality</th><th>Channels</th></tr></thead><tbody id="repositories"></tbody></table></div></article>
-<article class="panel"><header class="panel-header"><div><h2>Notification deliveries</h2><p>Latest delivery attempts</p></div></header><div class="table-wrap"><table><thead><tr><th>Channel</th><th>Status</th><th>Attempts</th><th>Last error</th></tr></thead><tbody id="deliveries"></tbody></table></div></article>
-</section>
-</main>
-</div>
-</div>
-<aside id="drawer" class="drawer" aria-hidden="true"><header class="drawer-head"><div><span id="drawer-kind"></span><h2 id="drawer-title"></h2></div><button id="drawer-close" type="button">Close</button></header><div id="drawer-body" class="drawer-body"></div></aside>
 <div id="backdrop" class="backdrop" hidden></div>
-<dialog id="session-dialog" class="modal"><form method="dialog"><header><div><span>Authentication</span><h2>Session</h2></div><button value="cancel">Close</button></header><label>Tenant<input id="tenant" autocomplete="organization" value="default"></label><label>Admin token or API key<input id="token" type="password" autocomplete="off"></label><div class="modal-actions"><button id="logout" type="button">Sign out</button><button id="sso-login" type="button">Use SSO</button><button id="secure-login" type="button" class="primary">Sign in</button></div></form></dialog>
-<dialog id="action-dialog" class="modal"><form id="action-form"><header><div><span id="action-kind"></span><h2 id="action-title"></h2></div><button id="action-close" type="button">Close</button></header><p id="action-description"></p><div id="action-fields" class="action-fields"></div><div class="modal-actions"><button id="action-cancel" type="button">Cancel</button><button id="action-submit" type="submit" class="primary">Save</button></div></form></dialog>
+
+<dialog id="action-dialog" class="modal">
+  <form id="action-form">
+    <header><div><span id="action-kind"></span><h2 id="action-title"></h2></div><button id="action-close" type="button">Close</button></header>
+    <p id="action-description"></p>
+    <div id="action-fields" class="action-fields"></div>
+    <div class="modal-actions"><button id="action-cancel" type="button">Cancel</button><button id="action-submit" type="submit" class="primary">Save</button></div>
+  </form>
+</dialog>
 <script src="/assets/dashboard.js" defer></script>
 </body>
 </html>
