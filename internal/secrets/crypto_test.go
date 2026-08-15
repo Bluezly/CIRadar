@@ -35,6 +35,14 @@ func TestResolveEnv(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsMalformedEnvReferences(t *testing.T) {
+	for _, value := range []string{"env:", "env:   ", "${ENV:}", "${ENV:   }", "${ENV:MISSING"} {
+		if got, err := Resolve("", value); err == nil {
+			t.Fatalf("Resolve(%q)=%q, expected error", value, got)
+		}
+	}
+}
+
 func TestMasterKeyRejectsPassphrasesAndWrongLength(t *testing.T) {
 	for _, key := range []string{"correct horse battery staple", "c2hvcnQ"} {
 		if err := ValidateMasterKey(key); err == nil {
