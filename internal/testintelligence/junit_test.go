@@ -3,6 +3,7 @@ package testintelligence
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseJUnit(t *testing.T) {
@@ -62,5 +63,15 @@ func TestSanitizeRunURLRejectsUnsafeSchemes(t *testing.T) {
 		if got := sanitizeRunURL(value); got != "" {
 			t.Fatalf("sanitizeRunURL(%q)=%q", value, got)
 		}
+	}
+}
+
+func TestTruncatePreservesUTF8(t *testing.T) {
+	got := truncate("abcع", 4)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncate returned invalid UTF-8: %q", got)
+	}
+	if got != "abc…" {
+		t.Fatalf("truncate=%q", got)
 	}
 }
