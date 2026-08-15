@@ -86,7 +86,7 @@ func loadWordVectors(path string) (*wordVectorModel, error) {
 		valid := true
 		for i := 0; i < dimensions; i++ {
 			n, parseErr := strconv.ParseFloat(fields[i+1], 64)
-			if parseErr != nil {
+			if parseErr != nil || math.IsNaN(n) || math.IsInf(n, 0) {
 				valid = false
 				break
 			}
