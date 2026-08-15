@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 	"time"
@@ -28,12 +29,12 @@ func TestMarketplaceSetupStateRejectsTampering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal state: %v", err)
 	}
-	last := sealed[len(sealed)-1]
-	replacement := byte('A')
-	if last == replacement {
-		replacement = 'B'
+	raw, err := base64.RawURLEncoding.DecodeString(sealed)
+	if err != nil {
+		t.Fatalf("decode state: %v", err)
 	}
-	tampered := sealed[:len(sealed)-1] + string(replacement)
+	raw[0] ^= 1
+	tampered := base64.RawURLEncoding.EncodeToString(raw)
 	if _, err := openMarketplaceSetupState(secret, tampered); err == nil {
 		t.Fatal("expected tampered state to be rejected")
 	}
