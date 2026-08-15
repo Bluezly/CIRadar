@@ -8,6 +8,8 @@ const state = {
  analyses: [],
  incidents: [],
  providers: [],
+ identity: null,
+ authenticated: false,
  loading: false
 }
 
@@ -20,11 +22,76 @@ const pageMeta = {
 }
 
 let actionContext = null
+let bootstrapping = false
 
 $('tenant').value = sessionStorage.ciradarTenant || 'default'
 
+function loginError(message = '') {
+ $('login-error').textContent = message
+ $('login-error').hidden = !message
+}
+
+function clearData() {
+ state.dashboard = null
+ state.repositories = []
+ state.deliveries = []
+ state.tests = []
+ state.analyses = []
+ state.incidents = []
+ state.providers = []
+}
+
+function identityName(identity) {
+ if (!identity) return 'Session'
+ if (identity.name) return identity.name
+ if (identity.root) return 'root'
+ return 'CI Radar user'
+}
+
+function renderIdentity(identity) {
+ const name = identityName(identity)
+ const role = identity?.role || 'viewer'
+ const tenant = identity?.tenant_id || 'default'
+ $('session-name').textContent = name
+ $('session-role').textContent = role
+ $('session-menu-name').textContent = name
+ $('session-menu-role').textContent = role
+ $('session-tenant').textContent = `Tenant · ${tenant}`
+}
+
+function showLogin(message = '') {
+ state.authenticated = false
+ state.identity = null
+ clearData()
+ $('app-shell').hidden = true
+ $('login-screen').hidden = false
+ $('session-menu').hidden = true
+ $('session-open').setAttribute('aria-expanded', 'false')
+ setError()
+ loginError(message)
+ document.title = 'Sign in · CI Radar'
+ requestAnimationFrame(() => $('token').focus())
+}
+
+function showApp(identity) {
+ state.identity = identity
+ state.authenticated = true
+ renderIdentity(identity)
+ $('login-screen').hidden = true
+ $('app-shell').hidden = false
+ loginError()
+ document.title = 'CI Radar'
+}
+
+async function authIdentity() {
+ const response = await fetch('/api/v1/auth/me', { headers: { 'Accept': 'application/json' } })
+ if (response.status === 401) return null
+ if (!response.ok) throw new Error('Could not verify the dashboard session.')
+ return response.json()
+}
+
 async function api(path, options = {}) {
- const tenant = $('tenant').value.trim() || 'default'
+ const tenant = $('tenant').value.trim() || state.identity?.tenant_id || 'default'
  sessionStorage.ciradarTenant = tenant
  const headers = { ...(options.headers || {}), 'X-CI-Radar-Tenant': tenant }
  if (options.body !== undefined) headers['Content-Type'] = 'application/json'
@@ -33,6 +100,7 @@ async function api(path, options = {}) {
   const payload = await response.json().catch(() => ({ error: response.statusText }))
   const error = new Error(payload.error || response.statusText)
   error.status = response.status
+  if (response.status === 401 && state.authenticated) showLogin('Your session ended. Sign in again to continue.')
   throw error
  }
  return response.status === 204 ? null : response.json()
@@ -42,18 +110,35 @@ async function secureLogin() {
  const token = $('token').value.trim()
  const tenant = $('tenant').value.trim() || 'default'
  if (!token) throw new Error('Enter an admin token or API key.')
- const response = await fetch('/auth/token', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ token, tenant })
- })
- if (!response.ok) {
-  const payload = await response.json().catch(() => ({ error: response.statusText }))
-  throw new Error(payload.error || response.statusText)
+ loginError()
+ $('secure-login').disabled = true
+ try {
+  const response = await fetch('/auth/token', {
+   method: 'POST',
+   headers: { 'Content-Type': 'application/json' },
+   body: JSON.stringify({ token, tenant })
+  })
+  if (!response.ok) {
+   const payload = await response.json().catch(() => ({ error: response.statusText }))
+   const error = new Error(payload.error || response.statusText)
+   error.status = response.status
+   throw error
+  }
+  $('token').value = ''
+  sessionStorage.ciradarTenant = tenant
+  const identity = await authIdentity()
+  if (!identity) throw new Error('The session was created but could not be verified.')
+  showApp(identity)
+  switchTab(location.hash.slice(1) || 'overview')
+  await load(true)
+ } finally {
+  $('secure-login').disabled = false
  }
- $('token').value = ''
- $('session-dialog').close()
- await load(true)
+}
+
+function startSSO() {
+ const target = `/${location.hash || '#overview'}`
+ location.assign(`/auth/login?return_to=${encodeURIComponent(target)}`)
 }
 
 function esc(value) {
@@ -74,7 +159,6 @@ function safeHTTPURL(value) {
   return ''
  }
 }
-
 
 function lower(value) {
  return String(value ?? '').toLowerCase()
@@ -167,7 +251,7 @@ function switchTab(tab) {
  document.querySelectorAll('[data-tab]').forEach(buttonElement => buttonElement.classList.toggle('active', buttonElement.dataset.tab === tab))
  $('page-title').textContent = pageMeta[tab][0]
  $('page-description').textContent = pageMeta[tab][1]
- location.hash = tab
+ if (location.hash !== `#${tab}`) history.replaceState(null, '', `#${tab}`)
 }
 
 function metric(label, value, detail) {
@@ -208,7 +292,7 @@ function renderOverviewMetrics() {
 }
 
 function attentionItems() {
- const severityWeight = { critical: 500, high: 300, medium: 150, low: 60 }
+ const severityWeight = { critical: 500, major: 400, high: 300, medium: 150, minor: 100, low: 60 }
  const incidents = currentIncidents().filter(item => item.state !== 'resolved').map(item => ({
   kind: 'incident',
   id: item.fingerprint,
@@ -510,7 +594,7 @@ async function submitAction(event) {
   closeDrawer()
   await load(true)
  } catch (error) {
-  setError(error.message)
+  if (error.status !== 401) setError(error.message)
  } finally {
   $('action-submit').disabled = false
  }
@@ -616,6 +700,7 @@ function renderAll() {
 }
 
 async function load(force = false) {
+ if (!state.authenticated) return
  if (state.loading && !force) return
  setLoading(true)
  setError()
@@ -625,6 +710,7 @@ async function load(force = false) {
    api(`/api/v1/dashboard?range=${range}`), api('/api/v1/repositories'), api('/api/v1/notifications/deliveries?limit=100'),
    api('/api/v1/tests?limit=1000'), api('/api/v1/analyses?limit=1000'), api('/api/v1/incidents?limit=1000'), api('/api/v1/status')
   ])
+  if (!state.authenticated) return
   state.dashboard = dashboard
   state.repositories = repositories.repositories || []
   state.deliveries = deliveries.deliveries || []
@@ -634,10 +720,50 @@ async function load(force = false) {
   state.providers = status.connectors_enabled || []
   renderAll()
  } catch (error) {
-  setError(error.status === 401 ? 'Sign in to load CI data.' : error.message)
-  if (error.status === 401) $('session-dialog').showModal()
+  if (error.status !== 401) setError(error.message)
  } finally {
   setLoading(false)
+ }
+}
+
+function applyTheme(theme) {
+ const light = theme === 'light'
+ document.body.classList.toggle('light', light)
+ localStorage.ciradarTheme = light ? 'light' : 'dark'
+}
+
+function toggleTheme() {
+ applyTheme(document.body.classList.contains('light') ? 'dark' : 'light')
+}
+
+function toggleSessionMenu(force) {
+ const menu = $('session-menu')
+ const open = force === undefined ? menu.hidden : force
+ menu.hidden = !open
+ $('session-open').setAttribute('aria-expanded', String(open))
+}
+
+async function bootstrap() {
+ if (bootstrapping) return
+ bootstrapping = true
+ applyTheme(localStorage.ciradarTheme === 'light' ? 'light' : 'dark')
+ try {
+  const identity = await authIdentity()
+  if (!identity) {
+   showLogin()
+   return
+  }
+  showApp(identity)
+  if (identity.tenant_id) {
+   $('tenant').value = identity.tenant_id
+   sessionStorage.ciradarTenant = identity.tenant_id
+  }
+  switchTab(location.hash.slice(1) || 'overview')
+  await load(true)
+ } catch (error) {
+  showLogin(error.message)
+ } finally {
+  bootstrapping = false
  }
 }
 
@@ -645,7 +771,9 @@ document.addEventListener('click', event => {
  const action = event.target.closest('button[data-action]')
  if (action) {
   event.stopPropagation()
-  act(action).catch(error => setError(error.message))
+  act(action).catch(error => {
+   if (error.status !== 401) setError(error.message)
+  })
   return
  }
  const tab = event.target.closest('[data-tab]')
@@ -653,12 +781,16 @@ document.addEventListener('click', event => {
  const jump = event.target.closest('[data-tab-jump]')
  if (jump) return switchTab(jump.dataset.tabJump)
  const open = event.target.closest('[data-open]')
- if (open) handleOpen(open)
+ if (open) return handleOpen(open)
+ if (!event.target.closest('.session-control')) toggleSessionMenu(false)
 })
 
 document.addEventListener('keydown', event => {
  if (event.key === 'Enter' && event.target.matches('[data-open]')) handleOpen(event.target)
- if (event.key === 'Escape' && !$('action-dialog').open && !$('session-dialog').open) closeDrawer()
+ if (event.key === 'Escape' && !$('action-dialog').open) {
+  toggleSessionMenu(false)
+  closeDrawer()
+ }
 })
 
 for (const id of ['incident-search', 'incident-state', 'incident-severity']) $(id).addEventListener('input', renderIncidentTable)
@@ -668,9 +800,13 @@ for (const id of ['test-search', 'test-state', 'test-sort', 'test-critical']) $(
 $('repository-filter').addEventListener('change', renderAll)
 $('range').addEventListener('change', () => load(true))
 $('refresh').addEventListener('click', () => load(true))
-$('session-open').addEventListener('click', () => $('session-dialog').showModal())
-$('secure-login').addEventListener('click', () => secureLogin().catch(error => setError(error.message)))
-$('sso-login').addEventListener('click', () => location.assign('/auth/login?return_to=/'))
+$('theme-toggle').addEventListener('click', toggleTheme)
+$('session-open').addEventListener('click', () => toggleSessionMenu())
+$('token-login-form').addEventListener('submit', event => {
+ event.preventDefault()
+ secureLogin().catch(error => loginError(error.message))
+})
+$('sso-login').addEventListener('click', startSSO)
 $('logout').addEventListener('click', () => location.assign('/auth/logout'))
 $('drawer-close').addEventListener('click', closeDrawer)
 $('backdrop').addEventListener('click', closeDrawer)
@@ -678,12 +814,16 @@ $('action-close').addEventListener('click', closeActionDialog)
 $('action-cancel').addEventListener('click', closeActionDialog)
 $('action-form').addEventListener('submit', submitAction)
 
-document.addEventListener('visibilitychange', () => {
- if (!document.hidden) load()
+window.addEventListener('hashchange', () => {
+ if (state.authenticated) switchTab(location.hash.slice(1) || 'overview')
 })
 
-switchTab(location.hash.slice(1) || 'overview')
+document.addEventListener('visibilitychange', () => {
+ if (!document.hidden && state.authenticated) load()
+})
+
 setInterval(() => {
- if (!document.hidden) load()
+ if (!document.hidden && state.authenticated) load()
 }, 30000)
-load()
+
+bootstrap()
