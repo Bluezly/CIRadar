@@ -60,6 +60,27 @@ func TestLoadWordVectorsAcceptsStandardHeader(t *testing.T) {
 	}
 }
 
+func TestLoadWordVectorsRejectsNonFiniteValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vectors.txt")
+	data := "3 8\n" +
+		"alpha 1 0 0 0 0 0 0 0\n" +
+		"broken NaN 0 0 0 0 0 0 0\n" +
+		"beta 0 1 0 0 0 0 0 0\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model, err := loadWordVectors(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := model.Vectors["broken"]; ok {
+		t.Fatal("non-finite vector was accepted")
+	}
+	if len(model.Vectors) != 2 {
+		t.Fatalf("vectors=%d", len(model.Vectors))
+	}
+}
+
 func TestRemoteEmbeddingsAndCache(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {
