@@ -63,8 +63,6 @@ func (s *Server) marketplaceSetup(w http.ResponseWriter, r *http.Request) {
 	q.Set("client_id", cfg.OAuthClientID)
 	q.Set("redirect_uri", callback)
 	q.Set("state", state)
-	// GitHub App user access tokens use the app's fine-grained permissions,
-	// not OAuth scopes. The token is used only to verify installation access.
 	http.Redirect(w, r, "https://github.com/login/oauth/authorize?"+q.Encode(), http.StatusFound)
 }
 
