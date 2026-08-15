@@ -65,9 +65,6 @@ func loadWordVectors(path string) (*wordVectorModel, error) {
 	for scanner.Scan() {
 		lineNumber++
 		fields := strings.Fields(scanner.Text())
-		if len(fields) < 3 {
-			continue
-		}
 		if lineNumber == 1 && len(fields) == 2 {
 			if _, errCount := strconv.Atoi(fields[0]); errCount == nil {
 				if dim, errDim := strconv.Atoi(fields[1]); errDim == nil && dim > 0 {
@@ -75,6 +72,9 @@ func loadWordVectors(path string) (*wordVectorModel, error) {
 					continue
 				}
 			}
+		}
+		if len(fields) < 3 {
+			continue
 		}
 		if dimensions == 0 {
 			dimensions = len(fields) - 1
