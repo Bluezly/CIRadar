@@ -1,8 +1,16 @@
-# CI Radar
+<p align="center">
+  <img src="assets/ciradar-logo.png" alt="CI Radar logo" width="160">
+</p>
 
-[![CI](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml/badge.svg)](https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+<h1 align="center">CI Radar</h1>
+
+<p align="center"><strong>Self-hosted CI failure diagnostics, flaky-test intelligence, incident correlation, and repair workflows.</strong></p>
+
+<p align="center">
+  <a href="https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml"><img src="https://github.com/Bluezly/CIRadar/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml"><img src="https://github.com/Bluezly/CIRadar/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue.svg" alt="License"></a>
+</p>
 
 CI Radar is a self-hosted service for turning CI failures into structured diagnoses. It ingests build events and test reports, groups recurring failures, tracks flaky tests, and exposes the result through a CLI, API, dashboard, alerts, and ChatOps.
 
@@ -24,7 +32,13 @@ Create a local configuration and start the server:
 ./ciradar serve
 ```
 
-The dashboard listens on `127.0.0.1:8787` by default. `ciradar init` prints the bootstrap token used for the first sign-in.
+The dashboard listens on `127.0.0.1:8787` by default. On the first sign-in, use the generated `admin_token` stored in `ciradar.json`. Keep that token private; after signing in you can create scoped API keys for routine access.
+
+On Windows PowerShell, you can read the generated token with:
+
+```powershell
+(Get-Content .\ciradar.json | ConvertFrom-Json).admin_token
+```
 
 You can also install the CLI directly:
 
