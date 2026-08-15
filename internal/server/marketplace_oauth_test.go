@@ -39,6 +39,16 @@ func TestMarketplaceSetupStateRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestMarketplaceSetupStateRejectsWrongSecret(t *testing.T) {
+	sealed, err := sealMarketplaceSetupState(strings.Repeat("a", 32), marketplaceSetupState{InstallationID: 9, IssuedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("seal state: %v", err)
+	}
+	if _, err := openMarketplaceSetupState(strings.Repeat("b", 32), sealed); err == nil {
+		t.Fatal("expected state signed with another secret to be rejected")
+	}
+}
+
 func TestNextGitHubLinkOnlyAcceptsGitHubAPI(t *testing.T) {
 	header := `<https://api.github.com/user/installations?per_page=100&page=2>; rel="next", <https://api.github.com/user/installations?per_page=100&page=4>; rel="last"`
 	got := nextGitHubLink(header)
