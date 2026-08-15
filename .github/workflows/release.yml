@@ -156,7 +156,7 @@ jobs:
           test -s dist/ciradar-linux-arm64
           test -s dist/ciradar-darwin-x64
           test -s dist/ciradar-darwin-arm64
-          test -s "CIRadar-${VERSION}-Source.zip"
+          test -s "dist/CIRadar-${VERSION}-Source.zip"
           test -s dist/SHA256SUMS
 
           chmod +x dist/ciradar-linux-x64
