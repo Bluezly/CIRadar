@@ -95,6 +95,8 @@ func New(cfg config.Config, store db.Backend, a *analyzer.Analyzer, log *slog.Lo
 	mux.HandleFunc("GET /source", s.sourcePage)
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /auth/login", s.authLogin)
+	mux.HandleFunc("GET /github/marketplace/setup", s.marketplaceSetup)
+	mux.HandleFunc("GET /github/marketplace/callback", s.marketplaceCallback)
 	mux.HandleFunc("GET /auth/saml/metadata", s.authSAMLMetadata)
 	mux.HandleFunc("GET /auth/callback", s.authCallback)
 	mux.HandleFunc("POST /auth/callback", s.authCallback)

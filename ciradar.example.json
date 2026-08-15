@@ -40,6 +40,8 @@
   "github_marketplace": {
     "enabled": false,
     "webhook_secret": "env:CIRADAR_MARKETPLACE_WEBHOOK_SECRET",
+    "oauth_client_id": "",
+    "oauth_client_secret": "env:CIRADAR_MARKETPLACE_OAUTH_CLIENT_SECRET",
     "auto_create_tenant": true,
     "cancellation_policy": "retain_free",
     "free_plan_name": "free"

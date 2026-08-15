@@ -311,6 +311,9 @@ func (c *Config) resolveSecrets() error {
 		if err := resolve("github_marketplace.webhook_secret", &c.GitHubMarketplace.WebhookSecret); err != nil {
 			return err
 		}
+		if err := resolve("github_marketplace.oauth_client_secret", &c.GitHubMarketplace.OAuthClientSecret); err != nil {
+			return err
+		}
 	}
 	if c.SSO.Enabled {
 		if err := resolve("sso.session_secret", &c.SSO.SessionSecret); err != nil {
