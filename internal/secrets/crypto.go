@@ -127,11 +127,20 @@ func DecryptDerived(material, value string) (string, error) {
 func Resolve(master, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	var name string
-	if strings.HasPrefix(value, "env:") {
+	switch {
+	case strings.HasPrefix(value, "env:"):
 		name = strings.TrimSpace(strings.TrimPrefix(value, "env:"))
-	}
-	if strings.HasPrefix(value, "${ENV:") && strings.HasSuffix(value, "}") {
-		name = strings.TrimSuffix(strings.TrimPrefix(value, "${ENV:"), "}")
+		if name == "" {
+			return "", errors.New("environment secret reference requires a variable name")
+		}
+	case strings.HasPrefix(value, "${ENV:"):
+		if !strings.HasSuffix(value, "}") {
+			return "", errors.New("environment secret reference is malformed")
+		}
+		name = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(value, "${ENV:"), "}"))
+		if name == "" {
+			return "", errors.New("environment secret reference requires a variable name")
+		}
 	}
 	if name != "" {
 		v, ok := os.LookupEnv(name)
