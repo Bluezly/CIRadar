@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,6 +37,26 @@ func TestLocalSimilarity(t *testing.T) {
 	}
 	if len(out) == 0 || out[0].AnalysisID != "b" {
 		t.Fatalf("%#v", out)
+	}
+}
+
+func TestLoadWordVectorsAcceptsStandardHeader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vectors.txt")
+	data := "2 8\n" +
+		"alpha 1 0 0 0 0 0 0 0\n" +
+		"beta 0 1 0 0 0 0 0 0\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	model, err := loadWordVectors(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Dimensions != 8 || len(model.Vectors) != 2 {
+		t.Fatalf("dimensions=%d vectors=%d", model.Dimensions, len(model.Vectors))
+	}
+	if len(model.Vectors["alpha"]) != 8 || len(model.Vectors["beta"]) != 8 {
+		t.Fatalf("vectors=%#v", model.Vectors)
 	}
 }
 
