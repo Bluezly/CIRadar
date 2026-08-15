@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Bluezly/CIRadar/internal/logsafe"
 	"github.com/Bluezly/CIRadar/internal/marketplace"
 	"github.com/Bluezly/CIRadar/internal/model"
 )
@@ -91,13 +92,13 @@ func (s *Server) marketplaceCallback(w http.ResponseWriter, r *http.Request) {
 	callback := strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/github/marketplace/callback"
 	token, err := s.exchangeGitHubOAuthCode(r, code, callback)
 	if err != nil {
-		s.log.Warn("GitHub Marketplace OAuth exchange failed", "error", err)
+		s.log.Warn("GitHub Marketplace OAuth exchange failed", "error_kind", logsafe.Kind(err))
 		writeError(w, http.StatusBadGateway, "GitHub OAuth exchange failed")
 		return
 	}
 	installation, err := s.findUserInstallation(r, token, state.InstallationID)
 	if err != nil {
-		s.log.Warn("GitHub Marketplace installation verification failed", "error", err)
+		s.log.Warn("GitHub Marketplace installation verification failed", "error_kind", logsafe.Kind(err))
 		writeError(w, http.StatusBadGateway, "could not verify GitHub installation")
 		return
 	}
@@ -134,7 +135,7 @@ func (s *Server) marketplaceCallback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: sub.TenantID, Actor: installation.Account.Login, Role: model.RoleAdmin, Action: "marketplace.setup", Resource: "github_installation", ResourceID: strconv.FormatInt(state.InstallationID, 10), Metadata: map[string]string{"account": installation.Account.Login}}); err != nil {
-		s.log.Warn("record Marketplace setup audit failed", "error", err)
+		s.log.Warn("record Marketplace setup audit failed", "error_kind", logsafe.Kind(err))
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
