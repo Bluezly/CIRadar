@@ -11,6 +11,8 @@ import (
 type MarketplaceConfig struct {
 	Enabled            bool   `json:"enabled"`
 	WebhookSecret      string `json:"webhook_secret,omitempty"`
+	OAuthClientID      string `json:"oauth_client_id,omitempty"`
+	OAuthClientSecret  string `json:"oauth_client_secret,omitempty"`
 	AutoCreateTenant   bool   `json:"auto_create_tenant"`
 	CancellationPolicy string `json:"cancellation_policy,omitempty"`
 	FreePlanName       string `json:"free_plan_name,omitempty"`
@@ -49,6 +51,9 @@ func (c *Config) normalizeHardening() error {
 		}
 	}
 	m := &c.GitHubMarketplace
+	m.WebhookSecret = strings.TrimSpace(m.WebhookSecret)
+	m.OAuthClientID = strings.TrimSpace(m.OAuthClientID)
+	m.OAuthClientSecret = strings.TrimSpace(m.OAuthClientSecret)
 	m.CancellationPolicy = strings.ToLower(strings.TrimSpace(m.CancellationPolicy))
 	if m.CancellationPolicy == "" {
 		m.CancellationPolicy = "retain_free"
@@ -64,6 +69,12 @@ func (c *Config) normalizeHardening() error {
 	}
 	if m.Enabled && strings.TrimSpace(m.WebhookSecret) == "" && strings.TrimSpace(c.GitHubWebhookSecret) == "" {
 		return errors.New("github marketplace requires webhook_secret or github_webhook_secret")
+	}
+	if (m.OAuthClientID == "") != (m.OAuthClientSecret == "") {
+		return errors.New("github marketplace OAuth requires both oauth_client_id and oauth_client_secret")
+	}
+	if m.OAuthClientID != "" && strings.TrimSpace(c.PublicBaseURL) == "" {
+		return errors.New("github marketplace OAuth requires public_base_url")
 	}
 	return nil
 }
