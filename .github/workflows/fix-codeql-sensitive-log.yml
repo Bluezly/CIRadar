@@ -1,0 +1,43 @@
+name: Fix CodeQL sensitive logging
+
+on:
+  push:
+    branches:
+      - agent/marketplace-oauth-setup
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/marketplace-oauth-setup
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sanitize Marketplace logs
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('internal/server/marketplace_oauth.go')
+          s = p.read_text()
+          s = s.replace('"github.com/Bluezly/CIRadar/internal/marketplace"', '"github.com/Bluezly/CIRadar/internal/logsafe"\n\t"github.com/Bluezly/CIRadar/internal/marketplace"')
+          s = s.replace('s.log.Warn("GitHub Marketplace OAuth exchange failed", "error", err)', 's.log.Warn("GitHub Marketplace OAuth exchange failed", "error_kind", logsafe.Kind(err))')
+          s = s.replace('s.log.Warn("GitHub Marketplace installation verification failed", "error", err)', 's.log.Warn("GitHub Marketplace installation verification failed", "error_kind", logsafe.Kind(err))')
+          s = s.replace('s.log.Warn("record Marketplace setup audit failed", "error", err)', 's.log.Warn("record Marketplace setup audit failed", "error_kind", logsafe.Kind(err))')
+          p.write_text(s)
+      - name: Validate
+        run: |
+          gofmt -w internal/server/marketplace_oauth.go
+          ./scripts/repo-check.sh
+          go test ./internal/server ./internal/logsafe
+      - name: Commit fix
+        run: |
+          rm .github/workflows/fix-codeql-sensitive-log.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/server/marketplace_oauth.go .github/workflows/fix-codeql-sensitive-log.yml
+          git commit -m "fix: sanitize Marketplace error logging"
+          git push origin HEAD:agent/marketplace-oauth-setup
