@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Bluezly/CIRadar/internal/model"
 )
@@ -154,8 +155,15 @@ func first(v ...string) string {
 	return ""
 }
 func truncate(v string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(v) <= n {
 		return v
 	}
-	return v[:n] + "…"
+	end := n
+	for end > 0 && !utf8.ValidString(v[:end]) {
+		end--
+	}
+	return v[:end] + "…"
 }
