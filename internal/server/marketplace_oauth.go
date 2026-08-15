@@ -1,8 +1,8 @@
 package server
 
 import (
-	"crypto/rand"
-	"crypto/subtle"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -19,6 +19,8 @@ import (
 
 const marketplaceSetupStateTTL = 10 * time.Minute
 
+var marketplaceGitHubHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 type marketplaceSetupState struct {
 	InstallationID int64     `json:"installation_id"`
 	IssuedAt       time.Time `json:"issued_at"`
@@ -27,7 +29,6 @@ type marketplaceSetupState struct {
 type githubOAuthTokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
-	Scope       string `json:"scope"`
 	Error       string `json:"error"`
 	Description string `json:"error_description"`
 }
@@ -62,9 +63,8 @@ func (s *Server) marketplaceSetup(w http.ResponseWriter, r *http.Request) {
 	q.Set("client_id", cfg.OAuthClientID)
 	q.Set("redirect_uri", callback)
 	q.Set("state", state)
-	// read:user is sufficient to identify the buyer; installation membership is
-	// verified separately through /user/installations with this user token.
-	q.Set("scope", "read:user")
+	// GitHub App user access tokens use the app's fine-grained permissions,
+	// not OAuth scopes. The token is used only to verify installation access.
 	http.Redirect(w, r, "https://github.com/login/oauth/authorize?"+q.Encode(), http.StatusFound)
 }
 
@@ -85,18 +85,21 @@ func (s *Server) marketplaceCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state, err := openMarketplaceSetupState(s.dashboardSecret(), stateRaw)
-	if err != nil || time.Since(state.IssuedAt) < 0 || time.Since(state.IssuedAt) > marketplaceSetupStateTTL {
+	now := time.Now().UTC()
+	if err != nil || state.IssuedAt.After(now.Add(time.Minute)) || now.Sub(state.IssuedAt) > marketplaceSetupStateTTL {
 		writeError(w, http.StatusBadRequest, "invalid or expired Marketplace setup state")
 		return
 	}
 	callback := strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/github/marketplace/callback"
 	token, err := s.exchangeGitHubOAuthCode(r, code, callback)
 	if err != nil {
+		s.log.Warn("GitHub Marketplace OAuth exchange failed", "error", err)
 		writeError(w, http.StatusBadGateway, "GitHub OAuth exchange failed")
 		return
 	}
 	installation, err := s.findUserInstallation(r, token, state.InstallationID)
 	if err != nil {
+		s.log.Warn("GitHub Marketplace installation verification failed", "error", err)
 		writeError(w, http.StatusBadGateway, "could not verify GitHub installation")
 		return
 	}
@@ -106,7 +109,8 @@ func (s *Server) marketplaceCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var sub marketplace.Subscription
-	found, err := s.store.GetObject(r.Context(), model.DefaultTenantID, "marketplace_account_index", strconv.FormatInt(installation.Account.ID, 10), &sub)
+	accountID := strconv.FormatInt(installation.Account.ID, 10)
+	found, err := s.store.GetObject(r.Context(), model.DefaultTenantID, "marketplace_account_index", accountID, &sub)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -121,18 +125,19 @@ func (s *Server) marketplaceCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if sub.InstallationID != state.InstallationID {
 		sub.InstallationID = state.InstallationID
-		sub.UpdatedAt = time.Now().UTC()
-		id := strconv.FormatInt(sub.AccountID, 10)
-		if err := s.store.PutObject(r.Context(), sub.TenantID, "marketplace_subscription", id, sub); err != nil {
+		sub.UpdatedAt = now
+		if err := s.store.PutObject(r.Context(), sub.TenantID, "marketplace_subscription", accountID, sub); err != nil {
 			s.internalError(w, r, err)
 			return
 		}
-		if err := s.store.PutObject(r.Context(), model.DefaultTenantID, "marketplace_account_index", id, sub); err != nil {
+		if err := s.store.PutObject(r.Context(), model.DefaultTenantID, "marketplace_account_index", accountID, sub); err != nil {
 			s.internalError(w, r, err)
 			return
 		}
 	}
-	_ = s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: sub.TenantID, Actor: installation.Account.Login, Role: model.RoleAdmin, Action: "marketplace.setup", Resource: "github_installation", ResourceID: strconv.FormatInt(state.InstallationID, 10), Metadata: map[string]string{"account": installation.Account.Login}})
+	if err := s.store.RecordAudit(r.Context(), model.AuditEvent{TenantID: sub.TenantID, Actor: installation.Account.Login, Role: model.RoleAdmin, Action: "marketplace.setup", Resource: "github_installation", ResourceID: strconv.FormatInt(state.InstallationID, 10), Metadata: map[string]string{"account": installation.Account.Login}}); err != nil {
+		s.log.Warn("record Marketplace setup audit failed", "error", err)
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, "<!doctype html><html><head><meta charset=utf-8><title>CIRadar setup complete</title><link rel=stylesheet href=/assets/dashboard.css></head><body><main><section class=panel><h1>CIRadar setup complete</h1><p>GitHub installation <code>"+strconv.FormatInt(state.InstallationID, 10)+"</code> is linked to tenant <code>"+htmlEscape(sub.TenantID)+"</code>.</p><p><a href=\"/\">Open CIRadar</a></p></section></main></body></html>")
@@ -150,7 +155,7 @@ func (s *Server) exchangeGitHubOAuthCode(r *http.Request, code, callback string)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := marketplaceGitHubHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -163,13 +168,13 @@ func (s *Server) exchangeGitHubOAuthCode(r *http.Request, code, callback string)
 		return "", err
 	}
 	if out.Error != "" || strings.TrimSpace(out.AccessToken) == "" {
-		return "", fmt.Errorf("github oauth error: %s", out.Error)
+		return "", fmt.Errorf("github oauth error: %s", firstNonEmpty(out.Error, "missing access token"))
 	}
 	return out.AccessToken, nil
 }
 
 func (s *Server) findUserInstallation(r *http.Request, token string, installationID int64) (*githubUserInstallation, error) {
-	endpoint := strings.TrimRight(s.cfg.GitHubAPIURL, "/") + "/user/installations?per_page=100"
+	endpoint := "https://api.github.com/user/installations?per_page=100"
 	for page := 0; page < 10 && endpoint != ""; page++ {
 		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint, nil)
 		if err != nil {
@@ -177,7 +182,8 @@ func (s *Server) findUserInstallation(r *http.Request, token string, installatio
 		}
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		resp, err := marketplaceGitHubHTTPClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -207,20 +213,22 @@ func sealMarketplaceSetupState(secret string, value marketplaceSetupState) (stri
 	if err != nil {
 		return "", err
 	}
-	mac := hmacSHA256([]byte(secret), payload)
-	buf := append(payload, mac...)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(payload)
+	buf := append(payload, mac.Sum(nil)...)
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func openMarketplaceSetupState(secret, sealed string) (marketplaceSetupState, error) {
 	var out marketplaceSetupState
 	raw, err := base64.RawURLEncoding.DecodeString(sealed)
-	if err != nil || len(raw) < 32 {
+	if err != nil || len(raw) < sha256.Size {
 		return out, fmt.Errorf("invalid state")
 	}
-	payload, sig := raw[:len(raw)-32], raw[len(raw)-32:]
-	expected := hmacSHA256([]byte(secret), payload)
-	if subtle.ConstantTimeCompare(sig, expected) != 1 {
+	payload, sig := raw[:len(raw)-sha256.Size], raw[len(raw)-sha256.Size:]
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(payload)
+	if !hmac.Equal(sig, mac.Sum(nil)) {
 		return out, fmt.Errorf("invalid state signature")
 	}
 	if err := json.Unmarshal(payload, &out); err != nil {
@@ -232,33 +240,6 @@ func openMarketplaceSetupState(secret, sealed string) (marketplaceSetupState, er
 	return out, nil
 }
 
-func hmacSHA256(key, payload []byte) []byte {
-	// Local small helper avoids coupling Marketplace setup state to MCP OAuth internals.
-	blockSize := 64
-	if len(key) > blockSize {
-		h := sha256Sum(key)
-		key = h
-	}
-	k := make([]byte, blockSize)
-	copy(k, key)
-	oPad := make([]byte, blockSize)
-	iPad := make([]byte, blockSize)
-	for i := 0; i < blockSize; i++ {
-		oPad[i] = k[i] ^ 0x5c
-		iPad[i] = k[i] ^ 0x36
-	}
-	inner := append(iPad, payload...)
-	innerHash := sha256Sum(inner)
-	outer := append(oPad, innerHash...)
-	return sha256Sum(outer)
-}
-
-func sha256Sum(data []byte) []byte {
-	h := sha256.New()
-	_, _ = h.Write(data)
-	return h.Sum(nil)
-}
-
 func nextGitHubLink(header string) string {
 	for _, part := range strings.Split(header, ",") {
 		segments := strings.Split(part, ";")
@@ -266,8 +247,13 @@ func nextGitHubLink(header string) string {
 			continue
 		}
 		value := strings.TrimSpace(segments[0])
-		if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
-			return strings.TrimSuffix(strings.TrimPrefix(value, "<"), ">")
+		if !strings.HasPrefix(value, "<") || !strings.HasSuffix(value, ">") {
+			continue
+		}
+		candidate := strings.TrimSuffix(strings.TrimPrefix(value, "<"), ">")
+		parsed, err := url.Parse(candidate)
+		if err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Hostname(), "api.github.com") {
+			return candidate
 		}
 	}
 	return ""
@@ -277,7 +263,3 @@ func htmlEscape(v string) string {
 	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
 	return replacer.Replace(v)
 }
-
-// keep crypto/rand linked in this file's security-focused tests when build tags
-// trim unrelated server helpers.
-var _ = rand.Reader
