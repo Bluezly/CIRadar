@@ -1,4 +1,4 @@
-FROM golang:1.27rc2-alpine AS build
+FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY . .
 ARG VERSION=0.10.1
