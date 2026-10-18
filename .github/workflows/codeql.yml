@@ -30,7 +30,7 @@ jobs:
         with:
           go-version: "1.26.6"
           cache: true
-      - uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee
         with:
           languages: go
       - run: go build ./cmd/ciradar
